@@ -1,0 +1,21 @@
+name: tree hygiene
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # check-ignore and the reference checks need the real ignore rules
+          # and the full file list, not a partial checkout
+          fetch-depth: 1
+
+      - name: Check repository hygiene
+        run: |
+          chmod +x .github/scripts/tree-hygiene.sh
+          .github/scripts/tree-hygiene.sh

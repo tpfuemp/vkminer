@@ -1,0 +1,23 @@
+vkminer is available under the terms of the GNU General Public License,
+version 3 or (at your option) any later version. See COPYING for the full
+text of the license.
+
+vkminer reuses the pool-protocol client and option handling of cpuminer-opt,
+which descends from cpuminer (pooler) and cpuminer (Jeff Garzik). That code is
+offered under "version 2 of the License, or (at your option) any later
+version", and vkminer takes the later-version option. Files carried over from
+cpuminer-opt keep their original copyright notices and their GPLv2-or-later
+headers; the combined work is distributed under GPLv3. See AUTHORS.
+
+
+Third-party components
+
+Components vendored under third_party/ keep their own licenses, each in its
+own subdirectory:
+
+  volk                        MIT
+  VulkanMemoryAllocator       MIT
+  Vulkan-Headers              Apache-2.0 OR MIT
+
+All are compatible with GPLv3. Note that Apache-2.0 is compatible with GPLv3
+but not with GPLv2 -- one of the reasons this project is on version 3.

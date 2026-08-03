@@ -1,0 +1,17 @@
+# Store text with LF and check it out with LF everywhere, including Windows.
+# Not cosmetic: a shell script or a git hook that arrives with CRLF fails with
+# "bad interpreter", and the build runs from a Windows checkout as well as a
+# Linux one.
+* text=auto eol=lf
+
+# Shader sources are text and should diff as text.
+*.comp   text
+*.glsl   text
+*.vert   text
+*.frag   text
+
+# Never munge these.
+*.spv    binary
+*.bin    binary
+*.png    binary
+*.ico    binary

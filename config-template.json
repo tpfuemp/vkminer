@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "Copy this file to config.json and edit the copy. config.json is",
+    "git-ignored so that credentials are never committed.",
+    "",
+    "Any long command-line option may be used as a key here, without the",
+    "leading dashes. Options given on the command line override the file.",
+    "Keys beginning with an underscore are ignored, so they serve as comments.",
+    "",
+    "    vkminer -c config.json [additional options]"
+  ],
+
+  "_comment_required": "Replace all four of these. The miner will not start otherwise.",
+
+  "url":  "stratum+tcp://pool.example.com:3333",
+  "user": "YOUR_WALLET_ADDRESS.YOUR_WORKER_NAME",
+  "pass": "x",
+  "algo": "sha256d",
+
+  "_comment_devices": [
+    "GPUs to use, by index as reported by 'vkminer --devices'.",
+    "Omit or leave empty to use every device found."
+  ],
+
+  "devices": "",
+
+  "_comment_optional": "Shown with their default values; change or delete as you like.",
+
+  "api-bind":  "127.0.0.1:4048",
+  "retries":   -1,
+  "timeout":   300,
+  "benchmark": false,
+  "quiet":     false
+}

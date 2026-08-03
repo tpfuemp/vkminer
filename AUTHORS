@@ -1,0 +1,38 @@
+vkminer
+=======
+
+Maintainer
+
+  tpfue <https://github.com/tpfuemp>
+
+
+Inherited code
+--------------
+
+vkminer's Stratum client, JSON-RPC layer, option and configuration parsing,
+share accounting and logging come from cpuminer-opt, and through it from
+pooler's cpuminer and Jeff Garzik's original cpuminer. The GPU backend, the
+compute shaders and every hash implementation in this tree are new work.
+
+The authors of that inherited code, as credited by cpuminer-opt:
+
+  Jeff Garzik <jgarzik@pobox.com>
+  ArtForz
+  pooler <pooler@litecoinpool.org>
+  BlueDragon747
+  1gh
+  Neisklar
+  prettyhatemachine
+  LucasJones
+  tpruvot@github
+  elmad
+  djm34
+  palmd
+  ig0tik3d
+  Wolf0
+  Optiminer
+  Jay D Dee
+  xcouiz@gmail.com
+  Cryply
+  Colin Percival
+  Alexander Peslyak

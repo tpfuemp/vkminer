@@ -1,0 +1,8 @@
+# Paths that tree-hygiene.sh should accept even though git does not track them:
+# build outputs, generated files, and anything referenced as an example rather
+# than as a file in this repository.
+#
+# One path per line, relative to the repository root. '#' starts a comment.
+
+build-linux/vkminer
+build-win/vkminer.exe

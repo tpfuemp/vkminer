@@ -1,0 +1,25 @@
+// Toolchain check. Not used by the miner.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Compiled by every configuration so that a missing, broken or too-old GLSL
+// compiler fails the build instead of surfacing later, when it would look
+// like a bug in the first real kernel.
+
+#version 450
+
+layout(local_size_x_id = 0) in;     // specialization constant, as the real
+                                    // kernels will use for workgroup size
+
+layout(std430, set = 0, binding = 0) buffer Out {
+    uint value[];
+};
+
+layout(push_constant) uniform Push {
+    uint seed;
+} push;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    value[i] = i ^ push.seed;
+}
