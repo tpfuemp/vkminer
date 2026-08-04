@@ -12,8 +12,11 @@ extern "C" {
 #include "core/miner.h"
 }
 
+#include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "scheduler/worker.h"
+
+#include <sys/stat.h>
 
 #include <cerrno>
 #include <chrono>
@@ -99,14 +102,68 @@ void print_device_list(const std::vector<vkminer::DeviceInfo> &devices)
 {
     std::printf("%zu device(s) found by the %s backend:\n\n",
                 devices.size(), g_backend->name());
+
+    bool any_cpu = false;
+
     for (const vkminer::DeviceInfo &d : devices) {
-        std::printf("  %2d  %s\n", d.index, d.name.c_str());
+        // The device type goes on the first line, next to the name, because a
+        // software rasterizer is often named after the CPU it runs on and
+        // reads like hardware otherwise.
+        std::printf("  %2d  %s [%s]\n", d.index, d.name.c_str(),
+                    vkminer::device_kind_name(d.kind));
+        // Every line below is omitted when the backend did not fill it in,
+        // rather than printed as a zero: a device reporting no subgroup size
+        // and a backend that does not know the subgroup size are different
+        // things, and only one of them is a reason to file a bug.
         if (!d.driver.empty())
-            std::printf("      driver %s\n", d.driver.c_str());
+            std::printf("      driver     %s\n", d.driver.c_str());
+        if (d.api_version)
+            std::printf("      vulkan     %s\n",
+                        vkminer::version_string(d.api_version).c_str());
+        if (d.vendor_id)
+            std::printf("      ids        vendor 0x%04x, device 0x%04x\n",
+                        d.vendor_id, d.device_id);
         if (d.memory)
-            std::printf("      memory %.1f GiB\n", d.memory / 1073741824.0);
+            std::printf("      memory     %.1f GiB device-local\n",
+                        d.memory / 1073741824.0);
+        if (d.subgroup_size)
+            std::printf("      subgroup   %u invocations%s\n", d.subgroup_size,
+                        d.subgroup_ballot ? ", ballot" : "");
+        if (d.max_invocations)
+            std::printf("      workgroup  %u invocations, %u wide, %u groups\n",
+                        d.max_invocations, d.max_workgroup_size,
+                        d.max_workgroup_count);
+        if (d.api_version)
+            std::printf("      integers   %s\n",
+                        (!d.int64 && !d.int16 && !d.int8) ? "32-bit only"
+                        : d.int64 && d.int16 && d.int8    ? "64, 32, 16, 8-bit"
+                        : d.int64                         ? "64 and 32-bit"
+                                                          : "32-bit and narrower");
+
+        any_cpu = any_cpu || d.kind == vkminer::DeviceKind::Cpu;
     }
+
+    // What is worth saying about a CPU device depends on which backend found
+    // it, so the backend says it rather than this function guessing.
+    const char *caveat = g_backend->device_caveat();
+    if (any_cpu && caveat)
+        std::printf("\n%s\n", caveat);
+
     std::printf("\nSelect with --devices, e.g. --devices 0,1\n");
+}
+
+std::unique_ptr<vkminer::ComputeBackend> make_backend(const char *name)
+{
+    if (!name || !*name || !std::strcmp(name, "vulkan"))
+        return vkminer::make_vulkan_backend();
+    if (!std::strcmp(name, "cpu"))
+        return vkminer::make_cpu_backend();
+    if (!std::strcmp(name, "null"))
+        return vkminer::make_null_backend();
+
+    applog(LOG_ERR, "--backend: no backend called '%s'; "
+                    "it is 'vulkan', 'cpu' or 'null'", name);
+    return nullptr;
 }
 
 // "0,2,3" -> {0, 2, 3}. An empty or absent list means every device.
@@ -155,7 +212,9 @@ int main(int argc, char *argv[])
 
     // The backend comes up before the option checks that depend on it, so
     // that --device-list works without a pool, an algorithm or a wallet.
-    g_backend = vkminer::make_null_backend();
+    g_backend = make_backend(opt_backend);
+    if (!g_backend)
+        return 1;
     if (!g_backend->init()) {
         applog(LOG_ERR, "No usable compute device found");
         return 1;
@@ -171,6 +230,30 @@ int main(int argc, char *argv[])
         show_usage_and_exit(1);
     }
 
+    // Checked here rather than in the option parser: the parser accepts what
+    // the inherited code has always accepted, and what this miner can actually
+    // run is a shorter list. Finding out now costs a message; finding out from
+    // the worker costs a pool connection and a job first.
+    if (!vkminer::algorithm_exists(opt_algo)) {
+        applog(LOG_ERR, "--algo: no algorithm called '%s'; this build has %s",
+               opt_algo, vkminer::algorithm_names().c_str());
+        return 1;
+    }
+
+    // A typo here would otherwise mean "use the built-in shaders after all",
+    // reported once per worker and easy to read past. --algo-dir is only ever
+    // set deliberately, so it not existing is a mistake worth stopping for.
+    if (opt_algo_dir && *opt_algo_dir) {
+        struct stat st;
+        if (stat(opt_algo_dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            applog(LOG_ERR, "--algo-dir: '%s' is not a directory", opt_algo_dir);
+            return 1;
+        }
+        applog(LOG_WARNING, "Loading shaders from %s. Kernels outside the "
+                            "binary are for development, not for mining.",
+               opt_algo_dir);
+    }
+
     if (!opt_benchmark && !short_url) {
         std::fprintf(stderr, "%s: no URL supplied\n", argv[0]);
         show_usage_and_exit(1);
@@ -179,11 +262,14 @@ int main(int argc, char *argv[])
     if (!select_devices(g_backend->devices(), g_device_map))
         return 1;
 
-    // One worker per selected device unless the user said otherwise. More
-    // workers than devices is legal -- they round-robin -- because a device
-    // that stalls between dispatches can be kept busier by a second queue.
+    // The backend decides the default, because what a worker is differs
+    // between them: on a GPU it is a queue to keep fed, one per device, and
+    // more than one is legal because a device that stalls between dispatches
+    // can be kept busier by a second; on the CPU backend the worker is the
+    // thing that hashes, so the default is one per core.
     if (!opt_n_threads_set)
-        opt_n_threads = static_cast<int>(g_device_map.size());
+        opt_n_threads =
+            g_backend->preferred_workers(static_cast<int>(g_device_map.size()));
     if (opt_n_threads < 1)
         opt_n_threads = 1;
 

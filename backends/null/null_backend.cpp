@@ -72,10 +72,10 @@ public:
     const std::vector<DeviceInfo> &devices() const override { return devices_; }
 
     std::unique_ptr<Kernel> create_kernel(int device_index,
-                                          const char *algo) override
+                                          const KernelSpec &spec) override
     {
         // Any algorithm, because it implements none of them.
-        (void)algo;
+        (void)spec;
         if (device_index != 0)
             return nullptr;
         return std::unique_ptr<Kernel>(new NullKernel());

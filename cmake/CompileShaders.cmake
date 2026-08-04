@@ -4,7 +4,12 @@
 #     add_spirv_shaders(<target>
 #                       SOURCES     <a.comp> [<b.comp> ...]
 #                       [TARGET_ENV <env>]     # default vulkan1.1
-#                       [OUTPUT_DIR <dir>])    # default <builddir>/spv
+#                       [OUTPUT_DIR <dir>]     # default <builddir>/spv
+#                       [EMBED      <file.cpp>])
+#
+# EMBED additionally generates a C++ source file holding the compiled modules
+# as arrays, so that the binary carries its own kernels. The variable
+# <target>_EMBED_SOURCE is set in the caller's scope to that file.
 #
 # Shaders are compiled here, never at run time: the miner must not depend on
 # a shader compiler being installed on the mining machine.
@@ -30,7 +35,7 @@ else()
 endif()
 
 function(add_spirv_shaders target)
-    cmake_parse_arguments(ARG "" "TARGET_ENV;OUTPUT_DIR" "SOURCES" ${ARGN})
+    cmake_parse_arguments(ARG "" "TARGET_ENV;OUTPUT_DIR;EMBED" "SOURCES" ${ARGN})
 
     if(NOT ARG_SOURCES)
         message(FATAL_ERROR "add_spirv_shaders(${target}): no SOURCES given")
@@ -43,6 +48,7 @@ function(add_spirv_shaders target)
     endif()
 
     set(outputs "")
+    set(names "")
     foreach(src IN LISTS ARG_SOURCES)
         get_filename_component(src_abs "${src}" ABSOLUTE)
         get_filename_component(name "${src}" NAME_WE)
@@ -73,7 +79,27 @@ function(add_spirv_shaders target)
             COMMENT "SPIR-V ${name}.spv (${ARG_TARGET_ENV})"
             VERBATIM)
         list(APPEND outputs "${out}")
+        list(APPEND names "${name}")
     endforeach()
+
+    if(ARG_EMBED)
+        get_filename_component(embed_dir "${ARG_EMBED}" DIRECTORY)
+        add_custom_command(
+            OUTPUT  "${ARG_EMBED}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${embed_dir}"
+            COMMAND ${CMAKE_COMMAND}
+                    "-DOUTPUT=${ARG_EMBED}"
+                    "-DNAMES=${names}"
+                    "-DFILES=${outputs}"
+                    "-DCOMPILER=${VKMINER_SHADER_COMPILER_KIND}"
+                    -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedSpirv.cmake"
+            DEPENDS ${outputs}
+                    "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedSpirv.cmake"
+            COMMENT "Embedding SPIR-V into ${ARG_EMBED}"
+            VERBATIM)
+        list(APPEND outputs "${ARG_EMBED}")
+        set(${target}_EMBED_SOURCE "${ARG_EMBED}" PARENT_SCOPE)
+    endif()
 
     add_custom_target(${target} ALL DEPENDS ${outputs})
     set_property(TARGET ${target} PROPERTY VKMINER_SPIRV_OUTPUTS "${outputs}")

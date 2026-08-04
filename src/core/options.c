@@ -104,6 +104,11 @@ bool opt_n_threads_set = false;
 char *opt_devices = NULL;
 bool opt_device_list = false;
 bool opt_vk_validate = false;
+
+/* Which compute backend to use. NULL means the default, which is Vulkan; the
+ * others exist so that everything around the device -- the pool, the
+ * scheduler, the share path -- can be exercised on a machine with no GPU. */
+char *opt_backend = NULL;
 char *opt_algo_dir = NULL;
 
 /* The API server binds loopback by default: it is a status feed, not an
@@ -143,11 +148,16 @@ Options:\n\
       --devices=LIST    comma separated indices of the GPUs to mine on, as\n\
                         numbered by --device-list (default: all of them)\n\
       --device-list     list the Vulkan devices found and exit\n\
+      --backend=NAME    compute backend: vulkan (default), cpu, which runs\n\
+                        each algorithm's reference implementation and is the\n\
+                        control the GPU is checked against, or null, which\n\
+                        finds no solutions and is only for testing\n\
       --vk-validate     enable the Vulkan validation layers (slow; for\n\
                         debugging a backend, not for mining)\n\
       --algo-dir=DIR    load algorithm shaders from DIR instead of the\n\
                         installed location\n\
-  -t, --threads=N       number of miner workers (default: one per device)\n\
+  -t, --threads=N       number of miner workers (default: one per device, or\n\
+                        one per core on the cpu backend)\n\
 \n\
       --time-limit=N    exit after N seconds\n\
   -T, --timeout=N       network timeout in seconds (default: 300)\n\
@@ -207,6 +217,7 @@ static struct option const options[] = {
    { "algo-dir",          1, NULL, 1043 },
    { "api-bind",          1, NULL, 'b' },
    { "api-remote",        0, NULL, 1030 },
+   { "backend",           1, NULL, 1044 },
    { "background",        0, NULL, 'B' },
    { "bell",              0, NULL, 1031 },
    { "benchmark",         0, NULL, 1005 },
@@ -600,6 +611,11 @@ void parse_arg( int key, char *arg )
 
       case 1042: // vk-validate
          opt_vk_validate = true;
+         break;
+
+      case 1044: // backend
+         free( opt_backend );
+         opt_backend = strdup( arg );
          break;
 
       case 'V':  // version

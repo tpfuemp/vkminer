@@ -396,6 +396,7 @@ extern int  opt_api_remote;
 extern char *opt_devices;      /* comma separated indices, empty means all */
 extern bool opt_device_list;   /* enumerate and exit */
 extern bool opt_vk_validate;   /* Vulkan validation layers */
+extern char *opt_backend;      /* backend name, NULL means the default */
 extern char *opt_algo_dir;     /* where to load shaders from */
 extern uint32_t submitted_share_count;
 extern uint32_t stale_share_count;

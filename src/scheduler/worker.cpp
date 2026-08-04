@@ -9,6 +9,7 @@
 // this thread is looking or not, so the loop is written around the latency of
 // a dispatch rather than around the cost of a hash.
 
+#include "algorithms/registry.h"
 #include "backends/backend.h"
 
 extern "C" {
@@ -57,9 +58,24 @@ extern "C" void *miner_thread(void *userdata)
 {
     struct thr_info *mythr = static_cast<struct thr_info *>(userdata);
     const int thr_id = mythr->id;
+    const int device_index = g_worker_device[thr_id];
+
+    // One instance per worker rather than one shared between them. An
+    // algorithm holds no per-job state, so sharing would work today; a worker
+    // that owns its own cannot be the thing that stops being true.
+    std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(opt_algo);
+    if (!algo) {
+        applog(LOG_ERR, "Worker %d: no algorithm called '%s'", thr_id, opt_algo);
+        return nullptr;
+    }
+
+    // The algorithm chooses what to run from what the device can do; the
+    // backend reads the result without asking what it computes.
+    const vkminer::KernelSpec spec =
+        algo->kernel(g_backend->devices()[device_index]);
 
     std::unique_ptr<vkminer::Kernel> kernel =
-        g_backend->create_kernel(g_worker_device[thr_id], opt_algo);
+        g_backend->create_kernel(device_index, spec);
     if (!kernel) {
         applog(LOG_ERR, "Worker %d: backend '%s' has no kernel for '%s'",
                thr_id, g_backend->name(), opt_algo);
@@ -132,8 +148,32 @@ extern "C" void *miner_thread(void *userdata)
         // job is checked against the job it was launched under, not the
         // current one. submit_solution drops it if the epoch has moved on.
         for (int i = 0; i < count; i++) {
+            // Every candidate is hashed again on the host before it is
+            // submitted. There is no fast path around this and there will not
+            // be one: a device that reports a share it did not find costs the
+            // pool's trust in this miner, and the cost of re-hashing one nonce
+            // is invisible next to the batch that produced it.
+            uint32_t hash[8];
+            if (!algo->verify(work.data, found[i].nonce, work.target, hash)) {
+                applog(LOG_WARNING,
+                       "Worker %d: device %d reported nonce %08x, which does "
+                       "not meet the target -- share dropped",
+                       thr_id, device_index, found[i].nonce);
+                continue;
+            }
+
+            // It is a real share, but the device's own arithmetic disagrees
+            // with the host's. The share is still submitted, because the host
+            // just proved it; the mismatch is logged because it means the
+            // kernel is wrong in a way that happened not to matter this time.
+            if (memcmp(hash, found[i].hash, sizeof hash) != 0)
+                applog(LOG_WARNING,
+                       "Worker %d: device %d returned a different hash for "
+                       "nonce %08x than the host computes",
+                       thr_id, device_index, found[i].nonce);
+
             work.data[STD_NONCE_INDEX] = found[i].nonce;
-            submit_solution(&work, found[i].hash, mythr);
+            submit_solution(&work, hash, mythr);
         }
 
         nonce += batch;

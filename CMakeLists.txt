@@ -190,6 +190,20 @@ if(WIN32)
     target_link_libraries(vkminer_inherited PUBLIC ws2_32)
 endif()
 
+# --------------------------------------------------------------- algorithms
+#
+# The other axis. Nothing in here knows what a Vulkan device is; it holds each
+# algorithm's scalar reference, the shader it wants, and the table that turns
+# an --algo name into one of them.
+add_library(vkminer_algorithms STATIC
+    algorithms/algorithm.cpp
+    algorithms/registry.cpp
+    algorithms/sha256d/sha256d.cpp)
+
+target_include_directories(vkminer_algorithms PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(vkminer_algorithms PUBLIC vkminer_inherited)
+target_link_libraries(vkminer_algorithms PRIVATE vkminer_sha256 vkminer_warnings)
+
 # ------------------------------------------------------------------ shaders
 if(VKMINER_BUILD_SHADERS)
     include(CompileShaders)
@@ -197,19 +211,72 @@ if(VKMINER_BUILD_SHADERS)
     # by the miner; it exists so that a broken or missing GLSL toolchain is a
     # build failure here rather than a surprise when the first real kernel is
     # written.
+    #
+    # It is also what the embedding machinery is proven on until a real kernel
+    # exists: a build that can compile a shader but cannot get it into the
+    # binary is a build that fails at the last possible moment otherwise.
     add_spirv_shaders(vkminer_shader_toolchain_check
-                      SOURCES shaders/toolchain-check.comp)
+                      SOURCES shaders/toolchain-check.comp
+                      EMBED "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_spirv.cpp")
+
+    # The kernels the binary carries, and the --algo-dir override that replaces
+    # one of them at run time.
+    add_library(vkminer_shaders STATIC
+        shaders/shader_source.cpp
+        "${vkminer_shader_toolchain_check_EMBED_SOURCE}")
+    add_dependencies(vkminer_shaders vkminer_shader_toolchain_check)
+    target_include_directories(vkminer_shaders PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(vkminer_shaders PUBLIC vkminer_inherited)
+    target_link_libraries(vkminer_shaders PRIVATE vkminer_warnings)
+
+    # Declared above this block, so it is linked here rather than there: an
+    # algorithm is what asks for its own SPIR-V.
+    target_link_libraries(vkminer_algorithms PUBLIC vkminer_shaders)
+
+    if(VKMINER_BUILD_TESTS)
+        add_spirv_shaders(vkminer_shader_vk_smoke
+                          SOURCES shaders/vk-smoke.comp)
+        set(VKMINER_VK_SMOKE_SPV "${CMAKE_CURRENT_BINARY_DIR}/spv/vk-smoke.spv")
+    endif()
 endif()
+
+# ---------------------------------------------------------------------- vma
+#
+# VulkanMemoryAllocator's implementation, in a library of its own so that it is
+# compiled once and so that upstream's warnings are upstream's business. The
+# header it includes decides how the allocator is configured; see vma.h.
+add_library(vkminer_vma STATIC backends/vulkan/vma_impl.cpp)
+target_include_directories(vkminer_vma PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(vkminer_vma PUBLIC vma volk)
+
+# ----------------------------------------------------------------- backends
+#
+# A library rather than sources of the executable, so that a test can drive a
+# real device without linking the miner's main().
+add_library(vkminer_backends STATIC
+    backends/backend.cpp
+    backends/cpu/cpu_backend.cpp
+    backends/null/null_backend.cpp
+    backends/vulkan/command_ring.cpp
+    backends/vulkan/pipeline_cache.cpp
+    backends/vulkan/vulkan_backend.cpp
+    backends/vulkan/vulkan_common.cpp
+    backends/vulkan/vulkan_device.cpp
+    backends/vulkan/vulkan_pipeline.cpp)
+
+target_include_directories(vkminer_backends PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(vkminer_backends PUBLIC
+    volk vkminer_vma vkminer_inherited vkminer_algorithms)
+target_link_libraries(vkminer_backends PRIVATE vkminer_warnings)
 
 # ------------------------------------------------------------------- binary
 add_executable(vkminer
     src/main.cpp
-    src/scheduler/worker.cpp
-    backends/null/null_backend.cpp)
+    src/scheduler/worker.cpp)
 
 target_include_directories(vkminer PRIVATE src "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer PRIVATE
-    volk vkminer_warnings vkminer_inherited Threads::Threads)
+    vkminer_backends vkminer_warnings vkminer_inherited Threads::Threads)
 target_compile_definitions(vkminer PRIVATE
     VKMINER_VERSION="${PROJECT_VERSION}-dev")
 

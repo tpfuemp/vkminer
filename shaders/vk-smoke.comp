@@ -1,0 +1,31 @@
+// Round-trip check for the Vulkan backend. Not used by the miner.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Writes something the host can predict for every invocation, so that a wrong
+// dispatch size, a wrong specialization constant, a push constant that did not
+// arrive, or a readback that raced the fence all show up as a specific wrong
+// value rather than as a plausible-looking one. The bias is not decoration:
+// with `value[i] = i`, a buffer that was never written and a buffer written
+// with a zero push constant are the same buffer.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, set = 0, binding = 0) writeonly buffer Out {
+    uint value[];
+};
+
+layout(push_constant) uniform Push {
+    uint count;   // invocations with work to do; the rest are the padding of
+                  // the last workgroup and must not write
+    uint bias;
+} push;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.count)
+        return;
+    value[i] = i + push.bias;
+}
