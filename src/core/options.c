@@ -105,6 +105,11 @@ char *opt_devices = NULL;
 bool opt_device_list = false;
 bool opt_vk_validate = false;
 
+/* Run the known-answer vectors and exit. The same check the miner makes at
+ * startup regardless; the option exists so that a machine can be checked
+ * without a pool, a wallet or a network. */
+bool opt_self_test = false;
+
 /* Which compute backend to use. NULL means the default, which is Vulkan; the
  * others exist so that everything around the device -- the pool, the
  * scheduler, the share path -- can be exercised on a machine with no GPU. */
@@ -156,6 +161,10 @@ Options:\n\
                         debugging a backend, not for mining)\n\
       --algo-dir=DIR    load algorithm shaders from DIR instead of the\n\
                         installed location\n\
+      --self-test       check that this build reproduces published block\n\
+                        hashes on every selected device, then exit. The same\n\
+                        check runs before every mining session anyway; this\n\
+                        runs it without needing a pool\n\
   -t, --threads=N       number of miner workers (default: one per device, or\n\
                         one per core on the cpu backend)\n\
 \n\
@@ -245,6 +254,7 @@ static struct option const options[] = {
    { "retries",           1, NULL, 'r' },
    { "retry-pause",       1, NULL, 1025 },
    { "scantime",          1, NULL, 's' },
+   { "self-test",         0, NULL, 1045 },
    { "stratum-keepalive", 0, NULL, 1029 },
 #ifdef HAVE_SYSLOG_H
    { "syslog",            0, NULL, 'S' },
@@ -611,6 +621,10 @@ void parse_arg( int key, char *arg )
 
       case 1042: // vk-validate
          opt_vk_validate = true;
+         break;
+
+      case 1045: // self-test
+         opt_self_test = true;
          break;
 
       case 1044: // backend

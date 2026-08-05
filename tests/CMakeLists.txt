@@ -13,6 +13,13 @@ target_link_libraries(sha256d_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME sha256d_kat COMMAND sha256d_kat)
 
+# One level up again: not whether a header hashes correctly, but whether a
+# mining.notify turns into the right header in the first place.
+add_executable(stratum_header_kat stratum_header_kat.cpp)
+target_link_libraries(stratum_header_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME stratum_header_kat COMMAND stratum_header_kat)
+
 # Only exists where shaders were compiled, because there is nothing to embed
 # otherwise. No device needed: this is about which bytes get loaded, not about
 # running them.
@@ -43,4 +50,16 @@ if(VKMINER_VK_SMOKE_SPV)
 
     add_test(NAME vk_smoke COMMAND vk_smoke)
     set_tests_properties(vk_smoke PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# The shader against the scalar reference, over a nonce range. Needs the
+# embedded SPIR-V, so it exists only where the shaders were compiled; it finds
+# its own device and SKIPs when there is none. The generous timeout is for the
+# software rasterizer, which is the only device some build machines have.
+if(TARGET vkminer_shaders)
+    add_executable(diff_test diff_test.cpp)
+    target_link_libraries(diff_test PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    add_test(NAME diff_test COMMAND diff_test sha256d 100000)
+    set_tests_properties(diff_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()

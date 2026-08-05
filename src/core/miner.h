@@ -396,6 +396,7 @@ extern int  opt_api_remote;
 extern char *opt_devices;      /* comma separated indices, empty means all */
 extern bool opt_device_list;   /* enumerate and exit */
 extern bool opt_vk_validate;   /* Vulkan validation layers */
+extern bool opt_self_test;     /* run the known-answer vectors and exit */
 extern char *opt_backend;      /* backend name, NULL means the default */
 extern char *opt_algo_dir;     /* where to load shaders from */
 extern uint32_t submitted_share_count;
@@ -473,6 +474,11 @@ void   applog_hash(void *hash);
 void   applog_hex(void *data, int len);
 void   restart_threads(void);
 void   proper_exit(int reason);
+
+/* Installs a function to run at the top of proper_exit, before exit() starts
+   running destructors on the calling thread. The miner uses it to stop the
+   device workers and give their devices back, in that order. */
+void   set_exit_hook(void (*hook)(void));
 
 json_t *json_load_url(char* cfg_url, json_error_t *err);
 json_t *json_rpc_call( CURL *curl, const char *url, const char *userpass,

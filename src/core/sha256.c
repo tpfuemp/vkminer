@@ -134,3 +134,20 @@ void sha256d( void *hash, const void *data, size_t len )
    sha256_full( first, data, len );
    sha256_full( hash, first, 32 );
 }
+
+void sha256_midstate( uint32_t state[8], const uint32_t words[16] )
+{
+   uint8_t block[64];
+   int i;
+
+   for ( i = 0; i < 16; i++ )
+   {
+      block[ i*4     ] = (uint8_t)( words[i] >> 24 );
+      block[ i*4 + 1 ] = (uint8_t)( words[i] >> 16 );
+      block[ i*4 + 2 ] = (uint8_t)( words[i] >>  8 );
+      block[ i*4 + 3 ] = (uint8_t)( words[i]       );
+   }
+
+   memcpy( state, IV, sizeof IV );
+   sha256_transform( state, block );
+}

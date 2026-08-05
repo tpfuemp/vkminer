@@ -5,12 +5,17 @@
 #     .github/scripts/tree-hygiene.sh
 #
 #   1. no tracked file is covered by an ignore rule
-#   2. no relative link or "see <file>" reference points at a path git does not
-#      track — dangling references rot silently and mislead readers.
+#   2. no relative link or "see <file>" reference points at a path that would
+#      not be published — dangling references rot silently and mislead readers.
 #      Vendored code is exempt: its comments point into the upstream project's
 #      own documentation tree, which is not vendored along with the sources.
 #   3. no machine-local details: private-range addresses, ssh targets, absolute
 #      home paths
+#
+# Checks 2 and 3 look at everything git would publish, which is the tracked
+# files plus the untracked ones no ignore rule covers. Scanning only what is
+# already committed would clear a file at every moment except the one that
+# matters, the commit that first adds it.
 #
 # Add a trailing  # hygiene-ok  to a line to allow a deliberate occurrence, and
 # list generated or external paths in allowed-paths.txt.
@@ -30,14 +35,14 @@ fail() { printf '\033[1;31mFAIL\033[0m  %s\n' "$*" >&2; status=1; }
 pass() { printf '\033[1;32mok\033[0m    %s\n' "$*"; }
 detail() { printf '        %s\n' "$*" >&2; }
 
-mapfile -t TRACKED < <(git ls-files)
-if [ "${#TRACKED[@]}" -eq 0 ]; then
-    echo "no tracked files yet — nothing to check"
+mapfile -t PUBLISHED < <(git ls-files --cached --others --exclude-standard)
+if [ "${#PUBLISHED[@]}" -eq 0 ]; then
+    echo "nothing to publish yet — nothing to check"
     exit 0
 fi
 
-declare -A IS_TRACKED=()
-for f in "${TRACKED[@]}"; do IS_TRACKED["$f"]=1; done
+declare -A IS_PUBLISHED=()
+for f in "${PUBLISHED[@]}"; do IS_PUBLISHED["$f"]=1; done
 
 declare -A ALLOWED=()
 if [ -f "$ALLOW_FILE" ]; then
@@ -88,18 +93,18 @@ resolve_and_check() {
     base=$(dirname "$src")
     resolved=$(realpath -m --relative-to=. "$base/$ref" 2>/dev/null) || return
     [ -n "${ALLOWED[$resolved]:-}" ] && return
-    [ -n "${IS_TRACKED[$resolved]:-}" ] && return
+    [ -n "${IS_PUBLISHED[$resolved]:-}" ] && return
 
-    # a reference to a tracked directory is fine
-    for t in "${TRACKED[@]}"; do
+    # a reference to a directory that holds published files is fine
+    for t in "${PUBLISHED[@]}"; do
         case "$t" in "$resolved"/*) return ;; esac
     done
 
-    fail "$src references an untracked path: $ref"
+    fail "$src references a path that would not be published: $ref"
     dangling=1
 }
 
-for f in "${TRACKED[@]}"; do
+for f in "${PUBLISHED[@]}"; do
     scannable "$f" || continue
     # Upstream sources describe their own tree, not this one. Listing every
     # such reference in allowed-paths.txt would mean editing that file after
@@ -117,7 +122,7 @@ for f in "${TRACKED[@]}"; do
     done < <(grep -oiE '\bsee +[A-Za-z0-9_./-]+\.(md|txt|rst)\b' "$f" 2>/dev/null \
              | awk '{print $2}')
 done
-[ "$dangling" -eq 0 ] && pass "all relative references resolve to tracked paths"
+[ "$dangling" -eq 0 ] && pass "all relative references resolve to published paths"
 
 # ------------------------------------------------------------------ check 3
 # Machine-local details.
@@ -135,7 +140,7 @@ LOCAL_PATTERNS=(
 LOCAL_RE=$(IFS='|'; printf '%s' "${LOCAL_PATTERNS[*]}")
 
 leaked=0
-for f in "${TRACKED[@]}"; do
+for f in "${PUBLISHED[@]}"; do
     scannable "$f" || continue
     hits=$(grep -nE -- "$LOCAL_RE" "$f" 2>/dev/null | grep -v 'hygiene-ok' || true)
     if [ -n "$hits" ]; then
@@ -144,6 +149,6 @@ for f in "${TRACKED[@]}"; do
         leaked=1
     fi
 done
-[ "$leaked" -eq 0 ] && pass "no machine-local details in tracked files"
+[ "$leaked" -eq 0 ] && pass "no machine-local details in the files git would publish"
 
 exit "$status"

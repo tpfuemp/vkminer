@@ -9,6 +9,7 @@
 #define VKMINER_BACKENDS_VULKAN_BACKEND_H__
 
 #include "backends/backend.h"
+#include "backends/vulkan/pipeline_cache.h"
 #include "backends/vulkan/vulkan_device.h"
 
 #include <vector>
@@ -52,6 +53,7 @@ private:
     std::vector<DeviceInfo> devices_;
     std::vector<uint32_t> compute_family_;             // parallel to devices_
     std::vector<std::unique_ptr<VulkanDevice>> open_;  // parallel to devices_
+    std::vector<std::unique_ptr<PipelineCache>> caches_;  // and so is this
 };
 
 }  // namespace vkminer

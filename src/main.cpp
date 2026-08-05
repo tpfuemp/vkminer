@@ -15,6 +15,7 @@ extern "C" {
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "scheduler/worker.h"
+#include "self_test.h"
 
 #include <sys/stat.h>
 
@@ -52,6 +53,9 @@ namespace {
 
 std::unique_ptr<vkminer::ComputeBackend> g_backend;
 std::vector<int> g_device_map;
+
+// How long release_devices waits for the workers to let go of their devices.
+constexpr auto kStopGrace = std::chrono::seconds(5);
 
 void show_credits()
 {
@@ -199,6 +203,50 @@ bool select_devices(const std::vector<vkminer::DeviceInfo> &devices,
 
 }  // namespace
 
+// Give the devices back before the process ends.
+//
+// exit() runs destructors on the thread that called it while every other
+// thread is still running. The workers are mid-dispatch on those devices, and
+// a Vulkan dispatch cannot be recalled -- so destroying the backend underneath
+// them is a use-after-free inside the driver, which on Ctrl-C is a segfault
+// instead of an exit. The order that works is the reverse of the order things
+// were brought up in: stop the workers, wait until they have handed their
+// kernels back, and only then destroy the backend.
+//
+// Called from proper_exit, so it covers every way out of the process rather
+// than only the signal. Outside the anonymous namespace because the inherited
+// C has to be able to link against it.
+extern "C" void release_devices(void)
+{
+    if (!g_backend)
+        return;
+
+    worker_request_stop();
+
+    // One batch is the whole wait, and batches are sized in tens of
+    // milliseconds. The bound is for a device that has already stopped
+    // answering: a miner that will not quit when asked is worse than one that
+    // leaves a device object behind, which is what process exit does to it
+    // anyway.
+    const auto deadline = std::chrono::steady_clock::now() + kStopGrace;
+    while (worker_count() > 0 && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const int stuck = worker_count();
+    if (stuck > 0) {
+        applog(LOG_WARNING, "%d worker(s) still on a device after %ds; "
+                            "exiting without closing it",
+               stuck, static_cast<int>(kStopGrace.count()));
+        // Deliberately leaked. The driver is still being called from another
+        // thread, and freeing it out from under that thread is precisely the
+        // crash this function exists to prevent.
+        (void)g_backend.release();
+        return;
+    }
+
+    g_backend.reset();
+}
+
 int main(int argc, char *argv[])
 {
     pthread_mutex_init(&applog_lock, nullptr);
@@ -219,6 +267,10 @@ int main(int argc, char *argv[])
         applog(LOG_ERR, "No usable compute device found");
         return 1;
     }
+
+    // From here on there is a device to give back, and several of the ways out
+    // of this process go through proper_exit rather than through main.
+    set_exit_hook(release_devices);
 
     if (opt_device_list) {
         print_device_list(g_backend->devices());
@@ -254,13 +306,34 @@ int main(int argc, char *argv[])
                opt_algo_dir);
     }
 
-    if (!opt_benchmark && !short_url) {
+    if (!opt_benchmark && !opt_self_test && !short_url) {
         std::fprintf(stderr, "%s: no URL supplied\n", argv[0]);
         show_usage_and_exit(1);
     }
 
     if (!select_devices(g_backend->devices(), g_device_map))
         return 1;
+
+    // Before curl, before the stratum thread, before anything leaves this
+    // machine. A miner that hashes wrongly should find that out by itself
+    // rather than by having a pool reject a thousand shares, and the check
+    // costs a few hundred nonces per device.
+    //
+    // The null backend is exempt because it finds nothing by design; there is
+    // no result of its to be right or wrong about.
+    if (std::strcmp(g_backend->name(), "null") != 0) {
+        if (!vkminer::self_test(*g_backend, g_device_map, opt_algo)) {
+            applog(LOG_ERR, "Self-test failed. Not connecting to a pool: "
+                            "shares from this build would be rejected.");
+            return 1;
+        }
+    } else if (opt_self_test) {
+        applog(LOG_WARNING, "The null backend computes nothing, so there is "
+                            "nothing to self-test");
+    }
+
+    if (opt_self_test)
+        return 0;
 
     // The backend decides the default, because what a worker is differs
     // between them: on a GPU it is a queue to keep fed, one per device, and
@@ -431,7 +504,7 @@ int main(int argc, char *argv[])
     while (!g_shutdown) {
         if (pthread_kill(thr_info[work_thr_id].pth, 0) != 0) {
             applog(LOG_WARNING, "workio thread dead, exiting.");
-            return 0;
+            proper_exit(0);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }

@@ -86,9 +86,27 @@ void restart_threads(void)
       applog( LOG_INFO, "Threads restarted for new work.");
 }
 
+/* Run just before the process ends, if anything installed one.
+
+   This file is inherited code that knows nothing about devices, and the tests
+   link it without linking main, so the teardown it needs cannot be called by
+   name from here. The miner installs a hook; a test installs nothing and gets
+   the behaviour this code always had. */
+static void (*exit_hook)(void) = NULL;
+
+void set_exit_hook(void (*hook)(void))
+{
+   exit_hook = hook;
+}
+
 void proper_exit(int reason)
 {
    if (opt_debug) applog(LOG_INFO,"Program exit");
+
+   /* Before exit(), which runs destructors on this thread while the other
+      threads are still running. The workers are the ones holding devices. */
+   if (exit_hook) exit_hook();
+
 #ifdef WIN32
 	if (opt_background) {
 		HWND hcon = GetConsoleWindow();

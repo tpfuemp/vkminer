@@ -91,6 +91,19 @@ struct KernelSpec {
     const Algorithm *algorithm = nullptr;
 };
 
+// What one dispatch is, in the only terms a backend has: a job, a slice of the
+// nonce space, and the room there is for answers. The backend fills this in and
+// hands it to the algorithm, which turns it into the bytes its shader declared
+// -- a midstate, a rearranged target, whatever that kernel wants. Neither side
+// has to know what the other made of it.
+struct Dispatch {
+    const uint32_t *header = nullptr;  // struct work's words, as the pool sent them
+    const uint32_t *target = nullptr;  // 8 words, as fulltest() compares them
+    uint32_t nonce_start = 0;
+    uint32_t count = 0;
+    uint32_t capacity = 0;             // candidates the result buffer holds
+};
+
 // One algorithm compiled for one device. Owns whatever the backend needed to
 // allocate to run it, and releases it on destruction.
 class Kernel {

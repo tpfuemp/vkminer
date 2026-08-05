@@ -9,6 +9,21 @@ extern "C" {
 
 namespace vkminer {
 
+size_t Algorithm::prepare(const Dispatch &dispatch, void *out,
+                          size_t capacity) const
+{
+    (void)dispatch;
+    (void)out;
+    (void)capacity;
+    return 0;
+}
+
+size_t Algorithm::known_answers(const KnownAnswer **out) const
+{
+    *out = nullptr;
+    return 0;
+}
+
 bool Algorithm::verify(const uint32_t *header, uint32_t nonce,
                        const uint32_t *target, uint32_t out[8]) const
 {

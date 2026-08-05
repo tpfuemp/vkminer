@@ -30,6 +30,21 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# On mingw, find a library's static archive before its import library.
+#
+# The cross toolchain file links -static so that the .exe can be copied to a
+# Windows machine on its own. That covers what the compiler driver adds, and
+# nothing else: CMake's mingw platform searches .dll.a first, and a -l flag
+# coming from a dependency's .pc file is resolved by find_library before it
+# reaches the link line. So libcurl's -lz became an absolute path to
+# libz.dll.a, the link stayed dynamic in that one spot, and the binary failed
+# to start with "zlib1.dll is missing" on every machine that did not happen to
+# have one. This has to be set here and not in the toolchain file, which is
+# read before Platform/Windows-GNU.cmake assigns the same variable.
+if(MINGW)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a" ".dll.a" ".lib")
+endif()
+
 option(VKMINER_BUILD_SHADERS "Compile the GLSL shaders to SPIR-V" ON)
 option(VKMINER_BUILD_TESTS "Build the correctness tests" ON)
 
@@ -207,24 +222,25 @@ target_link_libraries(vkminer_algorithms PRIVATE vkminer_sha256 vkminer_warnings
 # ------------------------------------------------------------------ shaders
 if(VKMINER_BUILD_SHADERS)
     include(CompileShaders)
-    # A single trivial shader, built for every configuration. It is not used
-    # by the miner; it exists so that a broken or missing GLSL toolchain is a
-    # build failure here rather than a surprise when the first real kernel is
-    # written.
+    # Every module the binary carries. toolchain-check.comp is not one of the
+    # miner's kernels: it exists so that a broken or missing GLSL toolchain is
+    # a build failure here rather than a surprise later, and it is what the
+    # embedding machinery is checked on independently of any algorithm.
     #
-    # It is also what the embedding machinery is proven on until a real kernel
-    # exists: a build that can compile a shader but cannot get it into the
-    # binary is a build that fails at the last possible moment otherwise.
-    add_spirv_shaders(vkminer_shader_toolchain_check
+    # The include path is the root of the tree, so that a kernel names what it
+    # includes the same way a .cpp does.
+    add_spirv_shaders(vkminer_shader_kernels
                       SOURCES shaders/toolchain-check.comp
+                              algorithms/sha256d/sha256d.comp
+                      INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
                       EMBED "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_spirv.cpp")
 
     # The kernels the binary carries, and the --algo-dir override that replaces
     # one of them at run time.
     add_library(vkminer_shaders STATIC
         shaders/shader_source.cpp
-        "${vkminer_shader_toolchain_check_EMBED_SOURCE}")
-    add_dependencies(vkminer_shaders vkminer_shader_toolchain_check)
+        "${vkminer_shader_kernels_EMBED_SOURCE}")
+    add_dependencies(vkminer_shaders vkminer_shader_kernels)
     target_include_directories(vkminer_shaders PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(vkminer_shaders PUBLIC vkminer_inherited)
     target_link_libraries(vkminer_shaders PRIVATE vkminer_warnings)
@@ -232,6 +248,7 @@ if(VKMINER_BUILD_SHADERS)
     # Declared above this block, so it is linked here rather than there: an
     # algorithm is what asks for its own SPIR-V.
     target_link_libraries(vkminer_algorithms PUBLIC vkminer_shaders)
+    target_compile_definitions(vkminer_algorithms PRIVATE VKMINER_HAVE_SHADERS=1)
 
     if(VKMINER_BUILD_TESTS)
         add_spirv_shaders(vkminer_shader_vk_smoke
@@ -262,6 +279,7 @@ add_library(vkminer_backends STATIC
     backends/vulkan/vulkan_backend.cpp
     backends/vulkan/vulkan_common.cpp
     backends/vulkan/vulkan_device.cpp
+    backends/vulkan/vulkan_kernel.cpp
     backends/vulkan/vulkan_pipeline.cpp)
 
 target_include_directories(vkminer_backends PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -272,6 +290,7 @@ target_link_libraries(vkminer_backends PRIVATE vkminer_warnings)
 # ------------------------------------------------------------------- binary
 add_executable(vkminer
     src/main.cpp
+    src/self_test.cpp
     src/scheduler/worker.cpp)
 
 target_include_directories(vkminer PRIVATE src "${CMAKE_CURRENT_SOURCE_DIR}")

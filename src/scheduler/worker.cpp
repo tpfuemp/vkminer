@@ -16,10 +16,12 @@ extern "C" {
 #include "core/miner.h"
 }
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <memory>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -27,10 +29,80 @@ namespace {
 vkminer::ComputeBackend *g_backend = nullptr;
 const int *g_worker_device = nullptr;
 
+// Shutdown. The flag is set from whichever thread is winding the process up;
+// the count is how many workers are still holding device objects.
+std::atomic<bool> g_stop{false};
+std::atomic<int> g_live{0};
+
+// Counts a worker as running for exactly as long as it might touch a device.
+// Declared first in miner_thread so that it is destroyed last -- after the
+// kernel, whose own destructor waits on the device it was created from.
+struct WorkerLifetime {
+    WorkerLifetime() { g_live.fetch_add(1, std::memory_order_relaxed); }
+    ~WorkerLifetime() { g_live.fetch_sub(1, std::memory_order_release); }
+};
+
 // Nonces are split into one contiguous range per worker so that two workers
 // never test the same nonce. The tail margin is for the batch that straddles
 // the end of a range.
 constexpr uint32_t kRangeMargin = 0x20;
+
+// How often --benchmark prints. The periodic report is on a five minute cycle
+// aimed at an unattended miner; a benchmark is something somebody is standing
+// in front of.
+constexpr auto kBenchmarkInterval = std::chrono::seconds(5);
+
+// A job that never came from a pool. --benchmark measures how fast this machine
+// hashes, which needs a header and a target and nothing else.
+//
+// The header is one of the algorithm's own published vectors, so the words the
+// kernel schedules are the shape of the thing it will be given in earnest
+// rather than a pattern that might optimize differently.
+bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
+{
+    const vkminer::KnownAnswer *answers = nullptr;
+    if (!algo.known_answers(&answers))
+        return false;
+
+    memset(work, 0, sizeof *work);
+
+    const size_t words = algo.header_bytes() / 4;
+    for (size_t i = 0; i < words && i < sizeof work->data / sizeof *work->data;
+         i++)
+        work->data[i] = be32dec(answers[0].header + i * 4);
+
+    // One bit off the published header, because the published header is a
+    // solved one. A GPU covers the whole nonce space in seconds, so the block's
+    // own nonce would be rediscovered on every pass -- correct, useless, and a
+    // line of log every few seconds. Word 15 is inside the merkle root, which
+    // is a field a pool rewrites constantly anyway.
+    if (words > 15)
+        work->data[15] ^= 1u;
+
+    // 0x000000000000ffff0000...0000, most significant word last, which is the
+    // order fulltest() compares in: an ordinary pool share target, met about
+    // once in 2^48 nonces. Not a target the benchmark is expected to meet --
+    // it is here because a dispatch needs one, and a realistic one keeps the
+    // comparison doing the work it does when mining.
+    work->target[7] = 0x00000000;
+    work->target[6] = 0x0000ffff;
+    return true;
+}
+
+void report_benchmark(const double *rates, int workers, double total)
+{
+    char scaled[32];
+    format_hashrate(total, scaled);
+    applog(LOG_NOTICE, "Benchmark: %s", scaled);
+
+    // Per worker only when there is more than one, because with a single
+    // device the second line would repeat the first.
+    if (workers > 1)
+        for (int i = 0; i < workers; i++) {
+            format_hashrate(rates[i], scaled);
+            applog2(LOG_INFO, "worker %d   %s", i, scaled);
+        }
+}
 
 void update_hashrate(int thr_id, double hashes, double seconds)
 {
@@ -54,11 +126,23 @@ void worker_set_backend(vkminer::ComputeBackend *backend, const int *device_map)
     g_worker_device = device_map;
 }
 
+void worker_request_stop()
+{
+    g_stop.store(true, std::memory_order_relaxed);
+}
+
+int worker_count()
+{
+    return g_live.load(std::memory_order_acquire);
+}
+
 extern "C" void *miner_thread(void *userdata)
 {
     struct thr_info *mythr = static_cast<struct thr_info *>(userdata);
     const int thr_id = mythr->id;
     const int device_index = g_worker_device[thr_id];
+
+    WorkerLifetime live;
 
     // One instance per worker rather than one shared between them. An
     // algorithm holds no per-job state, so sharing would work today; a worker
@@ -89,23 +173,42 @@ extern "C" void *miner_thread(void *userdata)
     struct work work;
     memset(&work, 0, sizeof work);
     uint32_t nonce = first_nonce;
+    bool have_job = false;
+    auto last_report = std::chrono::steady_clock::now();
 
-    while (true) {
-        // No job to mine: the connection is down, or the first notify has not
-        // arrived yet. Nothing to do but wait for one, cheaply.
-        if (stratum_down || !g_work_time) {
-            work_restart[thr_id].restart = 0;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue;
-        }
+    while (!g_stop.load(std::memory_order_relaxed)) {
+        bool new_job = false;
 
-        pthread_rwlock_rdlock(&g_work_lock);
-        const bool new_job = work.job_epoch != g_work.job_epoch;
-        if (new_job) {
-            work_free(&work);
-            work_copy(&work, &g_work);
+        if (opt_benchmark) {
+            // One synthetic job for the whole run: there is no pool to send a
+            // second one, and restarting the range would remeasure the same
+            // nonces.
+            if (!have_job) {
+                if (!benchmark_work(*algo, &work)) {
+                    applog(LOG_ERR, "Worker %d: '%s' has no header to "
+                                    "benchmark with", thr_id, opt_algo);
+                    return nullptr;
+                }
+                have_job = true;
+                new_job = true;
+            }
+        } else {
+            // No job to mine: the connection is down, or the first notify has
+            // not arrived yet. Nothing to do but wait for one, cheaply.
+            if (stratum_down || !g_work_time) {
+                work_restart[thr_id].restart = 0;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+
+            pthread_rwlock_rdlock(&g_work_lock);
+            new_job = work.job_epoch != g_work.job_epoch;
+            if (new_job) {
+                work_free(&work);
+                work_copy(&work, &g_work);
+            }
+            pthread_rwlock_unlock(&g_work_lock);
         }
-        pthread_rwlock_unlock(&g_work_lock);
 
         if (new_job) {
             nonce = first_nonce;
@@ -116,6 +219,14 @@ extern "C" void *miner_thread(void *userdata)
         if (nonce > end_nonce - batch)
             batch = end_nonce - nonce;
         if (!batch) {
+            // A benchmark has no pool to send a new job, so the only way to
+            // keep measuring is to go round again. Retesting nonces is the
+            // point of a benchmark and a bug in a miner, which is why the two
+            // cases are written out separately.
+            if (opt_benchmark) {
+                nonce = first_nonce;
+                continue;
+            }
             // The range is exhausted before the pool sent a new job. Waiting
             // costs nothing; wrapping would retest nonces already rejected.
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -172,15 +283,53 @@ extern "C" void *miner_thread(void *userdata)
                        "nonce %08x than the host computes",
                        thr_id, device_index, found[i].nonce);
 
+            // A benchmark is not connected to anything and its target is not
+            // anybody's. Finding a nonce that meets it says the kernel and the
+            // comparison work, which is worth a line, and submitting it would
+            // be an error.
+            if (opt_benchmark) {
+                applog(LOG_INFO, "Benchmark: nonce %08x meets the synthetic "
+                                 "target; nothing is submitted",
+                       found[i].nonce);
+                continue;
+            }
+
             work.data[STD_NONCE_INDEX] = found[i].nonce;
             submit_solution(&work, hash, mythr);
         }
 
         nonce += batch;
 
-        if (thr_id == 0)
+        if (thr_id != 0)
+            continue;
+
+        if (!opt_benchmark) {
             report_summary_log(false);
+            continue;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_report < kBenchmarkInterval)
+            continue;
+        last_report = now;
+
+        // Copied out under the lock and printed outside it: applog takes a
+        // lock of its own, and holding two in one order here and the other
+        // order anywhere else is how a miner stops for good.
+        std::vector<double> rates(static_cast<size_t>(opt_n_threads));
+        double total;
+        pthread_mutex_lock(&stats_lock);
+        for (int i = 0; i < opt_n_threads; i++)
+            rates[static_cast<size_t>(i)] = thr_hashrates[i];
+        total = global_hashrate;
+        pthread_mutex_unlock(&stats_lock);
+
+        report_benchmark(rates.data(), opt_n_threads, total);
     }
 
+    // The kernel goes here rather than at the end of the enclosing scope, so
+    // that the device is given up before this worker stops being counted.
+    kernel.reset();
+    work_free(&work);
     return nullptr;
 }

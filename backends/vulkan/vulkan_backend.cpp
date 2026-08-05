@@ -13,7 +13,9 @@
 
 #include "backends/vulkan/vulkan_backend.h"
 
+#include "backends/vulkan/pipeline_cache.h"
 #include "backends/vulkan/vulkan_common.h"
+#include "backends/vulkan/vulkan_kernel.h"
 
 #include <cstring>
 #include <vector>
@@ -75,7 +77,9 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
 VulkanBackend::~VulkanBackend()
 {
     // Devices first: a VkDevice outliving its VkInstance is undefined, and the
-    // order members are destroyed in would get this wrong.
+    // order members are destroyed in would get this wrong. The caches go before
+    // the devices they were created on, for the same reason.
+    caches_.clear();
     open_.clear();
 
     if (messenger_ != VK_NULL_HANDLE)
@@ -97,6 +101,7 @@ bool VulkanBackend::init()
     }
 
     open_.resize(devices_.size());
+    caches_.resize(devices_.size());
     return true;
 }
 
@@ -116,7 +121,8 @@ VulkanDevice *VulkanBackend::device(int device_index)
 std::unique_ptr<Kernel> VulkanBackend::create_kernel(int device_index,
                                                      const KernelSpec &spec)
 {
-    if (!device(device_index))
+    VulkanDevice *dev = device(device_index);
+    if (!dev)
         return nullptr;
 
     // An algorithm with no SPIR-V for this device is not a broken algorithm --
@@ -128,9 +134,13 @@ std::unique_ptr<Kernel> VulkanBackend::create_kernel(int device_index,
         return nullptr;
     }
 
-    applog(LOG_ERR, "Vulkan: cannot run '%s' -- no kernel is implemented yet",
-           spec.name);
-    return nullptr;
+    // One cache per device rather than per kernel: several workers on one
+    // device compile the same pipeline, and they would otherwise each write
+    // the same file over the top of the others.
+    if (!caches_[device_index])
+        caches_[device_index] = PipelineCache::open(*dev);
+
+    return make_vulkan_kernel(*dev, caches_[device_index]->handle(), spec);
 }
 
 bool VulkanBackend::create_instance()

@@ -1,0 +1,96 @@
+// SHA-256d: one nonce per invocation.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Three of the four SHA-256 blocks in a share are the same for every nonce in a
+// dispatch, so the host computes the first one once and sends the state it
+// produced. What is left per invocation is two compressions: the header's
+// second block, which is where the nonce lives, and the 32-byte block that
+// hashes the first digest again.
+//
+// Nothing here byte-swaps a header word. struct work already holds each of them
+// as a big-endian read of the wire, which is precisely the form SHA-256's
+// message schedule wants, so the words go in untouched. The one swap in this
+// file is on the digest, on the way out, and belongs to SHA-256 rather than to
+// the wire -- see bits.glsl.
+//
+// The nonce is counted in struct work's spelling of it, not the pool's. The two
+// differ by a byte reversal, and which one a kernel searches does not matter so
+// long as it is the one the host substitutes back: work.data[19] is written
+// straight from what comes out of here.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "shaders/common/candidates.glsl"
+#include "shaders/common/sha256.glsl"
+
+layout(local_size_x_id = 0) in;
+
+// 88 bytes, against a guaranteed minimum of 128. Mirrored by Sha256dPush in
+// algorithms/sha256d/sha256d.cpp, which asserts its own size and offsets --
+// this block and that struct are one definition written twice.
+layout(push_constant) uniform Push {
+    uint midstate[8];  // SHA-256 state after header words 0..15
+    uint tail[3];      // header words 16..18; word 19 is the nonce
+    uint target[8];    // as fulltest() compares: little-endian, most significant last
+    uint nonce_start;
+    uint count;        // invocations with a nonce to test
+    uint capacity;     // candidates the result buffer can hold
+} push;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= push.count)
+        return;
+
+    uint nonce = push.nonce_start + index;
+
+    // The header's second block: its last three words, the nonce, then the
+    // padding for an 80-byte message -- a 1 bit, zeros, and 640 as a 64-bit
+    // length in the last two words.
+    uint w[16] = uint[16](
+        push.tail[0], push.tail[1], push.tail[2], nonce,
+        0x80000000u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0x280u);
+
+    uint first[8] = uint[8](
+        push.midstate[0], push.midstate[1], push.midstate[2], push.midstate[3],
+        push.midstate[4], push.midstate[5], push.midstate[6], push.midstate[7]);
+    sha256_compress(first, w);
+
+    // The second SHA-256, over the 32 bytes the first produced. One block, and
+    // the length is 256 bits.
+    uint w2[16] = uint[16](
+        first[0], first[1], first[2], first[3],
+        first[4], first[5], first[6], first[7],
+        0x80000000u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0x100u);
+
+    uint state[8] = uint[8](
+        sha256_iv[0], sha256_iv[1], sha256_iv[2], sha256_iv[3],
+        sha256_iv[4], sha256_iv[5], sha256_iv[6], sha256_iv[7]);
+    sha256_compress(state, w2);
+
+    // The full 256-bit comparison, most significant word first, and not the
+    // cheaper test on the top 64 bits alone. The saving is a handful of
+    // instructions on a path taken once in billions of invocations; the cost of
+    // the shortcut is that the host's own re-check of every candidate starts
+    // rejecting some of them as a matter of routine, and the one warning that
+    // means "this kernel is wrong" stops meaning anything.
+    for (int i = 7; i >= 0; i--) {
+        uint word = bswap32(state[i]);
+        if (word > push.target[i])
+            return;
+        if (word < push.target[i])
+            break;
+    }
+
+    uint hash[8];
+    for (uint i = 0u; i < 8u; i++)
+        hash[i] = bswap32(state[i]);
+
+    emit_candidate(push.capacity, nonce, hash);
+}

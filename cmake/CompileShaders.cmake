@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 #     add_spirv_shaders(<target>
-#                       SOURCES     <a.comp> [<b.comp> ...]
-#                       [TARGET_ENV <env>]     # default vulkan1.1
-#                       [OUTPUT_DIR <dir>]     # default <builddir>/spv
-#                       [EMBED      <file.cpp>])
+#                       SOURCES      <a.comp> [<b.comp> ...]
+#                       [INCLUDE_DIRS <dir> ...]
+#                       [TARGET_ENV  <env>]    # default vulkan1.1
+#                       [OUTPUT_DIR  <dir>]    # default <builddir>/spv
+#                       [EMBED       <file.cpp>])
 #
 # EMBED additionally generates a C++ source file holding the compiled modules
 # as arrays, so that the binary carries its own kernels. The variable
@@ -35,7 +36,8 @@ else()
 endif()
 
 function(add_spirv_shaders target)
-    cmake_parse_arguments(ARG "" "TARGET_ENV;OUTPUT_DIR;EMBED" "SOURCES" ${ARGN})
+    cmake_parse_arguments(ARG "" "TARGET_ENV;OUTPUT_DIR;EMBED"
+                          "SOURCES;INCLUDE_DIRS" ${ARGN})
 
     if(NOT ARG_SOURCES)
         message(FATAL_ERROR "add_spirv_shaders(${target}): no SOURCES given")
@@ -47,6 +49,27 @@ function(add_spirv_shaders target)
         set(ARG_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/spv")
     endif()
 
+    # -I means the same thing to both compilers, which is the only reason the
+    # shared GLSL under shaders/common/ can be written once. Paths in an
+    # #include are given from the root of the tree rather than relative to the
+    # including file, so a kernel and an include that sit in different
+    # directories still name their dependencies the same way.
+    set(include_flags "")
+    foreach(dir IN LISTS ARG_INCLUDE_DIRS)
+        list(APPEND include_flags "-I${dir}")
+    endforeach()
+
+    # glslangValidator has no depfile support, so an edit to an included .glsl
+    # would not rebuild the shaders that include it. Globbing the include
+    # directories is coarser than a depfile -- every shader rebuilds when any
+    # include changes -- but it is right, and a stale kernel is not a mistake
+    # worth being efficient about. New include files still need a re-configure.
+    set(include_deps "")
+    foreach(dir IN LISTS ARG_INCLUDE_DIRS)
+        file(GLOB_RECURSE found "${dir}/shaders/common/*.glsl")
+        list(APPEND include_deps ${found})
+    endforeach()
+
     set(outputs "")
     set(names "")
     foreach(src IN LISTS ARG_SOURCES)
@@ -57,15 +80,14 @@ function(add_spirv_shaders target)
         if(VKMINER_SHADER_COMPILER_KIND STREQUAL glslc)
             set(cmd "${VKMINER_SHADER_COMPILER}"
                     --target-env=${ARG_TARGET_ENV} -O
+                    ${include_flags}
                     -MD -MF "${out}.d"
                     -o "${out}" "${src_abs}")
             set(depfile DEPFILE "${out}.d")
         else()
-            # glslangValidator has no depfile support, so an edit to an
-            # included .glsl will not trigger a rebuild of the shaders that
-            # include it. Use glslc where include files are involved.
             set(cmd "${VKMINER_SHADER_COMPILER}"
                     -V --target-env ${ARG_TARGET_ENV}
+                    ${include_flags}
                     -o "${out}" "${src_abs}")
             set(depfile "")
         endif()
@@ -74,7 +96,7 @@ function(add_spirv_shaders target)
             OUTPUT  "${out}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${ARG_OUTPUT_DIR}"
             COMMAND ${cmd}
-            DEPENDS "${src_abs}"
+            DEPENDS "${src_abs}" ${include_deps}
             ${depfile}
             COMMENT "SPIR-V ${name}.spv (${ARG_TARGET_ENV})"
             VERBATIM)

@@ -74,3 +74,8 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 # binary is normally launched straight from a Linux shell, where a DLL
 # sitting next to it in the build tree would not be found.
 set(CMAKE_EXE_LINKER_FLAGS_INIT "-static")
+
+# -static does not make the link static by itself: the library search order has
+# to agree with it. That lives in the top-level CMakeLists rather than here,
+# because Platform/Windows-GNU.cmake overwrites CMAKE_FIND_LIBRARY_SUFFIXES
+# after this file has been read.

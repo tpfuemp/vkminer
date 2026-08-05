@@ -40,8 +40,8 @@ int api_thr_id = -1;
 
 namespace {
 
-// The one shader every configuration builds. Phase 4's kernels will be listed
-// here too; until then this is what proves the mechanism.
+// The one shader every configuration builds, whether or not any algorithm's
+// kernels are enabled. Testing against it keeps this about the loader.
 const char *kShaderName = "toolchain-check";
 
 int failures = 0;

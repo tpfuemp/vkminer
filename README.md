@@ -69,6 +69,14 @@ cmake -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-win
 ```
 
+Two scripts wrap those, for the flags that are tedious to retype:
+
+```sh
+./build-linux.sh -t      # configure if needed, build, run the tests
+./build-win.sh           # the cross build, and check what the .exe imports
+./build-linux.sh -h      # -c to start clean, -d for a debug build, -j N
+```
+
 On 64-bit ARM, build natively on the target. No cross-compilation is involved and no extra
 flags are needed.
 
