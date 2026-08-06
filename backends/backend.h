@@ -115,18 +115,27 @@ public:
     // kernel expects) and `target` (8 words, little endian).
     //
     // The call is asynchronous: it returns once the work is submitted, not
-    // once it is done. `collect` is what waits.
+    // once it is done. `collect` is what waits. Returns false, having logged,
+    // if the kernel already has `queue_depth` dispatches outstanding.
     virtual bool dispatch(const uint32_t *header, const uint32_t *target,
                           uint32_t nonce_start, uint32_t count) = 0;
 
-    // Wait for the outstanding dispatch and write any solutions it found into
-    // `out`, at most `max` of them. Returns the count, or -1 if the device
-    // failed.
+    // Wait for the *oldest* outstanding dispatch and write any solutions it
+    // found into `out`, at most `max` of them. Returns the count, 0 if nothing
+    // is outstanding, or -1 if the device failed. That dispatch is retired
+    // either way, so a caller emptying the pipeline after a failure still
+    // gets there.
     virtual int collect(Solution *out, int max) = 0;
 
     // Nonces the caller should ask for per dispatch to keep the device busy
     // without holding it long enough to miss a new job.
     virtual uint32_t preferred_batch() const = 0;
+
+    // Dispatches the caller may leave outstanding at once. More than one lets
+    // the device start the next the instant it finishes one, rather than
+    // waiting for the host to notice that it did. Results come back oldest
+    // first, and the caller has to remember what each was launched under.
+    virtual uint32_t queue_depth() const { return 1; }
 };
 
 class ComputeBackend {

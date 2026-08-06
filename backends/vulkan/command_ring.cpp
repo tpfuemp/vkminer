@@ -43,6 +43,7 @@ std::unique_ptr<CommandRing> CommandRing::create(VulkanDevice &device,
     ring->slots_.resize(slots);
     for (uint32_t i = 0; i < slots; i++) {
         ring->slots_[i].cmd = buffers[i];
+        ring->slots_[i].index = i;
 
         // Created signalled: the first pass through the ring waits on fences
         // for submissions that never happened, and an unsignalled fence would

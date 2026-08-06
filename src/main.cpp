@@ -306,6 +306,14 @@ int main(int argc, char *argv[])
                opt_algo_dir);
     }
 
+    // Only the Vulkan backend queues anything. Worth saying out loud: this
+    // option exists to compare two runs, and one that silently did nothing
+    // would make the two identical and the comparison a measurement of noise.
+    if (opt_queue_depth > 0 && std::strcmp(g_backend->name(), "vulkan") != 0)
+        applog(LOG_WARNING, "--queue-depth has no effect on the %s backend, "
+                            "which runs one dispatch at a time",
+               g_backend->name());
+
     if (!opt_benchmark && !opt_self_test && !short_url) {
         std::fprintf(stderr, "%s: no URL supplied\n", argv[0]);
         show_usage_and_exit(1);
@@ -346,10 +354,25 @@ int main(int argc, char *argv[])
     if (opt_n_threads < 1)
         opt_n_threads = 1;
 
+    // Round robin, so that workers beyond the first per device spread over the
+    // devices rather than piling onto device 0.
     std::vector<int> worker_device(opt_n_threads);
     for (int i = 0; i < opt_n_threads; i++)
         worker_device[i] = g_device_map[i % g_device_map.size()];
     worker_set_backend(g_backend.get(), worker_device.data());
+
+    // Fewer workers than devices leaves a selected device unmined. Legal --
+    // --threads is explicit -- but indistinguishable from a machine that is
+    // quietly half as fast as it looks, so it is said out loud, by name.
+    if (static_cast<size_t>(opt_n_threads) < g_device_map.size())
+        for (size_t i = static_cast<size_t>(opt_n_threads);
+             i < g_device_map.size(); i++)
+            applog(LOG_WARNING, "Device %d (%s) has no worker: --threads %d is "
+                                "fewer than the %zu devices selected",
+                   g_device_map[i],
+                   g_backend->devices()[static_cast<size_t>(g_device_map[i])]
+                       .name.c_str(),
+                   opt_n_threads, g_device_map.size());
 
     if (!rpc_userpass) {
         rpc_userpass = static_cast<char *>(
@@ -498,6 +521,29 @@ int main(int argc, char *argv[])
                      "backend '%s'",
            opt_n_threads, g_device_map.size(), opt_algo, g_backend->name());
 
+    // With one device the line above says everything. With several, which
+    // worker sits on which device is what every later per-device number has to
+    // be read against, and it is only worth printing once.
+    if (g_device_map.size() > 1)
+        for (const int dev : g_device_map) {
+            std::string workers;
+            for (int i = 0; i < opt_n_threads; i++)
+                if (worker_device[i] == dev)
+                    workers += (workers.empty() ? "" : ",") + std::to_string(i);
+            applog2(LOG_INFO, "device %-2d worker %-8s %s", dev,
+                    workers.empty() ? "none" : workers.c_str(),
+                    g_backend->devices()[static_cast<size_t>(dev)].name.c_str());
+        }
+
+    // When --time-limit started counting, or zero while it has not. The clock
+    // starts at the first job, so that a pool taking seconds to answer is not
+    // measured as this machine's hashrate. A benchmark publishes no job, so
+    // there it starts now -- which is when its first dispatch goes out anyway.
+    auto limit_start = std::chrono::steady_clock::time_point{};
+    double limit_hashes = 0.;
+    if (opt_time_limit && opt_benchmark)
+        limit_start = std::chrono::steady_clock::now();
+
     // Upstream simply joined the work I/O thread and let the process end when
     // it did. This waits for the same thing, but has to poll rather than join
     // so that it also notices the flag a signal handler sets.
@@ -506,6 +552,56 @@ int main(int argc, char *argv[])
             applog(LOG_WARNING, "workio thread dead, exiting.");
             proper_exit(0);
         }
+        // A worker that cannot go on gives up its device and says so here,
+        // rather than ending the process from a thread the teardown is about
+        // to wait for. It has already logged what went wrong.
+        const int failed = worker_exit_code();
+        if (failed >= 0)
+            proper_exit(failed);
+
+        // Enforced here for the same reason as the line above: this thread
+        // holds no device, so teardown can wait for every worker to drain and
+        // hand its device back. A worker ending the process from inside its
+        // own loop would be waiting for itself.
+        if (opt_time_limit) {
+            const auto now = std::chrono::steady_clock::now();
+            if (limit_start == std::chrono::steady_clock::time_point{}) {
+                if (g_work_time) {
+                    limit_start = now;
+                    pthread_mutex_lock(&stats_lock);
+                    limit_hashes = total_hashes;
+                    pthread_mutex_unlock(&stats_lock);
+                }
+            } else if (now - limit_start >=
+                       std::chrono::seconds(opt_time_limit)) {
+                // The rate is the reason to limit a benchmark at all: it is
+                // what a script wrapping this in a timeout had to parse back
+                // out of the log. Averaged over the limit rather than read off
+                // global_hashrate, a two-second window that would make this a
+                // copy of the last periodic report -- and on a limit that is a
+                // multiple of the report interval, literally the same line
+                // twice. The counter is snapshotted when the clock starts, so
+                // startup is in neither.
+                if (opt_benchmark) {
+                    pthread_mutex_lock(&stats_lock);
+                    const double hashes = total_hashes - limit_hashes;
+                    pthread_mutex_unlock(&stats_lock);
+
+                    const double elapsed =
+                        std::chrono::duration<double>(now - limit_start).count();
+                    char scaled[32];
+                    format_hashrate(safe_div(hashes, elapsed, 0.), scaled);
+                    applog(LOG_NOTICE, "Time limit of %ds reached, exiting. "
+                                       "Benchmark: %s averaged over the run",
+                           opt_time_limit, scaled);
+                } else {
+                    applog(LOG_NOTICE, "Time limit of %ds reached, exiting",
+                           opt_time_limit);
+                }
+                proper_exit(0);
+            }
+        }
+
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 

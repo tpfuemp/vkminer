@@ -75,6 +75,8 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
     p->device_ = &device;
     p->local_size_x_ = desc.local_size_x;
 
+    const uint32_t sets = desc.sets ? desc.sets : 1;
+
     const VolkDeviceTable &fn = device.fn();
     const VkDevice dev = device.handle();
 
@@ -98,25 +100,33 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
     if (desc.storage_buffers) {
         VkDescriptorPoolSize size{};
         size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        size.descriptorCount = desc.storage_buffers;
+        size.descriptorCount = desc.storage_buffers * sets;
 
         VkDescriptorPoolCreateInfo pool{};
         pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        pool.maxSets = 1;
+        pool.maxSets = sets;
         pool.poolSizeCount = 1;
         pool.pPoolSizes = &size;
         if (!vk_ok(fn.vkCreateDescriptorPool(dev, &pool, nullptr, &p->pool_),
                    "vkCreateDescriptorPool"))
             return nullptr;
 
+        // Every set has the same layout -- they differ only in what they are
+        // later pointed at -- but the allocator wants one layout handle per set
+        // it is asked for.
+        const std::vector<VkDescriptorSetLayout> layouts(sets, p->set_layout_);
+        p->sets_.resize(sets);
+
         VkDescriptorSetAllocateInfo alloc{};
         alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         alloc.descriptorPool = p->pool_;
-        alloc.descriptorSetCount = 1;
-        alloc.pSetLayouts = &p->set_layout_;
-        if (!vk_ok(fn.vkAllocateDescriptorSets(dev, &alloc, &p->set_),
-                   "vkAllocateDescriptorSets"))
+        alloc.descriptorSetCount = sets;
+        alloc.pSetLayouts = layouts.data();
+        if (!vk_ok(fn.vkAllocateDescriptorSets(dev, &alloc, p->sets_.data()),
+                   "vkAllocateDescriptorSets")) {
+            p->sets_.clear();
             return nullptr;
+        }
     }
 
     VkPushConstantRange push{};
@@ -190,16 +200,16 @@ ComputePipeline::~ComputePipeline()
         fn.vkDestroyPipeline(dev, pipeline_, nullptr);
     if (layout_ != VK_NULL_HANDLE)
         fn.vkDestroyPipelineLayout(dev, layout_, nullptr);
-    // The set is freed with the pool it came from.
+    // The sets are freed with the pool they came from.
     if (pool_ != VK_NULL_HANDLE)
         fn.vkDestroyDescriptorPool(dev, pool_, nullptr);
     if (set_layout_ != VK_NULL_HANDLE)
         fn.vkDestroyDescriptorSetLayout(dev, set_layout_, nullptr);
 }
 
-void ComputePipeline::bind(const Buffer *buffers, uint32_t count)
+void ComputePipeline::bind(uint32_t set, const Buffer *buffers, uint32_t count)
 {
-    if (!count || set_ == VK_NULL_HANDLE)
+    if (!count || set >= sets_.size())
         return;
 
     std::vector<VkDescriptorBufferInfo> info(count);
@@ -211,7 +221,7 @@ void ComputePipeline::bind(const Buffer *buffers, uint32_t count)
         info[i].range = VK_WHOLE_SIZE;
 
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = set_;
+        writes[i].dstSet = sets_[set];
         writes[i].dstBinding = i;
         writes[i].descriptorCount = 1;
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -222,15 +232,15 @@ void ComputePipeline::bind(const Buffer *buffers, uint32_t count)
                                          writes.data(), 0, nullptr);
 }
 
-void ComputePipeline::record(VkCommandBuffer cmd, uint32_t groups,
+void ComputePipeline::record(VkCommandBuffer cmd, uint32_t set, uint32_t groups,
                              const void *push, uint32_t push_bytes) const
 {
     const VolkDeviceTable &fn = device_->fn();
 
     fn.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
-    if (set_ != VK_NULL_HANDLE)
+    if (set < sets_.size())
         fn.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout_,
-                                   0, 1, &set_, 0, nullptr);
+                                   0, 1, &sets_[set], 0, nullptr);
     if (push && push_bytes)
         fn.vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                               push_bytes, push);

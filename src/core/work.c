@@ -183,6 +183,8 @@ static struct share_stats_t share_stats[ s_stats_size ] = {{0}};
 static int s_get_ptr = 0, s_put_ptr = 0;
 static struct timeval last_submit_time = {0};
 
+void ( *report_devices_hook )( void ) = NULL;
+
 static struct timeval five_min_start = {0};
 struct timeval session_start = {0};
 struct timeval total_hashes_time = {0};
@@ -313,6 +315,8 @@ void report_summary_log( bool force )
               ( (double)uptime.tv_sec + (double)uptime.tv_usec * 1e-6 ), 0. ) );
    applog2( LOG_INFO, "Hash rate       %7.2f%sh/s   %7.2f%sh/s   (%.2f%sh/s)",
             shrate, shr_units, sess_hrate, sess_hr_units, ghrate, ghr_units );
+
+   if ( report_devices_hook ) report_devices_hook();
 
    if ( accepted_share_count < submitted_share_count )
    {

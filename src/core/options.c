@@ -105,6 +105,11 @@ char *opt_devices = NULL;
 bool opt_device_list = false;
 bool opt_vk_validate = false;
 
+/* Dispatches a worker may leave outstanding on its device. Zero lets the
+ * backend pick, which is the setting to mine with; an explicit value exists so
+ * one binary can be run at two depths and the difference measured. */
+int opt_queue_depth = 0;
+
 /* Run the known-answer vectors and exit. The same check the miner makes at
  * startup regardless; the option exists so that a machine can be checked
  * without a pool, a wallet or a network. */
@@ -161,6 +166,11 @@ Options:\n\
                         debugging a backend, not for mining)\n\
       --algo-dir=DIR    load algorithm shaders from DIR instead of the\n\
                         installed location\n\
+      --queue-depth=N   dispatches to keep queued on each device at once\n\
+                        (vulkan only; default: let the backend choose). 1 is\n\
+                        submit-and-wait. Higher keeps the device fed but costs\n\
+                        N dispatches of latency on every job change. For\n\
+                        measuring the difference, not for mining\n\
       --self-test       check that this build reproduces published block\n\
                         hashes on every selected device, then exit. The same\n\
                         check runs before every mining session anyway; this\n\
@@ -168,7 +178,10 @@ Options:\n\
   -t, --threads=N       number of miner workers (default: one per device, or\n\
                         one per core on the cpu backend)\n\
 \n\
-      --time-limit=N    exit after N seconds\n\
+      --time-limit=N    exit cleanly after N seconds of mining. Counted from\n\
+                        the first job, so a slow pool does not eat into it;\n\
+                        under --benchmark, from startup. Prints the benchmark\n\
+                        rate for the whole run on the way out\n\
   -T, --timeout=N       network timeout in seconds (default: 300)\n\
   -r, --retries=N       number of times to retry a failed request\n\
                         (default: -1, retry indefinitely)\n\
@@ -250,6 +263,7 @@ static struct option const options[] = {
    { "protocol",          0, NULL, 'P' },
    { "protocol-dump",     0, NULL, 'P' },
    { "proxy",             1, NULL, 'x' },
+   { "queue-depth",       1, NULL, 1046 },
    { "quiet",             0, NULL, 'q' },
    { "retries",           1, NULL, 'r' },
    { "retry-pause",       1, NULL, 1025 },
@@ -474,6 +488,16 @@ void parse_arg( int key, char *arg )
          opt_proxy = strdup( arg );
          break;
 
+      case 1046: // queue-depth
+         v = atoi( arg );
+         /* The ceiling is not a hardware limit -- a depth costs about a
+          * kilobyte -- but a bound on how much finished work a job change
+          * throws away, and a guard against a typo asking for a thousand. */
+         if ( v < 1 || v > 16 )
+            show_usage_and_exit( 1 );
+         opt_queue_depth = v;
+         break;
+
       /* --debug and --protocol-dump outrank --quiet whichever order they
        * arrive in, so that asking for more output never asks for less. */
       case 'q':  // quiet
@@ -521,7 +545,12 @@ void parse_arg( int key, char *arg )
          break;
 
       case 1008: // time-limit
-         opt_time_limit = atoi( arg );
+         v = atoi( arg );
+         /* A negative limit would read as already expired and exit the miner
+          * before it hashed anything, which is a confusing way to spell zero. */
+         if ( v < 1 )
+            show_usage_and_exit( 1 );
+         opt_time_limit = v;
          break;
 
       case 'T':  // timeout

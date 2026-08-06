@@ -123,6 +123,8 @@ cp config-template.json config.json     # then edit config.json
 | `--benchmark` | Measure hashrate without connecting to a pool. Never submits |
 | `--self-test` | Run the built-in known-answer tests and exit |
 | `--vk-validate` | Enable Vulkan validation layers. Much slower; for debugging |
+| `--queue-depth N` | Dispatches to keep queued on each GPU at once. Leave it alone to mine; set it to compare throughput at one depth against another |
+| `--time-limit N` | Stop cleanly after N seconds of mining, counted from the first job so a slow pool does not eat into it. With `--benchmark`, prints the rate for the whole run on the way out |
 | `--api-bind ADDR` | Bind the local status API, e.g. `127.0.0.1:4048` |
 | `-q, --quiet` | Reduce logging |
 | `-D, --debug` | Increase logging |

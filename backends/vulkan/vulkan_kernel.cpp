@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <vector>
 
 namespace vkminer {
 namespace {
@@ -37,6 +38,17 @@ constexpr uint64_t kTimeoutNs = 10ull * 1000 * 1000 * 1000;
 constexpr uint32_t kMinBatch = 1u << 12;
 constexpr uint32_t kMaxBatch = 1u << 28;
 
+// Dispatches kept queued on the device at once, unless --queue-depth says
+// otherwise. Two stops it idling -- one executing while the host reads the
+// last one's results and records the next -- and the third is slack for a host
+// thread that gets descheduled part way through that.
+//
+// The cost is latency on a job change: everything outstanding is finished
+// first, so depth * kTargetSeconds, well under a fifth of a second here against
+// a job that lasts tens. Each also needs its own result buffer and descriptor
+// set, neither being touchable while a command buffer using it executes.
+constexpr uint32_t kDefaultDepth = 3;
+
 // Workgroup width. 256 suits every desktop part; the clamps are what make it
 // safe on the ones it does not suit, and a size that is not a whole number of
 // subgroups wastes the remainder of the last one on every workgroup.
@@ -63,13 +75,15 @@ public:
     ~VulkanKernel() override
     {
         // The ring first: its destructor waits for the device, which is what
-        // makes freeing the buffers underneath it safe.
+        // makes freeing the buffers underneath it safe. With several dispatches
+        // possibly still queued that is not a formality.
         ring_.reset();
         pipeline_.reset();
-        if (device_) {
-            device_->destroy_buffer(&results_);
-            device_->destroy_buffer(&readback_);
-        }
+        if (device_)
+            for (Slot &slot : slot_) {
+                device_->destroy_buffer(&slot.results);
+                device_->destroy_buffer(&slot.readback);
+            }
     }
 
     bool init(VulkanDevice &device, VkPipelineCache cache,
@@ -89,6 +103,13 @@ public:
 
         const DeviceInfo &info = device.info();
 
+        // Validated where it is parsed; all that is left is whether it was
+        // given. Everything below sizes off depth_, so depth 1 is one of each
+        // resource -- the submit-and-wait loop this had before it was
+        // pipelined, from the same binary.
+        depth_ = opt_queue_depth > 0 ? static_cast<uint32_t>(opt_queue_depth)
+                                     : kDefaultDepth;
+
         ComputePipelineDesc desc;
         desc.spirv = spec.spirv;
         desc.spirv_words = spec.spirv_words;
@@ -96,35 +117,45 @@ public:
         desc.push_constant_bytes = push_bytes_;
         desc.local_size_x = spec.local_size_x ? spec.local_size_x
                                               : choose_local_size(info);
+        desc.sets = depth_;
 
         pipeline_ = ComputePipeline::create(device, desc, cache);
         if (!pipeline_)
             return false;
         local_ = pipeline_->local_size_x();
 
+        // One result buffer per in-flight dispatch, not one shared: the host
+        // reads a dispatch's results long after the next has started writing,
+        // and they would be the two of them in the same words. A kilobyte each.
         const VkDeviceSize bytes = kResultWords * sizeof(uint32_t);
-        if (!device.create_buffer(bytes,
-                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                      | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
-                                      | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                  BufferKind::DeviceLocal, &results_)) {
-            applog(LOG_ERR, "Vulkan: could not allocate the result buffer "
-                            "for '%s'", name_);
-            return false;
-        }
-        if (!device.create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                  BufferKind::Readback, &readback_)) {
-            applog(LOG_ERR, "Vulkan: could not allocate a readback buffer "
-                            "for '%s'", name_);
-            return false;
+        slot_.resize(depth_);
+        queue_.resize(depth_);
+        for (uint32_t i = 0; i < depth_; i++) {
+            if (!device.create_buffer(bytes,
+                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                          | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                                          | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      BufferKind::DeviceLocal,
+                                      &slot_[i].results)) {
+                applog(LOG_ERR, "Vulkan: could not allocate result buffer %u "
+                                "for '%s'", i, name_);
+                return false;
+            }
+            if (!device.create_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      BufferKind::Readback,
+                                      &slot_[i].readback)) {
+                applog(LOG_ERR, "Vulkan: could not allocate readback buffer %u "
+                                "for '%s'", i, name_);
+                return false;
+            }
+
+            // Once, here, and never again: a set may not be updated while a
+            // command buffer using it is in flight, and once the pipeline is
+            // full there is no instant at which none of them is.
+            pipeline_->bind(i, &slot_[i].results, 1);
         }
 
-        // Once, here, and never again: a descriptor set may not be updated
-        // while a command buffer using it is in flight, and this one is used by
-        // every dispatch from now on.
-        pipeline_->bind(&results_, 1);
-
-        ring_ = CommandRing::create(device, 2);
+        ring_ = CommandRing::create(device, depth_);
         if (!ring_)
             return false;
 
@@ -134,8 +165,11 @@ public:
         batch_ = info.kind == DeviceKind::Cpu ? (1u << 18) : (1u << 20);
         clamp_batch(info);
 
-        applog(LOG_INFO, "Vulkan: '%s' on %s, workgroup %u", name_,
-               info.name.c_str(), local_);
+        // The depth is on this line so that a log says which run it was --
+        // comparing one against another is the point of the option existing.
+        applog(LOG_INFO, "Vulkan: '%s' on %s, workgroup %u, %u dispatch%s in "
+                         "flight", name_, info.name.c_str(), local_, depth_,
+               depth_ == 1 ? "" : "es");
         return true;
     }
 
@@ -144,6 +178,16 @@ public:
     {
         if (!count)
             return false;
+
+        // The caller is told how many it may have outstanding. Refusing beats
+        // overwriting: the alternative is a dispatch's results silently
+        // replaced by the next one's.
+        if (inflight_ >= depth_) {
+            applog(LOG_ERR, "Vulkan: '%s' was handed a dispatch with %u already "
+                            "outstanding, which is all it holds", name_,
+                   inflight_);
+            return false;
+        }
 
         Dispatch job;
         job.header = header;
@@ -168,12 +212,18 @@ public:
         if (!slot)
             return false;
 
+        // Which buffers and descriptor set this dispatch owns until its results
+        // are read. Taken from the ring's slot rather than tracked separately,
+        // so the two orders cannot drift.
+        const uint32_t index = slot->index;
+        Slot &mine = slot_[index];
+
         const VolkDeviceTable &fn = device_->fn();
 
         // The counter has to start at zero, and the whole buffer is small
         // enough that clearing all of it costs nothing and leaves no stale
         // candidate from the last dispatch anywhere the host could read one.
-        fn.vkCmdFillBuffer(slot->cmd, results_.handle, 0, VK_WHOLE_SIZE, 0);
+        fn.vkCmdFillBuffer(slot->cmd, mine.results.handle, 0, VK_WHOLE_SIZE, 0);
 
         VkMemoryBarrier cleared{};
         cleared.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -185,7 +235,7 @@ public:
                                 &cleared, 0, nullptr, 0, nullptr);
 
         const uint32_t groups = (count + local_ - 1) / local_;
-        pipeline_->record(slot->cmd, groups, push_, push_bytes_);
+        pipeline_->record(slot->cmd, index, groups, push_, push_bytes_);
 
         VkMemoryBarrier written{};
         written.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -197,41 +247,59 @@ public:
 
         VkBufferCopy copy{};
         copy.size = kResultWords * sizeof(uint32_t);
-        fn.vkCmdCopyBuffer(slot->cmd, results_.handle, readback_.handle, 1,
-                           &copy);
+        fn.vkCmdCopyBuffer(slot->cmd, mine.results.handle, mine.readback.handle,
+                           1, &copy);
 
-        started_ = std::chrono::steady_clock::now();
         if (!ring_->submit(slot))
             return false;
 
-        pending_ = slot;
-        pending_count_ = count;
+        Pending &entry = queue_[(head_ + inflight_) % depth_];
+        entry.slot = index;
+        entry.count = count;
+        entry.full_batch = count == batch_;
+        inflight_++;
         return true;
     }
 
     int collect(Solution *out, int max) override
     {
-        if (!pending_)
+        if (!inflight_)
             return 0;
 
-        CommandRing::Slot *slot = pending_;
-        pending_ = nullptr;
+        // Retired before anything that can fail, so a caller emptying the
+        // pipeline after a device error gets through it instead of being handed
+        // the same dead dispatch forever.
+        const Pending entry = queue_[head_];
+        head_ = (head_ + 1) % depth_;
+        const bool was_full = inflight_ == depth_;
+        inflight_--;
 
-        if (!ring_->wait(slot, kTimeoutNs)) {
+        if (!ring_->wait(ring_->slot(entry.slot), kTimeoutNs)) {
             applog(LOG_ERR, "Vulkan: '%s' did not finish within %u seconds",
                    name_, static_cast<unsigned>(kTimeoutNs / 1000000000ull));
             return -1;
         }
 
-        const std::chrono::duration<double> elapsed =
-            std::chrono::steady_clock::now() - started_;
-        retune(elapsed.count());
+        // From one completion to the next, not from submit to complete: a
+        // dispatch queued behind two others waits for both, so submit-to-
+        // complete reads as depth times the truth and would divide every batch
+        // by it forever. Completions are the rate the device retires work at,
+        // which is what kTargetSeconds is about.
+        //
+        // Only while the queue stayed full across the interval -- a completion
+        // with nothing queued behind it measures how late the host was.
+        const auto now = std::chrono::steady_clock::now();
+        if (was_full && prev_full_ && entry.full_batch)
+            retune(std::chrono::duration<double>(now - last_done_).count());
+        prev_full_ = was_full;
+        last_done_ = now;
 
-        if (!device_->invalidate(readback_))
+        const Slot &mine = slot_[entry.slot];
+        if (!device_->invalidate(mine.readback))
             return -1;
 
         const uint32_t *result =
-            static_cast<const uint32_t *>(readback_.mapped);
+            static_cast<const uint32_t *>(mine.readback.mapped);
         uint32_t found = result[0];
 
         if (found > kMaxCandidates) {
@@ -255,14 +323,25 @@ public:
 
     uint32_t preferred_batch() const override { return batch_; }
 
+    uint32_t queue_depth() const override { return depth_; }
+
 private:
-    // Aim the next dispatch at kTargetSeconds, from how long the last one took.
-    // Only full batches are measured: a short one at the end of a nonce range
-    // says nothing about how fast the device is.
+    // Aim the next dispatch at kTargetSeconds, from the interval the device is
+    // retiring them at. The caller decides when a measurement is worth
+    // believing; this decides what to do about one.
     void retune(double seconds)
     {
-        if (pending_count_ != batch_ || seconds <= 0.)
+        if (seconds <= 0.)
             return;
+
+        // Dispatches at the previous size are still queued, and the intervals
+        // between their completions describe that size, not the new one.
+        // Sitting out a queue's worth is the difference between converging and
+        // measuring every change against the size it replaced, both ways.
+        if (hold_) {
+            hold_--;
+            return;
+        }
 
         double scale = kTargetSeconds / seconds;
         // Moving by at most 4x per dispatch, so that one descheduled batch
@@ -270,10 +349,14 @@ private:
         if (scale > 4.) scale = 4.;
         if (scale < 0.25) scale = 0.25;
 
+        const uint32_t before = batch_;
         const double next = static_cast<double>(batch_) * scale;
         batch_ = next >= static_cast<double>(kMaxBatch)
                ? kMaxBatch : static_cast<uint32_t>(next);
         clamp_batch(device_->info());
+
+        if (batch_ != before)
+            hold_ = depth_;
     }
 
     void clamp_batch(const DeviceInfo &info)
@@ -300,12 +383,43 @@ private:
 
     std::unique_ptr<ComputePipeline> pipeline_;
     std::unique_ptr<CommandRing> ring_;
-    Buffer results_{};
-    Buffer readback_{};
 
-    CommandRing::Slot *pending_ = nullptr;
-    uint32_t pending_count_ = 0;
-    std::chrono::steady_clock::time_point started_;
+    // What one in-flight dispatch writes into. Paired with the ring's slot of
+    // the same index, and untouchable between submit and fence.
+    struct Slot {
+        Buffer results{};
+        Buffer readback{};
+    };
+    std::vector<Slot> slot_;
+
+    // What the host must remember about a dispatch to make sense of it when it
+    // comes back. A ring in submission order; `head_` is the oldest, which is
+    // the one collect() answers for.
+    struct Pending {
+        uint32_t slot = 0;
+        uint32_t count = 0;
+        // A batch the tuner chose, rather than one truncated at the end of a
+        // nonce range. A short batch finishing quickly says nothing about how
+        // fast the device is.
+        bool full_batch = false;
+    };
+    std::vector<Pending> queue_;
+
+    // How many of each of the above. Fixed for the kernel's life: changing it
+    // would reallocate buffers a queued command buffer still points at.
+    uint32_t depth_ = kDefaultDepth;
+    uint32_t head_ = 0;
+    uint32_t inflight_ = 0;
+
+    // What retune() measures, and whether it means anything: `prev_full_` says
+    // the queue was full at the previous completion too, so the interval
+    // between them covers a device that was never waiting for the host.
+    std::chrono::steady_clock::time_point last_done_;
+    bool prev_full_ = false;
+
+    // Completions left to ignore because they were launched at the previous
+    // batch size.
+    uint32_t hold_ = 0;
 
     // The guaranteed minimum a Vulkan device must offer. An algorithm that
     // wants more than this is refused at kernel creation rather than on a

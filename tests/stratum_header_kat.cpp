@@ -5,7 +5,9 @@
 // the eighty bytes that get hashed. The sha256d KAT starts from an already
 // assembled header, so everything this file covers had no test at all --
 // coinbase assembly from the two halves and the two extranonces, the merkle
-// root, and the word order std_build_block_header leaves the header in.
+// root, and the word order std_build_block_header leaves the header in. The
+// same vector then covers rolling extranonce2, which is how a device gets a
+// fresh nonce range without waiting for the next job.
 //
 // The vector is a share this miner submitted to a live pool and had accepted,
 // captured off the wire: the mining.subscribe reply that fixed extranonce1, the
@@ -234,12 +236,76 @@ int main()
     if (algo->verify(work.data, kNonce, target, verified))
         fail("verify() accepted the share above its own difficulty");
 
+    // The same job again, through the path the scheduler takes when a device
+    // exhausts a nonce range mid-job. Rolling the counter back to the value
+    // this share was actually found with has to reproduce the header the pool
+    // accepted: that is what distinguishes a rebuild from a change.
+    pthread_mutex_init(&sctx.work_lock, nullptr);
+    sctx.job.xnonce2 = coinbase + coinb1_len + sizeof kExtranonce1;
+    char job_id[] = "3a409";
+    sctx.job.job_id = job_id;
+
+    struct work rolled;
+    std::memset(&rolled, 0, sizeof rolled);
+    rolled.job_id = strdup(job_id);
+
+    if (!stratum_set_extranonce2(&rolled, &sctx, 0)) {
+        fail("the extranonce2 roll refused the job the work holds");
+    } else {
+        header_bytes(&rolled, built);
+        if (std::memcmp(built, kHeader, 76) != 0) {
+            fail("rolling extranonce2 back to this share's own value did not "
+                 "rebuild its header");
+            print_bytes("expected", kHeader, 76);
+            print_bytes("got", built, 76);
+        }
+    }
+
+    // A different coinbase is a different merkle root and nothing else. The
+    // fields that belong to the job have to survive untouched, or the miner
+    // would be hashing a header the pool never authorised.
+    unsigned char next[80];
+    if (!stratum_set_extranonce2(&rolled, &sctx, 1)) {
+        fail("the extranonce2 roll refused to advance");
+    } else {
+        header_bytes(&rolled, next);
+        if (std::memcmp(next + 36, kHeader + 36, 32) == 0)
+            fail("a different extranonce2 produced the same merkle root");
+        if (std::memcmp(next, kHeader, 36) != 0 ||
+            std::memcmp(next + 68, kHeader + 68, 8) != 0)
+            fail("rolling extranonce2 changed a field that belongs to the job");
+
+        // Little-endian, and the whole width the pool asked for. A counter
+        // written the other way round still mines, and still submits an
+        // extranonce2 the pool cannot reconstruct the coinbase from.
+        const unsigned char expect[4] = { 0x01, 0x00, 0x00, 0x00 };
+        if (rolled.xnonce2_len != sizeof expect ||
+            std::memcmp(rolled.xnonce2, expect, sizeof expect) != 0)
+            fail("the counter did not land in extranonce2 little-endian");
+    }
+
+    // The work holds a job the pool has moved on from. Rebuilding it against
+    // the current coinbase would mine a header belonging to neither job, so
+    // the roll has to refuse and leave the work alone for the caller to
+    // replace.
+    free(rolled.job_id);
+    rolled.job_id = strdup("not-this-job");
+    if (stratum_set_extranonce2(&rolled, &sctx, 2)) {
+        fail("the roll rebuilt work whose job the pool no longer has");
+    } else {
+        unsigned char after[80];
+        header_bytes(&rolled, after);
+        if (std::memcmp(after, next, sizeof after) != 0)
+            fail("the refused roll modified the work anyway");
+    }
+
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);
         return 1;
     }
 
     std::printf("stratum: an accepted share rebuilds from its job, "
-                "hashes and verifies correctly\n");
+                "hashes and verifies correctly, and rolling extranonce2 "
+                "rebuilds it again\n");
     return 0;
 }

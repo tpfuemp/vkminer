@@ -23,4 +23,10 @@ extern "C" void *miner_thread(void *userdata);
 void worker_request_stop();
 int worker_count();
 
+// -1 unless a worker has hit something the run cannot continue past, in which
+// case it is the code to end the process with. That worker has already logged
+// why and left its loop; it does not end the process itself, because the
+// teardown that follows waits for it to let go of its device first.
+int worker_exit_code();
+
 #endif  // VKMINER_SCHEDULER_WORKER_H__

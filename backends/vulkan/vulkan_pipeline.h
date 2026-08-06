@@ -30,9 +30,14 @@ struct ComputePipelineDesc {
     const uint32_t *spirv       = nullptr;
     size_t          spirv_words = 0;
 
-    uint32_t storage_buffers     = 0;  // bound at set 0, bindings 0..n-1
+    uint32_t storage_buffers     = 0;  // bindings 0..n-1 of each set
     uint32_t push_constant_bytes = 0;  // 0 for a shader with no push block
     uint32_t local_size_x        = 0;  // specialization constant 0
+
+    // Interchangeable descriptor sets to allocate, all of the same layout. One
+    // per dispatch that may be in flight: a set may not be rewritten while a
+    // command buffer using it is executing.
+    uint32_t sets = 1;
 };
 
 class ComputePipeline {
@@ -50,15 +55,17 @@ public:
     ComputePipeline(const ComputePipeline &) = delete;
     ComputePipeline &operator=(const ComputePipeline &) = delete;
 
-    // Point the descriptor set at these buffers, in binding order. Recorded
-    // into no command buffer: a descriptor set may not be updated while a
-    // command buffer using it is executing, so this belongs between dispatches.
-    void bind(const Buffer *buffers, uint32_t count);
+    // Point descriptor set `set` at these buffers, in binding order. Recorded
+    // into no command buffer: a set may not be updated while a command buffer
+    // using it is executing, so this belongs before that set's first dispatch
+    // or between two of them.
+    void bind(uint32_t set, const Buffer *buffers, uint32_t count);
 
-    // Record a dispatch of `groups` workgroups, with `push` bytes of push
-    // constants (may be null when the pipeline has none).
-    void record(VkCommandBuffer cmd, uint32_t groups, const void *push,
-                uint32_t push_bytes) const;
+    // Record a dispatch of `groups` workgroups against descriptor set `set`,
+    // with `push` bytes of push constants (may be null when the pipeline has
+    // none).
+    void record(VkCommandBuffer cmd, uint32_t set, uint32_t groups,
+                const void *push, uint32_t push_bytes) const;
 
     uint32_t local_size_x() const { return local_size_x_; }
 
@@ -68,7 +75,7 @@ private:
     VulkanDevice         *device_    = nullptr;
     VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
     VkDescriptorPool      pool_      = VK_NULL_HANDLE;
-    VkDescriptorSet       set_       = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> sets_;  // freed with the pool
     VkPipelineLayout      layout_    = VK_NULL_HANDLE;
     VkPipeline            pipeline_  = VK_NULL_HANDLE;
     uint32_t              local_size_x_ = 0;

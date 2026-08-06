@@ -399,6 +399,7 @@ extern bool opt_vk_validate;   /* Vulkan validation layers */
 extern bool opt_self_test;     /* run the known-answer vectors and exit */
 extern char *opt_backend;      /* backend name, NULL means the default */
 extern char *opt_algo_dir;     /* where to load shaders from */
+extern int  opt_queue_depth;   /* dispatches in flight per device, 0 = backend's */
 extern uint32_t submitted_share_count;
 extern uint32_t stale_share_count;
 extern int  work_thr_id;
@@ -511,6 +512,12 @@ void   format_number_si( double* hashrate, char* si_units );
 void   format_hashrate( double hashrate, char *output );
 void   report_summary_log( bool force );
 
+/* One line per device in the periodic report, printed by whoever knows what a
+ * device is. A hook rather than a call because this file sits below the
+ * scheduler: it is linked into programs that have no workers at all, and those
+ * leave it null. */
+extern void ( *report_devices_hook )( void );
+
 /* Bitcoin formula for converting difficulty to an equivalent
  * number of hashes.
  *
@@ -559,6 +566,13 @@ void   std_build_block_header( struct work *g_work, uint32_t version,
                                uint32_t *prevhash, uint32_t *merkle_tree,
                                uint32_t ntime, uint32_t nbits );
 void   std_build_extraheader( struct work *g_work, struct stratum_ctx *sctx );
+
+/* Rebuild `work` on the same job with a different extranonce2, which is a
+ * different coinbase and so a fresh nonce range. False means the job has
+ * changed and the caller should take the new one. See the definition for what
+ * callers owe each other about the counter.  */
+bool   stratum_set_extranonce2( struct work *work, struct stratum_ctx *sctx,
+                                uint64_t counter );
 void   std_le_build_stratum_request( char *req, struct work *work );
 
 void  *workio_thread( void *userdata );

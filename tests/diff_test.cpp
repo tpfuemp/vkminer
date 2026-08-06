@@ -16,6 +16,12 @@
 // just below it, equal in the top word and decided by a lower one -- would
 // never occur. Here they occur by the hundred.
 //
+// The range is run twice: once with a single dispatch outstanding, and once
+// with the kernel's queue kept full, which is how the miner drives it. Both
+// must produce the same answer, because a pipeline that mixes up which result
+// buffer belongs to which dispatch is otherwise invisible -- it returns real
+// hashes of real nonces, just not the ones it was asked about.
+//
 // It reports SKIP rather than failing where there is no Vulkan device, and
 // where the algorithm under test has no shader yet: neither is a wrong result,
 // and both are normal states for a build machine or a half-finished algorithm.
@@ -33,6 +39,7 @@ extern "C" {
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -150,26 +157,14 @@ void reference_candidates(const vkminer::Algorithm &algo,
     }
 }
 
-// One dispatch, compared. Returns false on the first disagreement: a kernel
-// that is wrong is wrong about every dispatch after this one too, and printing
-// a hundred thousand lines of it helps nobody.
-bool compare_chunk(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
-                   const uint32_t *header, uint32_t start, uint32_t count,
-                   size_t *candidates)
+// What one dispatch came back with, against what the reference says that range
+// holds. Returns false on the first disagreement: a kernel that is wrong is
+// wrong about every dispatch after this one too, and printing a hundred
+// thousand lines of it helps nobody.
+bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
+                     uint32_t start, uint32_t count, vkminer::Solution *got,
+                     int n, size_t *candidates)
 {
-    if (!kernel.dispatch(header, kTarget, start, count)) {
-        fail("dispatch of %u nonces from 0x%08x was refused", count, start);
-        return false;
-    }
-
-    vkminer::Solution got[kMaxSolutions];
-    const int n = kernel.collect(got, kMaxSolutions);
-    if (n < 0) {
-        fail("the device failed while hashing %u nonces from 0x%08x",
-             count, start);
-        return false;
-    }
-
     std::vector<Candidate> want;
     reference_candidates(algo, header, start, count, &want);
 
@@ -228,6 +223,82 @@ bool compare_chunk(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     return true;
 }
 
+// One dispatch, submitted and waited for before the next is asked about.
+bool compare_chunk(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
+                   const uint32_t *header, uint32_t start, uint32_t count,
+                   size_t *candidates)
+{
+    if (!kernel.dispatch(header, kTarget, start, count)) {
+        fail("dispatch of %u nonces from 0x%08x was refused", count, start);
+        return false;
+    }
+
+    vkminer::Solution got[kMaxSolutions];
+    const int n = kernel.collect(got, kMaxSolutions);
+    if (n < 0) {
+        fail("the device failed while hashing %u nonces from 0x%08x",
+             count, start);
+        return false;
+    }
+
+    return compare_results(algo, header, start, count, got, n, candidates);
+}
+
+// The same range again, with as many dispatches outstanding as the kernel will
+// take -- the way the miner actually drives it.
+//
+// The same set-equality check, and that is the point. Each in-flight dispatch
+// has its own result buffer and descriptor set, and a kernel that crossed two
+// of them would answer for one dispatch with another's candidates -- nonces
+// outside the range the reference was asked about, so the first chunk fails
+// loudly rather than the run passing on plausible-looking numbers.
+bool compare_pipelined(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
+                       const uint32_t *header, uint32_t total,
+                       size_t *candidates)
+{
+    const size_t depth = std::max<uint32_t>(1, kernel.queue_depth());
+
+    // What was launched, in the order it was launched, because that is the
+    // order the results come back in and the only thing tying one to a range.
+    struct Launched {
+        uint32_t start;
+        uint32_t count;
+    };
+    std::deque<Launched> inflight;
+
+    uint32_t done = 0;
+    while (done < total || !inflight.empty()) {
+        while (done < total && inflight.size() < depth) {
+            const uint32_t count = std::min(kChunk, total - done);
+            const uint32_t start = kNonceBase + done;
+            if (!kernel.dispatch(header, kTarget, start, count)) {
+                fail("dispatch of %u nonces from 0x%08x was refused with %u "
+                     "already in flight", count, start,
+                     static_cast<unsigned>(inflight.size()));
+                return false;
+            }
+            inflight.push_back(Launched{start, count});
+            done += count;
+        }
+
+        vkminer::Solution got[kMaxSolutions];
+        const int n = kernel.collect(got, kMaxSolutions);
+        const Launched oldest = inflight.front();
+        inflight.pop_front();
+
+        if (n < 0) {
+            fail("the device failed while hashing %u nonces from 0x%08x",
+                 oldest.count, oldest.start);
+            return false;
+        }
+        if (!compare_results(algo, header, oldest.start, oldest.count, got, n,
+                             candidates))
+            return false;
+    }
+
+    return true;
+}
+
 bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &info,
                 const vkminer::Algorithm &algo, uint32_t total)
 {
@@ -272,8 +343,28 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
         return false;
     }
 
-    std::printf("ok   %u nonces, %u candidate(s), device and reference agree\n",
+    std::printf("ok   %u nonces, %u candidate(s), one dispatch at a time\n",
                 total, static_cast<unsigned>(candidates));
+
+    size_t pipelined = 0;
+    if (!compare_pipelined(*kernel, algo, header, total, &pipelined))
+        return false;
+
+    // The same nonces hashed both ways have to meet the target both ways.
+    // Weaker than the per-dispatch comparison above, and here because it is the
+    // one line that still catches a pipeline dropping a whole dispatch's
+    // results -- reporting nothing rather than reporting wrongly.
+    if (pipelined != candidates) {
+        fail("%u candidate(s) with the pipeline full and %u with one dispatch "
+             "at a time, over the same nonces",
+             static_cast<unsigned>(pipelined), static_cast<unsigned>(candidates));
+        return false;
+    }
+
+    const uint32_t depth = kernel->queue_depth();
+    std::printf("ok   %u nonces, %u candidate(s), up to %u dispatch%s in "
+                "flight\n", total, static_cast<unsigned>(pipelined), depth,
+                depth == 1 ? "" : "es");
     return true;
 }
 
@@ -288,10 +379,22 @@ int main(int argc, char *argv[])
     if (argc > 2) {
         const long n = std::strtol(argv[2], nullptr, 0);
         if (n <= 0) {
-            std::printf("usage: %s [algo] [nonces]\n", argv[0]);
+            std::printf("usage: %s [algo] [nonces] [queue-depth]\n", argv[0]);
             return 2;
         }
         total = static_cast<uint32_t>(n);
+    }
+
+    // The pipelined pass below runs at whatever depth the kernel reports, so
+    // this is what lets the same check be pointed at a depth --queue-depth can
+    // ask for. Without it every depth but the default ships untested.
+    if (argc > 3) {
+        const long n = std::strtol(argv[3], nullptr, 0);
+        if (n < 1 || n > 16) {
+            std::printf("usage: %s [algo] [nonces] [queue-depth]\n", argv[0]);
+            return 2;
+        }
+        opt_queue_depth = static_cast<int>(n);
     }
 
     std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(name);

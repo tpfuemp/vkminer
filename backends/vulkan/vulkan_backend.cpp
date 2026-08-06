@@ -110,6 +110,7 @@ VulkanDevice *VulkanBackend::device(int device_index)
     if (device_index < 0 || device_index >= static_cast<int>(open_.size()))
         return nullptr;
 
+    std::lock_guard<std::mutex> held(lazy_lock_);
     if (!open_[device_index])
         open_[device_index] = VulkanDevice::create(instance_,
                                                    handles_[device_index],
@@ -137,10 +138,18 @@ std::unique_ptr<Kernel> VulkanBackend::create_kernel(int device_index,
     // One cache per device rather than per kernel: several workers on one
     // device compile the same pipeline, and they would otherwise each write
     // the same file over the top of the others.
-    if (!caches_[device_index])
-        caches_[device_index] = PipelineCache::open(*dev);
+    VkPipelineCache cache = VK_NULL_HANDLE;
+    {
+        std::lock_guard<std::mutex> held(lazy_lock_);
+        if (!caches_[device_index])
+            caches_[device_index] = PipelineCache::open(*dev);
+        cache = caches_[device_index]->handle();
+    }
 
-    return make_vulkan_kernel(*dev, caches_[device_index]->handle(), spec);
+    // Outside the lock: the driver synchronises the cache itself for
+    // vkCreateComputePipelines, and building a pipeline is the slow part of
+    // starting a worker.
+    return make_vulkan_kernel(*dev, cache, spec);
 }
 
 bool VulkanBackend::create_instance()

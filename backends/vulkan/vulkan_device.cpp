@@ -161,6 +161,12 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(VkInstance instance,
 
 VulkanDevice::~VulkanDevice()
 {
+    // Nothing should still be in flight -- the kernels go first, and a command
+    // ring waits for the device before giving anything back. This is for the
+    // case where something did not: destroying a device with work outstanding
+    // is undefined behaviour, not an error the driver reports.
+    wait_idle();
+
     if (allocator_)
         vmaDestroyAllocator(allocator_);
     if (device_ != VK_NULL_HANDLE)

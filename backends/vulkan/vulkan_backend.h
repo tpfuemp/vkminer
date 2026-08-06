@@ -12,6 +12,7 @@
 #include "backends/vulkan/pipeline_cache.h"
 #include "backends/vulkan/vulkan_device.h"
 
+#include <mutex>
 #include <vector>
 
 namespace vkminer {
@@ -54,6 +55,12 @@ private:
     std::vector<uint32_t> compute_family_;             // parallel to devices_
     std::vector<std::unique_ptr<VulkanDevice>> open_;  // parallel to devices_
     std::vector<std::unique_ptr<PipelineCache>> caches_;  // and so is this
+
+    // Both of those are filled in on first use, and first use can be a worker
+    // thread. Two workers sharing a device would otherwise each see an empty
+    // slot and each create one, and the second assignment destroys the first's
+    // while a kernel is being built on it.
+    std::mutex lazy_lock_;
 };
 
 }  // namespace vkminer

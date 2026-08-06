@@ -98,7 +98,7 @@ bool run_pass(vkminer::VulkanDevice &device, vkminer::ComputePipeline &pipeline,
     const uint32_t groups = (count + local - 1) / local;
 
     const Push push{count, bias};
-    pipeline.record(slot->cmd, groups, &push, sizeof push);
+    pipeline.record(slot->cmd, 0, groups, &push, sizeof push);
 
     // Without this the copy below may read memory the shader has not finished
     // writing. It is the single most common way a dispatch appears to work on
@@ -228,7 +228,7 @@ bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info
         return false;
     }
 
-    pipeline->bind(&storage, 1);
+    pipeline->bind(0, &storage, 1);
 
     std::unique_ptr<vkminer::CommandRing> ring =
         vkminer::CommandRing::create(*device, 2);

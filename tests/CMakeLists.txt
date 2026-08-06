@@ -20,6 +20,36 @@ target_link_libraries(stratum_header_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME stratum_header_kat COMMAND stratum_header_kat)
 
+# The first test of the assembled binary rather than of something linked out of
+# it. It exists because --time-limit shipped parsed-but-never-read: accepted,
+# documented in --help, and doing nothing. It asserts only that the miner stops
+# by itself and stops with 0 -- CTest's TIMEOUT catches the regression, because
+# the bug guarded against looks exactly like a miner that runs forever.
+#
+# The null backend keeps it honest on a machine with no GPU: no device, no
+# shaders, no skip, so this runs everywhere the project builds.
+add_test(NAME time_limit
+    COMMAND vkminer --backend null -a sha256d --benchmark --time-limit 3)
+set_tests_properties(time_limit PROPERTIES TIMEOUT 20)
+
+# Reconnect, against a Stratum server written to misbehave. The three ways a
+# pool connection ends -- the socket breaking, the pool going quiet, and the
+# pool sending client.reconnect -- each reach the recovery path by a different
+# route, and none of them can be provoked on cue from a real pool.
+#
+# On the null backend, so it needs no GPU -- which leaves shares uncovered;
+# point it at --backend vulkan by hand for those. Three of its four assertions
+# are about something not happening for a while, which makes it much the
+# slowest test here, so it is labelled for ctest -LE slow.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME reconnect COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/reconnect_test.py"
+        --miner "$<TARGET_FILE:vkminer>" --backend null)
+    set_tests_properties(reconnect
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS slow)
+endif()
+
 # Only exists where shaders were compiled, because there is nothing to embed
 # otherwise. No device needed: this is about which bytes get loaded, not about
 # running them.
@@ -62,4 +92,12 @@ if(TARGET vkminer_shaders)
         vkminer_backends vkminer_warnings Threads::Threads)
     add_test(NAME diff_test COMMAND diff_test sha256d 100000)
     set_tests_properties(diff_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # The same range with the queue held to one dispatch -- the path
+    # --queue-depth 1 selects, and the baseline the pipelining is measured
+    # against. It catches a kernel that only works with something queued behind
+    # it, and costs one more run of a shader and reference it already has.
+    add_test(NAME diff_test_depth1 COMMAND diff_test sha256d 100000 1)
+    set_tests_properties(diff_test_depth1
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()

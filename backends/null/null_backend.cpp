@@ -1,7 +1,7 @@
 // vkminer -- a Vulkan compute cryptocurrency miner.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// A backend that hashes nothing. It reports one imaginary device, accepts any
+// A backend that hashes nothing. It reports imaginary devices, accepts any
 // algorithm, and returns no solutions -- but it does so at a steady, plausible
 // rate, which is enough to exercise the pool connection, the job pipeline, the
 // share accounting and the shutdown path without a GPU in the machine.
@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <string>
 #include <thread>
 
 namespace vkminer {
@@ -60,12 +61,18 @@ public:
 
     bool init() override
     {
-        DeviceInfo dev;
-        dev.index = 0;
-        dev.name = "null device";
-        dev.driver = "none";
-        dev.memory = 0;
-        devices_.push_back(dev);
+        // Two, so that the scheduler's multi-device half -- the worker-to-device
+        // map, per-device accounting, one partition per worker -- is reachable
+        // on a machine with one GPU. Neither computes anything, so the second
+        // costs nothing.
+        for (int i = 0; i < 2; i++) {
+            DeviceInfo dev;
+            dev.index = i;
+            dev.name = "null device " + std::to_string(i);
+            dev.driver = "none";
+            dev.memory = 0;
+            devices_.push_back(dev);
+        }
         return true;
     }
 
@@ -76,7 +83,7 @@ public:
     {
         // Any algorithm, because it implements none of them.
         (void)spec;
-        if (device_index != 0)
+        if (device_index < 0 || device_index >= static_cast<int>(devices_.size()))
             return nullptr;
         return std::unique_ptr<Kernel>(new NullKernel());
     }

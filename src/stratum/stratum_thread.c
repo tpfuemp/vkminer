@@ -80,6 +80,56 @@ void std_build_extraheader( struct work* g_work, struct stratum_ctx* sctx )
           le32dec( sctx->job.ntime ), le32dec(sctx->job.nbits) );
 }
 
+/* Rebuild `work` on the job it already holds, with `counter` as its
+   extranonce2. Returns false if that job is no longer the current one, which
+   means the caller should take the new one instead.
+
+   Extranonce2 is the miner's half of the coinbase, so a different value there
+   is a different merkle root and an entirely fresh 32-bit nonce range on the
+   same job. Upstream only moved it when a new job arrived, because a CPU takes
+   hours to exhaust one range; a device takes seconds.
+
+   The counter is written little-endian -- the order the field is counted and
+   submitted in -- truncated to the width the pool asked for. Callers must not
+   hand two workers the same value: stride the sequence by the worker count and
+   no two of them ever build the same coinbase.  */
+
+bool stratum_set_extranonce2( struct work *work, struct stratum_ctx *sctx,
+                              uint64_t counter )
+{
+   bool ok = false;
+
+   pthread_mutex_lock( &sctx->work_lock );
+
+   /* Same job, or nothing to rebuild against. Comparing the id rather than
+      trusting the caller, because the job can change between the copy the
+      worker holds and this call.  */
+   if ( sctx->xnonce2_size && sctx->job.job_id && work->job_id
+        && !strcmp( sctx->job.job_id, work->job_id ) )
+   {
+      /* Written into the shared coinbase because that is what the merkle root
+         is computed over; the lock makes that safe, and every other reader of
+         this field takes it too. Trampling the sequence stratum_gen_work would
+         have used costs nothing: any value is valid, and a new job resets the
+         field anyway.  */
+      for ( size_t i = 0; i < sctx->xnonce2_size; i++ )
+         sctx->job.xnonce2[i] = i < sizeof counter
+                              ? (uchar)( counter >> ( i * 8 ) ) : 0;
+
+      work->xnonce2_len = sctx->xnonce2_size;
+      work->xnonce2 = (uchar*) realloc( work->xnonce2, sctx->xnonce2_size );
+      memcpy( work->xnonce2, sctx->job.xnonce2, sctx->xnonce2_size );
+
+      /* Rebuilds data[] from the new coinbase. The target and the difficulty
+         belong to the job, not to the coinbase, so they stay as they are.  */
+      std_build_extraheader( work, sctx );
+      ok = true;
+   }
+
+   pthread_mutex_unlock( &sctx->work_lock );
+   return ok;
+}
+
 /* ------------------------------------------------------------ new work */
 
 static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
