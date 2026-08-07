@@ -20,6 +20,14 @@ target_link_libraries(stratum_header_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME stratum_header_kat COMMAND stratum_header_kat)
 
+# The tuning file: whether an entry comes back only for the device, driver,
+# algorithm and shader it was measured on. Needs no GPU, because what is being
+# checked is the bookkeeping around a measurement rather than the measurement.
+add_executable(tune_cache_test tune_cache_test.cpp)
+target_link_libraries(tune_cache_test PRIVATE
+    vkminer_tune_cache vkminer_warnings Threads::Threads)
+add_test(NAME tune_cache COMMAND tune_cache_test)
+
 # The first test of the assembled binary rather than of something linked out of
 # it. It exists because --time-limit shipped parsed-but-never-read: accepted,
 # documented in --help, and doing nothing. It asserts only that the miner stops

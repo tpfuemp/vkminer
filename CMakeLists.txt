@@ -170,6 +170,15 @@ add_library(vkminer_sha256 STATIC src/core/sha256.c)
 target_include_directories(vkminer_sha256 PUBLIC src)
 target_link_libraries(vkminer_sha256 PRIVATE vkminer_warnings)
 
+# ------------------------------------------------------------------- paths
+#
+# Where this program may leave files. Its own library because both the backend
+# -- for the pipeline cache -- and the tuner need it, and neither is below the
+# other.
+add_library(vkminer_paths STATIC src/core/paths.cpp)
+target_include_directories(vkminer_paths PUBLIC src)
+target_link_libraries(vkminer_paths PRIVATE vkminer_warnings)
+
 # ----------------------------------------------------- inherited C sources
 #
 # Deliberately not linked against vkminer_warnings. This is cpuminer-opt's
@@ -285,17 +294,31 @@ add_library(vkminer_backends STATIC
 target_include_directories(vkminer_backends PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer_backends PUBLIC
     volk vkminer_vma vkminer_inherited vkminer_algorithms)
-target_link_libraries(vkminer_backends PRIVATE vkminer_warnings)
+target_link_libraries(vkminer_backends PRIVATE vkminer_warnings vkminer_paths)
+
+# -------------------------------------------------------------- tune cache
+#
+# The file a sweep's answer is kept in, separated from the sweep itself so that
+# the format and its keying can be tested on a machine with no GPU -- which is
+# every machine the CI runs on.
+add_library(vkminer_tune_cache STATIC src/tune_cache.cpp)
+target_include_directories(vkminer_tune_cache PUBLIC
+    src "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(vkminer_tune_cache PUBLIC vkminer_jansson)
+target_link_libraries(vkminer_tune_cache PRIVATE
+    vkminer_sha256 vkminer_paths vkminer_warnings)
 
 # ------------------------------------------------------------------- binary
 add_executable(vkminer
     src/main.cpp
     src/self_test.cpp
+    src/tune.cpp
     src/scheduler/worker.cpp)
 
 target_include_directories(vkminer PRIVATE src "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer PRIVATE
-    vkminer_backends vkminer_warnings vkminer_inherited Threads::Threads)
+    vkminer_backends vkminer_tune_cache vkminer_warnings vkminer_inherited
+    Threads::Threads)
 target_compile_definitions(vkminer PRIVATE
     VKMINER_VERSION="${PROJECT_VERSION}-dev")
 

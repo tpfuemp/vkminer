@@ -400,6 +400,8 @@ extern bool opt_self_test;     /* run the known-answer vectors and exit */
 extern char *opt_backend;      /* backend name, NULL means the default */
 extern char *opt_algo_dir;     /* where to load shaders from */
 extern int  opt_queue_depth;   /* dispatches in flight per device, 0 = backend's */
+extern bool opt_retune;        /* sweep even where a tuning is already known */
+extern bool opt_no_tune;       /* do not sweep, and do not read one either */
 extern uint32_t submitted_share_count;
 extern uint32_t stale_share_count;
 extern int  work_thr_id;

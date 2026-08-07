@@ -124,6 +124,8 @@ cp config-template.json config.json     # then edit config.json
 | `--self-test` | Run the built-in known-answer tests and exit |
 | `--vk-validate` | Enable Vulkan validation layers. Much slower; for debugging |
 | `--queue-depth N` | Dispatches to keep queued on each GPU at once. Leave it alone to mine; set it to compare throughput at one depth against another |
+| `--retune` | Measure the workgroup size and queue depth again, even though they are already known |
+| `--no-tune` | Do not measure and do not use a measurement. Two runs of one binary are then comparable |
 | `--time-limit N` | Stop cleanly after N seconds of mining, counted from the first job so a slow pool does not eat into it. With `--benchmark`, prints the rate for the whole run on the way out |
 | `--api-bind ADDR` | Bind the local status API, e.g. `127.0.0.1:4048` |
 | `-q, --quiet` | Reduce logging |
@@ -132,6 +134,20 @@ cp config-template.json config.json     # then edit config.json
 
 Option names follow cpuminer where the meaning is the same, so existing scripts and habits
 carry over.
+
+### Tuning
+
+The workgroup size a shader runs fastest at differs between vendors, between two cards of one
+vendor, and across a driver update, so it is measured rather than compiled in. The first run
+on a given card sweeps for a few seconds against the algorithm's own test vector — never
+against pool work — and every candidate has to reproduce the published hashes before it is
+allowed to win. The answer goes in `%APPDATA%\vkminer\tune.json` or
+`~/.config/vkminer/tune.json`, keyed by device, driver build, algorithm and shader, so a new
+driver or an edited shader is measured again by itself. A card that will not tune mines at
+the built-in defaults.
+
+The rate printed by the sweep is a ranking, not a benchmark: it is taken in the first seconds
+of load, which on a thermally capped card are its best.
 
 ## How results are verified
 

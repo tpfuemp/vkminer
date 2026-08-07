@@ -103,12 +103,17 @@ public:
 
         const DeviceInfo &info = device.info();
 
-        // Validated where it is parsed; all that is left is whether it was
-        // given. Everything below sizes off depth_, so depth 1 is one of each
+        // The spec first: a caller that named a depth wants that one and no
+        // other, which is how the tuner runs one kernel at several. Then the
+        // option, validated where it is parsed, so all that is left here is
+        // whether it was given.
+        //
+        // Everything below sizes off depth_, so depth 1 is one of each
         // resource -- the submit-and-wait loop this had before it was
         // pipelined, from the same binary.
-        depth_ = opt_queue_depth > 0 ? static_cast<uint32_t>(opt_queue_depth)
-                                     : kDefaultDepth;
+        depth_ = spec.queue_depth              ? spec.queue_depth
+               : opt_queue_depth > 0           ? static_cast<uint32_t>(opt_queue_depth)
+                                               : kDefaultDepth;
 
         ComputePipelineDesc desc;
         desc.spirv = spec.spirv;
@@ -322,6 +327,8 @@ public:
     }
 
     uint32_t preferred_batch() const override { return batch_; }
+
+    uint32_t local_size() const override { return local_; }
 
     uint32_t queue_depth() const override { return depth_; }
 

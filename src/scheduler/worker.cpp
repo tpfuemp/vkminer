@@ -12,6 +12,7 @@
 
 #include "algorithms/registry.h"
 #include "backends/backend.h"
+#include "tune.h"
 
 extern "C" {
 #include "core/miner.h"
@@ -279,9 +280,13 @@ extern "C" void *miner_thread(void *userdata)
     }
 
     // The algorithm chooses what to run from what the device can do; the
-    // backend reads the result without asking what it computes.
-    const vkminer::KernelSpec spec =
+    // backend reads the result without asking what it computes. Then the
+    // tuning, which is neither's business: what this device was measured to
+    // like, overriding the width the algorithm would have accepted and the
+    // depth the backend would have picked.
+    vkminer::KernelSpec spec =
         algo->kernel(g_backend->devices()[device_index]);
+    vkminer::apply_tuning(device_index, &spec);
 
     std::unique_ptr<vkminer::Kernel> kernel =
         g_backend->create_kernel(device_index, spec);

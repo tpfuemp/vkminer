@@ -16,6 +16,7 @@ extern "C" {
 #include "backends/backend.h"
 #include "scheduler/worker.h"
 #include "self_test.h"
+#include "tune.h"
 
 #include <sys/stat.h>
 
@@ -342,6 +343,13 @@ int main(int argc, char *argv[])
 
     if (opt_self_test)
         return 0;
+
+    // After the self-test, because a sweep is worth nothing on a device that
+    // hashes wrongly, and before the pool, because a job's worth of nonces
+    // should not be scanned at a size chosen to be discarded. Vulkan only: the
+    // tune space is a width and a queue depth, and no other backend has either.
+    if (std::strcmp(g_backend->name(), "vulkan") == 0)
+        vkminer::tune_devices(*g_backend, g_device_map, opt_algo);
 
     // The backend decides the default, because what a worker is differs
     // between them: on a GPU it is a queue to keep fed, one per device, and

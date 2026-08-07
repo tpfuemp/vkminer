@@ -84,6 +84,11 @@ struct KernelSpec {
     uint32_t push_constant_bytes = 0;
     uint32_t local_size_x        = 0;  // 0 lets the backend choose
 
+    // Dispatches this kernel may hold at once; 0 lets the backend choose. Not
+    // an algorithm's business -- it is here so a caller sweeping both axes can
+    // ask for one combination without going through a process-wide global.
+    uint32_t queue_depth = 0;
+
     // The CPU half: the scalar reference every algorithm must supply. A
     // backend with no way to run SPIR-V runs this instead, and the differential
     // test measures the shader against it. Borrowed, not owned -- the kernel
@@ -130,6 +135,12 @@ public:
     // Nonces the caller should ask for per dispatch to keep the device busy
     // without holding it long enough to miss a new job.
     virtual uint32_t preferred_batch() const = 0;
+
+    // The width this kernel was built at, which need not be the one asked for:
+    // a spec naming none leaves the backend to pick off the device's limits. A
+    // tuner has to read that back, because what it writes down must be a number
+    // a later run can ask for. Zero from a backend with no such concept.
+    virtual uint32_t local_size() const { return 0; }
 
     // Dispatches the caller may leave outstanding at once. More than one lets
     // the device start the next the instant it finishes one, rather than

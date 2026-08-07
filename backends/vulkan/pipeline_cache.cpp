@@ -3,59 +3,14 @@
 
 #include "backends/vulkan/pipeline_cache.h"
 
-#include <cerrno>
+#include "core/paths.h"
+
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
-#ifdef WIN32
-#include <direct.h>
-#else
-#include <sys/stat.h>
-#include <sys/types.h>
-#endif
-
 namespace vkminer {
 namespace {
-
-bool make_directory(const std::string &path)
-{
-#ifdef WIN32
-    return _mkdir(path.c_str()) == 0 || errno == EEXIST;
-#else
-    return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
-#endif
-}
-
-// The per-user cache directory, created if it is not there. Empty if the
-// environment does not say where it should be, which is a reason to skip the
-// on-disk cache and not a reason to guess.
-std::string cache_directory()
-{
-    std::string base;
-
-#ifdef WIN32
-    if (const char *local = std::getenv("LOCALAPPDATA"))
-        base = local;
-#else
-    if (const char *xdg = std::getenv("XDG_CACHE_HOME")) {
-        base = xdg;
-    } else if (const char *home = std::getenv("HOME")) {
-        base = std::string(home) + "/.cache";
-        if (!make_directory(base))
-            return std::string();
-    }
-#endif
-
-    if (base.empty())
-        return std::string();
-
-    base += "/vkminer";
-    if (!make_directory(base))
-        return std::string();
-    return base;
-}
 
 std::string uuid_hex(const uint8_t uuid[VK_UUID_SIZE])
 {

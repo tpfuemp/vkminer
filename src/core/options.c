@@ -110,6 +110,13 @@ bool opt_vk_validate = false;
  * one binary can be run at two depths and the difference measured. */
 int opt_queue_depth = 0;
 
+/* What to do about the tuning file. By default it is read and a sweep runs only
+ * where this device, driver, algorithm and shader are not in it; --retune
+ * sweeps regardless, for when a measurement is in doubt; --no-tune neither
+ * reads nor writes it, which is what makes two runs comparable. */
+bool opt_retune = false;
+bool opt_no_tune = false;
+
 /* Run the known-answer vectors and exit. The same check the miner makes at
  * startup regardless; the option exists so that a machine can be checked
  * without a pool, a wallet or a network. */
@@ -171,6 +178,14 @@ Options:\n\
                         submit-and-wait. Higher keeps the device fed but costs\n\
                         N dispatches of latency on every job change. For\n\
                         measuring the difference, not for mining\n\
+      --retune          measure the workgroup size and queue depth this GPU\n\
+                        runs fastest at, even though they are already known.\n\
+                        The sweep takes a few seconds, runs against the\n\
+                        algorithm's own test vector rather than pool work, and\n\
+                        is repeated by itself after a driver update anyway\n\
+      --no-tune         do not measure, and do not use a measurement: run at\n\
+                        the built-in defaults. Two runs of one binary are then\n\
+                        comparable, which a run that tuned itself is not\n\
       --self-test       check that this build reproduces published block\n\
                         hashes on every selected device, then exit. The same\n\
                         check runs before every mining session anyway; this\n\
@@ -259,6 +274,7 @@ static struct option const options[] = {
    { "no-longpoll",       0, NULL, 1003 },
    { "no-redirect",       0, NULL, 1009 },
    { "no-stratum",        0, NULL, 1007 },
+   { "no-tune",           0, NULL, 1048 },
    { "pass",              1, NULL, 'p' },
    { "protocol",          0, NULL, 'P' },
    { "protocol-dump",     0, NULL, 'P' },
@@ -267,6 +283,7 @@ static struct option const options[] = {
    { "quiet",             0, NULL, 'q' },
    { "retries",           1, NULL, 'r' },
    { "retry-pause",       1, NULL, 1025 },
+   { "retune",            0, NULL, 1047 },
    { "scantime",          1, NULL, 's' },
    { "self-test",         0, NULL, 1045 },
    { "stratum-keepalive", 0, NULL, 1029 },
@@ -496,6 +513,14 @@ void parse_arg( int key, char *arg )
          if ( v < 1 || v > 16 )
             show_usage_and_exit( 1 );
          opt_queue_depth = v;
+         break;
+
+      case 1047: // retune
+         opt_retune = true;
+         break;
+
+      case 1048: // no-tune
+         opt_no_tune = true;
          break;
 
       /* --debug and --protocol-dump outrank --quiet whichever order they

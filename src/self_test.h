@@ -14,6 +14,7 @@
 #ifndef VKMINER_SELF_TEST_H__
 #define VKMINER_SELF_TEST_H__
 
+#include "algorithms/algorithm.h"
 #include "backends/backend.h"
 
 #include <vector>
@@ -26,6 +27,16 @@ namespace vkminer {
 // reason to stop, not a reason to warn.
 bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
                const char *algo_name);
+
+// One vector through one kernel: out of a range of nonces around the published
+// one, that nonce and no other. `device` names the thing being tested in the
+// failure messages.
+//
+// Exposed rather than private to the self-test because the tuner rebuilds the
+// same shader at other widths, and a width may only win after it is shown to
+// still be right. The self-test proves the one configuration it ran.
+bool kernel_reproduces(Kernel &kernel, const Algorithm &algo,
+                       const KnownAnswer &answer, const char *device);
 
 }  // namespace vkminer
 

@@ -5,6 +5,8 @@
 
 #include "algorithms/registry.h"
 
+#include <vector>
+
 extern "C" {
 #include "core/miner.h"
 }
@@ -78,13 +80,15 @@ bool check_reference(const Algorithm &algo, const KnownAnswer &answer)
     return false;
 }
 
+}  // namespace
+
 // The same vector through a kernel. The target is the published digest itself,
 // which the network's hash <= target rule means exactly that nonce meets: the
 // neighbours in the range would each have to clear a target with sixty-four
 // leading zero bits to join it, so one candidate is the answer and any other
 // number is a bug.
-bool check_device(Kernel &kernel, const Algorithm &algo,
-                  const KnownAnswer &answer, const char *device)
+bool kernel_reproduces(Kernel &kernel, const Algorithm &algo,
+                       const KnownAnswer &answer, const char *device)
 {
     std::vector<uint32_t> header;
     header_words(algo, answer, &header);
@@ -132,8 +136,6 @@ bool check_device(Kernel &kernel, const Algorithm &algo,
 
     return true;
 }
-
-}  // namespace
 
 bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
                const char *algo_name)
@@ -185,7 +187,7 @@ bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
                                  + " (" + info.name + ")";
 
         for (size_t i = 0; i < count; i++)
-            if (!check_device(*kernel, *algo, answers[i], device.c_str()))
+            if (!kernel_reproduces(*kernel, *algo, answers[i], device.c_str()))
                 return false;
 
         applog(LOG_INFO, "Self-test: %s reproduces %u published hash(es)",
