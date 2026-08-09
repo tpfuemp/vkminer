@@ -295,10 +295,13 @@ static bool stratum_handle_response( char *buf )
 
    err_val = json_object_get( val, "error" );
 
-   if ( !res_val || json_integer_value( id_val ) < 4 )
+   /* 1..3 are subscribe, authorize and extranonce.subscribe; every id from 4
+    * up belongs to one share, and is what says *which* share this answers. */
+   json_int_t id = json_integer_value( id_val );
+   if ( !res_val || id < 4 )
       goto out;
    share_accepted = json_is_true( res_val );
-   share_result( share_accepted, NULL, err_val ?
+   share_result( share_accepted, (uint32_t)id, NULL, err_val ?
                  json_string_value( json_array_get(err_val, 1) ) : NULL );
 
 	ret = true;

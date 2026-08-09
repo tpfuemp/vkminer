@@ -224,6 +224,10 @@ struct work
     * so results carry the epoch they were launched under and stale ones are
     * dropped on completion rather than prevented. */
    uint32_t job_epoch;
+   /* The JSON-RPC id this share is submitted under, and the only thing that
+    * ties the pool's reply back to it. Assigned before the share is queued,
+    * so the request builder and the pending-stats entry agree on it. */
+   uint32_t submit_id;
 } __attribute__ ((aligned (WORK_ALIGNMENT)));
 
 struct stratum_job
@@ -559,7 +563,10 @@ void   sprintf_et( char *str, unsigned long seconds );
 void   share_stats_init( void );
 void   share_stats_reset( void );
 void   share_last_submit_time( struct timeval *tv );
-int    share_result( int result, struct work *work, const char *reason );
+/* `id` is the JSON-RPC id the pool echoed, which is what says *which* share
+ * this reply is about. Several may be in flight at once. */
+int    share_result( int result, uint32_t id, struct work *work,
+                     const char *reason );
 
 extern uint64_t session_first_block;
 extern uint32_t last_block_height;

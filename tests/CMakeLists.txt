@@ -71,6 +71,21 @@ if(Python3_Interpreter_FOUND)
             --miner "$<TARGET_FILE:vkminer>" --backend vulkan --devices 0)
         set_tests_properties(duplicate_test
             PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS slow)
+
+        # A reply says which share it answers only through the id it echoes.
+        # With the queue kept full several shares are in flight at once and a
+        # pool may answer the newest first, so a miner matching replies by
+        # arrival order prints one share's job and difficulty beside another
+        # share's verdict. This pool answers out of order on purpose.
+        #
+        # Needs a device for the same reason as above, and measures the device's
+        # share rate before it starts: the miner remembers only the last eight
+        # submissions, so the experiment has to be slower than that window.
+        add_test(NAME submit_id_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/submit_id_test.py"
+            --miner "$<TARGET_FILE:vkminer>" --backend vulkan --devices 0)
+        set_tests_properties(submit_id_test
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS slow)
     endif()
 endif()
 

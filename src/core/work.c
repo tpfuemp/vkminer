@@ -169,6 +169,7 @@ void sprintf_et( char *str, unsigned long seconds )
 struct share_stats_t
 {
    int share_count;
+   uint32_t submit_id;      /* the JSON-RPC id the reply will carry */
    struct timeval submit_time;
    double net_diff;
    double share_diff;
@@ -180,7 +181,13 @@ struct share_stats_t
 
 #define s_stats_size 8
 static struct share_stats_t share_stats[ s_stats_size ] = {{0}};
-static int s_get_ptr = 0, s_put_ptr = 0;
+static int s_put_ptr = 0;
+
+/* Ids 1..3 belong to subscribe, authorize and extranonce.subscribe, and the
+ * response handler ignores anything below 4 for that reason. Shares take every
+ * id from 4 up, one each, and wrap back to 4 rather than to 0. */
+#define s_first_submit_id 4u
+static uint32_t next_submit_id = s_first_submit_id;
 static struct timeval last_submit_time = {0};
 
 void ( *report_devices_hook )( void ) = NULL;
@@ -230,10 +237,21 @@ void share_stats_init( void )
 }
 
 /* Dropped on reconnect: the pending entries describe shares whose replies can
- * no longer arrive, and leaving them queued desynchronises the ring. */
+ * no longer arrive, and the ids they are waiting on will never be echoed. */
 void share_stats_reset( void )
 {
-   if ( s_get_ptr != s_put_ptr ) s_get_ptr = s_put_ptr = 0;
+   pthread_mutex_lock( &stats_lock );
+   memset( share_stats, 0, sizeof share_stats );
+   s_put_ptr = 0;
+   pthread_mutex_unlock( &stats_lock );
+}
+
+/* Whether any submitted share is still waiting for its reply. */
+static bool shares_pending( void )
+{
+   for ( int i = 0; i < s_stats_size; i++ )
+      if ( share_stats[i].submit_time.tv_sec ) return true;
+   return false;
 }
 
 void share_last_submit_time( struct timeval *tv )
@@ -267,7 +285,7 @@ void report_summary_log( bool force )
    {
       if ( et.tv_sec < 300 )
          return;
-      if ( ( s_get_ptr != s_put_ptr ) && ( et.tv_sec < 360 ) )
+      if ( shares_pending() && ( et.tv_sec < 360 ) )
          return;
    }
 
@@ -383,7 +401,8 @@ void report_summary_log( bool force )
    }
 }
 
-int share_result( int result, struct work *work, const char *reason )
+int share_result( int result, uint32_t id, struct work *work,
+                  const char *reason )
 {
    double share_time = 0.;
    double hashrate = 0.;
@@ -399,20 +418,35 @@ int share_result( int result, struct work *work, const char *reason )
    char *acol, *bcol, *scol, *rcol;
    acol = bcol = scol = rcol = "\0";
 
+   // Which share this is, by the id the pool echoed rather than by arrival
+   // order. Replies are not ordered: several shares can be in flight at once
+   // -- queue depth 3 makes that ordinary rather than rare -- and a pool is
+   // free to answer them in any order, so taking the oldest pending entry
+   // attaches one share's difficulty, job and elapsed time to another's
+   // result. The aggregate counts survive that; the printed line does not.
    pthread_mutex_lock( &stats_lock );
 
-   if ( likely( share_stats[ s_get_ptr ].submit_time.tv_sec ) )
+   int slot = -1;
+   for ( int i = 0; i < s_stats_size; i++ )
+      if ( share_stats[i].submit_time.tv_sec && share_stats[i].submit_id == id )
+      {
+         slot = i;
+         break;
+      }
+
+   if ( likely( slot >= 0 ) )
    {
-      memcpy( &my_stats, &share_stats[ s_get_ptr], sizeof my_stats );
-      memset( &share_stats[ s_get_ptr ], 0, sizeof my_stats );
-      s_get_ptr = stats_ptr_incr( s_get_ptr );
+      memcpy( &my_stats, &share_stats[ slot ], sizeof my_stats );
+      memset( &share_stats[ slot ], 0, sizeof my_stats );
       pthread_mutex_unlock( &stats_lock );
    }
    else
    {
-      // empty queue, it must have overflowed and stats were lost for a share.
+      // No pending share under that id: the ring overflowed and the entry was
+      // overwritten, or the reply arrived after a reconnect cleared it. The
+      // result is still counted; only the detail is gone.
       pthread_mutex_unlock( &stats_lock );
-      applog(LOG_WARNING,"Share stats not available.");
+      applog( LOG_WARNING, "Share stats not available for id %u.", id );
    }
 
    // calculate latency and share time.
@@ -530,8 +564,10 @@ int share_result( int result, struct work *work, const char *reason )
 
 /* ---------------------------------------------------------- submission */
 
+/* The id is per share, not the fixed 4 upstream sends. A pool echoes it back,
+ * and it is the only field in the reply that says which share was answered. */
 static const char *json_submit_req =
-   "{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"], \"id\":4}";
+   "{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"], \"id\":%u}";
 
 void std_le_build_stratum_request( char *req, struct work *work )
 {
@@ -544,7 +580,7 @@ void std_le_build_stratum_request( char *req, struct work *work )
    bin2hex( noncestr, (char*)(&nonce), sizeof(uint32_t) );
    xnonce2str = abin2hex( work->xnonce2, work->xnonce2_len );
    snprintf( req, JSON_BUF_LEN, json_submit_req, rpc_user, work->job_id,
-             xnonce2str, ntimestr, noncestr );
+             xnonce2str, ntimestr, noncestr, work->submit_id );
    free( xnonce2str );
 }
 
@@ -692,6 +728,7 @@ static void update_submit_stats( struct work *work, const void *hash )
 
    submitted_share_count++;
    share_stats[ s_put_ptr ].share_count = submitted_share_count;
+   share_stats[ s_put_ptr ].submit_id = work->submit_id;
    gettimeofday( &share_stats[ s_put_ptr ].submit_time, NULL );
    share_stats[ s_put_ptr ].share_diff = work->sharediff;
    share_stats[ s_put_ptr ].net_diff = net_diff;
@@ -705,10 +742,24 @@ static void update_submit_stats( struct work *work, const void *hash )
    pthread_mutex_unlock( &stats_lock );
 }
 
+/* Every share gets its own, and it has to be assigned before the share is
+ * handed to the workio thread: that thread builds the request from the copy
+ * it was given, and the pending-stats entry has to name the same id. */
+static uint32_t claim_submit_id( void )
+{
+   pthread_mutex_lock( &stats_lock );
+   uint32_t id = next_submit_id++;
+   if ( unlikely( next_submit_id < s_first_submit_id ) )
+      next_submit_id = s_first_submit_id;      /* wrapped past 2^32 */
+   pthread_mutex_unlock( &stats_lock );
+   return id;
+}
+
 bool submit_solution( struct work *work, const void *hash,
                       struct thr_info *thr )
 {
    work->sharediff = hash_to_diff( hash ) * opt_target_factor;
+   work->submit_id = claim_submit_id();
    if ( likely( submit_work( thr, work ) ) )
    {
      update_submit_stats( work, hash );
