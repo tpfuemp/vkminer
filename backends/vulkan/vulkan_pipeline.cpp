@@ -3,6 +3,7 @@
 
 #include "backends/vulkan/vulkan_pipeline.h"
 
+#include <cstddef>
 #include <cstdio>
 
 namespace vkminer {
@@ -154,16 +155,28 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
                "vkCreateShaderModule"))
         return nullptr;
 
-    VkSpecializationMapEntry entry{};
-    entry.constantID = 0;
-    entry.offset = 0;
-    entry.size = sizeof(uint32_t);
+    // Both constants in one block, laid out by this struct rather than by the
+    // desc: `probe_best` is a C++ bool and the Vulkan side of a boolean
+    // specialization constant is a four-byte VkBool32, so it cannot be pointed
+    // at where it lives.
+    struct Constants {
+        uint32_t local_size_x;
+        VkBool32 probe_best;
+    } constants{desc.local_size_x, desc.probe_best ? VK_TRUE : VK_FALSE};
+
+    VkSpecializationMapEntry entries[2]{};
+    entries[0].constantID = 0;
+    entries[0].offset = offsetof(Constants, local_size_x);
+    entries[0].size = sizeof constants.local_size_x;
+    entries[1].constantID = 1;
+    entries[1].offset = offsetof(Constants, probe_best);
+    entries[1].size = sizeof constants.probe_best;
 
     VkSpecializationInfo spec{};
-    spec.mapEntryCount = 1;
-    spec.pMapEntries = &entry;
-    spec.dataSize = sizeof(uint32_t);
-    spec.pData = &desc.local_size_x;
+    spec.mapEntryCount = 2;
+    spec.pMapEntries = entries;
+    spec.dataSize = sizeof constants;
+    spec.pData = &constants;
 
     VkComputePipelineCreateInfo create{};
     create.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -173,6 +186,12 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
     create.stage.pName = "main";
     create.stage.pSpecializationInfo = &spec;
     create.layout = p->layout_;
+
+    // Asked for only when the numbers are going to be read. A driver may keep
+    // more around, or optimize less, to be able to answer -- so this bit is
+    // part of the measurement, not free instrumentation to leave switched on.
+    if (device.pipeline_stats())
+        create.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
 
     const bool ok = vk_ok(fn.vkCreateComputePipelines(dev, cache, 1, &create,
                                                       nullptr, &p->pipeline_),
@@ -205,6 +224,107 @@ ComputePipeline::~ComputePipeline()
         fn.vkDestroyDescriptorPool(dev, pool_, nullptr);
     if (set_layout_ != VK_NULL_HANDLE)
         fn.vkDestroyDescriptorSetLayout(dev, set_layout_, nullptr);
+}
+
+void ComputePipeline::report_statistics(const char *label) const
+{
+    if (!device_ || !device_->pipeline_stats() || pipeline_ == VK_NULL_HANDLE)
+        return;
+
+    const VolkDeviceTable &fn = device_->fn();
+    const VkDevice dev = device_->handle();
+
+    if (!fn.vkGetPipelineExecutablePropertiesKHR
+        || !fn.vkGetPipelineExecutableStatisticsKHR) {
+        applog(LOG_ERR, "Vulkan: %s enabled pipeline statistics but did not "
+                        "provide the entry points", device_->info().name.c_str());
+        return;
+    }
+
+    VkPipelineInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR;
+    info.pipeline = pipeline_;
+
+    uint32_t count = 0;
+    if (!vk_ok(fn.vkGetPipelineExecutablePropertiesKHR(dev, &info, &count,
+                                                       nullptr),
+               "vkGetPipelineExecutableProperties"))
+        return;
+    if (!count) {
+        applog(LOG_NOTICE, "Vulkan: %s reports no executables for %s",
+               device_->info().name.c_str(), label);
+        return;
+    }
+
+    std::vector<VkPipelineExecutablePropertiesKHR> executables(count);
+    for (VkPipelineExecutablePropertiesKHR &e : executables)
+        e.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_PROPERTIES_KHR;
+    if (!vk_ok(fn.vkGetPipelineExecutablePropertiesKHR(dev, &info, &count,
+                                                       executables.data()),
+               "vkGetPipelineExecutableProperties"))
+        return;
+
+    for (uint32_t i = 0; i < count; i++) {
+        const VkPipelineExecutablePropertiesKHR &e = executables[i];
+        applog(LOG_NOTICE, "Vulkan: %s, %s, workgroup %u -- '%s' (%s), "
+                           "subgroup %u",
+               device_->info().name.c_str(), label, local_size_x_, e.name,
+               e.description, e.subgroupSize);
+
+        VkPipelineExecutableInfoKHR which{};
+        which.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_INFO_KHR;
+        which.pipeline = pipeline_;
+        which.executableIndex = i;
+
+        uint32_t stats = 0;
+        if (!vk_ok(fn.vkGetPipelineExecutableStatisticsKHR(dev, &which, &stats,
+                                                           nullptr),
+                   "vkGetPipelineExecutableStatistics"))
+            continue;
+        if (!stats) {
+            applog(LOG_NOTICE, "Vulkan:   (no statistics offered)");
+            continue;
+        }
+
+        std::vector<VkPipelineExecutableStatisticKHR> values(stats);
+        for (VkPipelineExecutableStatisticKHR &s : values)
+            s.sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
+        if (!vk_ok(fn.vkGetPipelineExecutableStatisticsKHR(dev, &which, &stats,
+                                                           values.data()),
+                   "vkGetPipelineExecutableStatistics"))
+            continue;
+
+        // Every name here is the driver's own. There is no portable "registers"
+        // statistic to look for -- NVIDIA, RADV and the rest each publish their
+        // own set -- so this prints what it is given rather than searching for
+        // names it hopes are there.
+        for (const VkPipelineExecutableStatisticKHR &s : values) {
+            char value[64];
+            switch (s.format) {
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_BOOL32_KHR:
+                snprintf(value, sizeof value, "%s",
+                         s.value.b32 ? "true" : "false");
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_INT64_KHR:
+                snprintf(value, sizeof value, "%lld",
+                         static_cast<long long>(s.value.i64));
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_UINT64_KHR:
+                snprintf(value, sizeof value, "%llu",
+                         static_cast<unsigned long long>(s.value.u64));
+                break;
+            case VK_PIPELINE_EXECUTABLE_STATISTIC_FORMAT_FLOAT64_KHR:
+                snprintf(value, sizeof value, "%.4g", s.value.f64);
+                break;
+            default:
+                snprintf(value, sizeof value, "(format %d)",
+                         static_cast<int>(s.format));
+                break;
+            }
+            applog(LOG_NOTICE, "Vulkan:   %-32s %12s   %s", s.name, value,
+                   s.description);
+        }
+    }
 }
 
 void ComputePipeline::bind(uint32_t set, const Buffer *buffers, uint32_t count)

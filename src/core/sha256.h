@@ -35,6 +35,27 @@ void sha256d( void *hash, const void *data, size_t len );
  * bytes, and the differential test is what says the two agree.  */
 void sha256_midstate( uint32_t state[8], const uint32_t words[16] );
 
+/* The same idea carried one block further into the nonce-bearing block.
+ *
+ * Of that block's sixteen words only w[3] is the nonce; w[0..2] are the last
+ * three header words and the rest is padding. So rounds 0..2 depend on nothing
+ * per-nonce at all, and round 3 and message words 16..19 depend on the nonce
+ * only *affinely* -- the nonce enters each of them once, through an addition
+ * or through sigma0, and never through a rotation of a sum. Compute them here
+ * at a nonce of zero and the device recovers any nonce by adding it back.
+ *
+ * Outputs, given the midstate over header words 0..15 and words 16..18:
+ *   advanced[0..7]  the working variables a..h entering round 4, where
+ *                   advanced[0] and advanced[4] are bases the device adds the
+ *                   nonce to and the other six are the same for every nonce;
+ *   sched[0..3]     message words w[16..19], where w[18] takes the nonce
+ *                   through sigma0 and w[19] adds it.
+ *
+ * Like sha256_midstate(), not an optimization of the reference.  */
+void sha256_advance_nonce_block( uint32_t advanced[8], uint32_t sched[4],
+                                 const uint32_t state[8],
+                                 const uint32_t tail[3] );
+
 #ifdef __cplusplus
 }
 #endif

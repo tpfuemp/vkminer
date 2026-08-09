@@ -330,6 +330,7 @@ void get_currentalgo( char *buf, int sz );
 extern bool opt_debug;
 extern bool opt_debug_diff;
 extern bool opt_benchmark;
+extern int64_t opt_benchmark_target;
 extern bool opt_protocol;
 extern bool opt_extranonce;
 extern bool opt_quiet;
@@ -396,6 +397,9 @@ extern int  opt_api_remote;
 extern char *opt_devices;      /* comma separated indices, empty means all */
 extern bool opt_device_list;   /* enumerate and exit */
 extern bool opt_vk_validate;   /* Vulkan validation layers */
+extern bool opt_vk_pipeline_stats; /* report what the driver compiled a shader into */
+extern bool opt_vk_probe_best; /* have the shader track the best digest it sees */
+extern char *opt_replay;       /* capture file to re-run, NULL to mine */
 extern bool opt_self_test;     /* run the known-answer vectors and exit */
 extern char *opt_backend;      /* backend name, NULL means the default */
 extern char *opt_algo_dir;     /* where to load shaders from */

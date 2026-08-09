@@ -18,12 +18,16 @@ namespace {
 // shaders/common/candidates.glsl; see the constant of the same name there.
 constexpr uint32_t kCandidateWords = 9;
 
-// Far more than a dispatch should ever produce. A batch that fills this is a
-// batch sized for a difficulty nobody is mining at, and the host says so rather
-// than quietly returning the first few.
-constexpr uint32_t kMaxCandidates = 32;
+// kMaxCandidates is in backends/backend.h, because every caller of collect()
+// has to size its array by the same number.
 
-constexpr uint32_t kResultWords = 1 + kMaxCandidates * kCandidateWords;
+// Word 0 is the count, word 1 the best digest the probe saw, and the candidates
+// follow. Both halves of the same contract as above.
+constexpr uint32_t kFoundWord = 0;
+constexpr uint32_t kBestWord = 1;
+constexpr uint32_t kHeaderWords = 2;
+
+constexpr uint32_t kResultWords = kHeaderWords + kMaxCandidates * kCandidateWords;
 
 // How long a dispatch is aimed at. Short enough that a new job costs at most
 // this much wasted work and that no watchdog anywhere is close to firing -- the
@@ -122,12 +126,20 @@ public:
         desc.push_constant_bytes = push_bytes_;
         desc.local_size_x = spec.local_size_x ? spec.local_size_x
                                               : choose_local_size(info);
+        probe_best_ = opt_vk_probe_best;
+        desc.probe_best = probe_best_;
         desc.sets = depth_;
 
         pipeline_ = ComputePipeline::create(device, desc, cache);
         if (!pipeline_)
             return false;
         local_ = pipeline_->local_size_x();
+
+        // Here rather than at the call site: this is the only place that knows
+        // both the pipeline and which algorithm it belongs to, and the tuner
+        // builds one of these per candidate workgroup size -- which is exactly
+        // the sweep worth seeing the register cost of. A no-op unless asked.
+        pipeline_->report_statistics(name_);
 
         // One result buffer per in-flight dispatch, not one shared: the host
         // reads a dispatch's results long after the next has started writing,
@@ -228,7 +240,19 @@ public:
         // The counter has to start at zero, and the whole buffer is small
         // enough that clearing all of it costs nothing and leaves no stale
         // candidate from the last dispatch anywhere the host could read one.
-        fn.vkCmdFillBuffer(slot->cmd, mine.results.handle, 0, VK_WHOLE_SIZE, 0);
+        //
+        // Three fills rather than one because the probe's word starts at the
+        // opposite end of the range: a running minimum initialized to zero
+        // stays zero. They cover disjoint bytes, which is what lets them go in
+        // without a barrier between them -- two transfer writes to the same
+        // word would have no defined order.
+        fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
+                           kFoundWord * sizeof(uint32_t), sizeof(uint32_t), 0);
+        fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
+                           kBestWord * sizeof(uint32_t), sizeof(uint32_t),
+                           0xffffffffu);
+        fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
+                           kHeaderWords * sizeof(uint32_t), VK_WHOLE_SIZE, 0);
 
         VkMemoryBarrier cleared{};
         cleared.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -305,7 +329,22 @@ public:
 
         const uint32_t *result =
             static_cast<const uint32_t *>(mine.readback.mapped);
-        uint32_t found = result[0];
+        uint32_t found = result[kFoundWord];
+
+        // One dispatch's minimum is a sample rather than an observation about
+        // the kernel, so it is scaled into a quantity whose expected value is
+        // one and added to the others. Scaled by this dispatch's own nonce
+        // count, not by the current batch size: they differ for the last
+        // dispatch of a job and for every dispatch made while the tuner was
+        // still moving, which is most of the first few seconds of a run.
+        //
+        // Nothing accumulates when the probe is off, so a caller that did not
+        // ask sees that it asked nothing rather than seeing a number.
+        if (probe_best_) {
+            best_ratio_sum_ += static_cast<double>(result[kBestWord])
+                             * static_cast<double>(entry.count) / 4294967296.;
+            best_samples_++;
+        }
 
         if (found > kMaxCandidates) {
             applog(LOG_WARNING, "Vulkan: '%s' found %u candidates in one "
@@ -318,7 +357,8 @@ public:
             found = static_cast<uint32_t>(max);
 
         for (uint32_t i = 0; i < found; i++) {
-            const uint32_t *candidate = result + 1 + i * kCandidateWords;
+            const uint32_t *candidate =
+                result + kHeaderWords + i * kCandidateWords;
             out[i].nonce = candidate[0];
             std::memcpy(out[i].hash, candidate + 1, sizeof out[i].hash);
         }
@@ -331,6 +371,11 @@ public:
     uint32_t local_size() const override { return local_; }
 
     uint32_t queue_depth() const override { return depth_; }
+
+    BestDigest best_digest() const override
+    {
+        return BestDigest{best_ratio_sum_, best_samples_};
+    }
 
 private:
     // Aim the next dispatch at kTargetSeconds, from the interval the device is
@@ -436,6 +481,13 @@ private:
 
     uint32_t local_ = 0;
     uint32_t batch_ = kMinBatch;
+
+    // The per-dispatch minima the probe has reported, each scaled to an
+    // expected value of one, and how many contributed. Both stay at zero
+    // unless the probe is on.
+    double best_ratio_sum_ = 0.;
+    uint64_t best_samples_ = 0;
+    bool probe_best_ = false;
 };
 
 }  // namespace

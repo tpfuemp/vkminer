@@ -6,10 +6,6 @@
 // kernel computes, and it never sees a block header as anything but bytes.
 // Everything an algorithm means -- the header layout, the endianness, what
 // counts as a solution -- lives on the other axis.
-//
-// This is the shape the null backend needs and no more. It will grow when the
-// Vulkan backend has something to say about it; treat every signature here as
-// provisional until a real device has run through it.
 
 #ifndef VKMINER_BACKENDS_BACKEND_H__
 #define VKMINER_BACKENDS_BACKEND_H__
@@ -65,6 +61,16 @@ struct Solution {
     uint32_t nonce;
     uint32_t hash[8];
 };
+
+// Candidates a single dispatch can hand back. Here rather than inside a backend
+// because a caller of collect() has to size its array by it: a smaller host
+// array drops solutions the device stored and had room for, and nothing reports
+// it -- the device only warns about what did not fit in *its* buffer.
+//
+// Far more than a dispatch should ever produce. A batch that fills it is sized
+// for a difficulty nobody is mining at, and the host says so rather than
+// quietly returning the first few.
+constexpr uint32_t kMaxCandidates = 32;
 
 class Algorithm;
 
@@ -147,6 +153,32 @@ public:
     // waiting for the host to notice that it did. Results come back oldest
     // first, and the caller has to remember what each was launched under.
     virtual uint32_t queue_depth() const { return 1; }
+
+    // What the best-digest probe has seen: the one thing a caller can observe
+    // about the nonces that did *not* come back. Candidates prove the kernel
+    // finds what it reports; nothing else says whether it is missing valid
+    // nonces, because a kernel that misses them reports nothing at all -- no
+    // rejects, no failed re-verify, just worse luck than it should have had.
+    //
+    // `samples` counts the dispatches that reported a reading; `ratio_sum` adds
+    // up, for each, the smallest most significant digest word it saw times the
+    // nonces it covered, over 2^32. Digest words are uniform, so the smallest
+    // of n of them sits near 2^32/n and each term has an expected value of one
+    // whatever n was: `ratio_sum / samples` reads 1.00 for a kernel that
+    // searches every nonce handed to it, 2.00 for one searching half.
+    //
+    // Not a running minimum, which saturates to zero within seconds on a fast
+    // card and then reads the same as a probe that was never wired up. And the
+    // terms are weighted by n rather than averaged raw, because the batch size
+    // moves during a run -- an unweighted mean would describe the tuner.
+    //
+    // `samples` of zero means no observation -- the probe was not asked for, or
+    // this backend does not offer one -- and is not a measurement.
+    struct BestDigest {
+        double ratio_sum = 0.;
+        uint64_t samples = 0;
+    };
+    virtual BestDigest best_digest() const { return BestDigest{}; }
 };
 
 class ComputeBackend {

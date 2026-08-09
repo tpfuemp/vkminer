@@ -10,11 +10,10 @@
 // for bit.
 //
 // The target is chosen so that candidates are common: about one nonce in a
-// thousand, rather than the one in billions a real difficulty asks for. A test
-// at pool difficulty would dispatch for an hour and prove nothing about the
-// comparison, because the interesting cases -- a hash just above the target,
-// just below it, equal in the top word and decided by a lower one -- would
-// never occur. Here they occur by the hundred.
+// thousand, rather than the one in billions a real difficulty asks for. At pool
+// difficulty the interesting cases -- a hash just above the target, just below
+// it, equal in the top word and decided by a lower one -- would never occur.
+// Here they occur by the hundred.
 //
 // The range is run twice: once with a single dispatch outstanding, and once
 // with the kernel's queue kept full, which is how the miner drives it. Both
@@ -98,14 +97,41 @@ constexpr uint32_t kNonceBase = 0x7fff0000u;
 // test.
 constexpr int kMaxSolutions = 256;
 
-// The target: about one nonce in 2^10 meets it. The upper words are all ones
-// so that the comparison is decided in the top word most of the time and in a
-// lower word the rest of the time -- both paths through a 256-bit compare get
-// exercised, which a target of "top word zero" would not do.
+// The sweep's target: about one nonce in 2^10 meets it, which is what makes a
+// hundred thousand nonces produce a hundred candidates instead of none.
+//
+// ⚠️ It decides every comparison in the **top word**, and cannot do otherwise.
+// A 256-bit compare only reaches a lower word when the top words are exactly
+// equal, which is a 2^-32 event -- so no sweep of any length this test could run
+// will reach one, and with the lower words all ones no digest that got there
+// could be rejected anyway. The screen and the full compare are therefore
+// indistinguishable everywhere this range goes. That half is `compare_boundary`
+// below, which constructs the equality instead of waiting for it.
 const uint32_t kTarget[8] = {
     0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu,
     0xffffffffu, 0xffffffffu, 0xffffffffu, 0x003fffffu,
 };
+
+// Nonces per boundary dispatch, and the witness sits in the middle of them. Odd,
+// so this dispatch is a partial workgroup too; small, because the range is here
+// to carry one nonce past the device rather than to search.
+//
+// ⚠️ Bounded by the result buffer, and it has to be. A target built to be met at
+// the *top* word is a target most of the range meets -- the witness's digest
+// decides how loose, and that is a random 32-bit number -- so a span wider than
+// the buffer would overflow it for some witnesses and not others, and read as a
+// wrong answer from the device. Every nonce qualifying is then still a dispatch
+// that fits.
+constexpr uint32_t kBoundarySpan = 31;
+static_assert(kBoundarySpan <= vkminer::kMaxCandidates,
+              "a boundary dispatch must fit the device's result buffer even "
+              "when every one of its nonces qualifies");
+
+// Nonces to look at for a witness digest with no word at either extreme. One is
+// almost always enough -- the chance a digest holds a 0x00000000 or 0xffffffff
+// word is about 2^-28 -- and the loop is here so that "almost" is not load
+// bearing.
+constexpr uint32_t kWitnessSearch = 1000;
 
 // Block 125552's header, as it went over the wire, with the nonce left in
 // place -- the range below overwrites it anyway. A real header rather than a
@@ -145,14 +171,15 @@ struct Candidate {
 // target, in increasing order. This is the answer; the device is measured
 // against it.
 void reference_candidates(const vkminer::Algorithm &algo,
-                          const uint32_t *header, uint32_t start,
-                          uint32_t count, std::vector<Candidate> *out)
+                          const uint32_t *header, const uint32_t *target,
+                          uint32_t start, uint32_t count,
+                          std::vector<Candidate> *out)
 {
     out->clear();
     for (uint32_t i = 0; i < count; i++) {
         Candidate c;
         c.nonce = start + i;
-        if (algo.verify(header, c.nonce, kTarget, c.hash))
+        if (algo.verify(header, c.nonce, target, c.hash))
             out->push_back(c);
     }
 }
@@ -162,11 +189,11 @@ void reference_candidates(const vkminer::Algorithm &algo,
 // wrong about every dispatch after this one too, and printing a hundred
 // thousand lines of it helps nobody.
 bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
-                     uint32_t start, uint32_t count, vkminer::Solution *got,
-                     int n, size_t *candidates)
+                     const uint32_t *target, uint32_t start, uint32_t count,
+                     vkminer::Solution *got, int n, size_t *candidates)
 {
     std::vector<Candidate> want;
-    reference_candidates(algo, header, start, count, &want);
+    reference_candidates(algo, header, target, start, count, &want);
 
     // The device emits candidates in whatever order its invocations reached
     // the counter, which is not an order at all. Sorting is not papering over
@@ -225,10 +252,10 @@ bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
 
 // One dispatch, submitted and waited for before the next is asked about.
 bool compare_chunk(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
-                   const uint32_t *header, uint32_t start, uint32_t count,
-                   size_t *candidates)
+                   const uint32_t *header, const uint32_t *target,
+                   uint32_t start, uint32_t count, size_t *candidates)
 {
-    if (!kernel.dispatch(header, kTarget, start, count)) {
+    if (!kernel.dispatch(header, target, start, count)) {
         fail("dispatch of %u nonces from 0x%08x was refused", count, start);
         return false;
     }
@@ -241,7 +268,8 @@ bool compare_chunk(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
         return false;
     }
 
-    return compare_results(algo, header, start, count, got, n, candidates);
+    return compare_results(algo, header, target, start, count, got, n,
+                           candidates);
 }
 
 // The same range again, with as many dispatches outstanding as the kernel will
@@ -291,11 +319,130 @@ bool compare_pipelined(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
                  oldest.count, oldest.start);
             return false;
         }
-        if (!compare_results(algo, header, oldest.start, oldest.count, got, n,
-                             candidates))
+        if (!compare_results(algo, header, kTarget, oldest.start, oldest.count,
+                             got, n, candidates))
             return false;
     }
 
+    return true;
+}
+
+// A target that puts the decision on a chosen word of a known digest.
+//
+// The comparison walks from the top word down and stops at the first word that
+// differs, so making every word above `word` equal to the digest's is what
+// forces it to reach `word` at all. `above` then chooses which way it goes
+// there: a target one larger than the digest is met (and the walk stops), one
+// smaller is not. The words below are left equal to the digest, where nothing
+// reads them.
+void target_at(const uint32_t digest[8], int word, bool above, uint32_t out[8])
+{
+    std::memcpy(out, digest, 8 * sizeof(uint32_t));
+    out[word] = above ? digest[word] + 1 : digest[word] - 1;
+}
+
+// The half of the comparison the sweep above cannot reach: the paths that only
+// exist when a digest's top word is *exactly* the target's.
+//
+// The shader screens on one word and then re-compares all eight, and those two
+// only ever disagree at that exact equality -- everywhere else the top
+// word already decides, so the sweep runs the same branch a hundred thousand
+// times. Waiting for the equality is not an option at 2^-32 a nonce; the way to
+// it is to stop choosing the target first. Hash a nonce, and build the targets
+// from what came back, so the boundary lands on a digest that exists.
+//
+// Sixteen of those, two per word: the one the digest just fails and the one it
+// just meets. The eight below the top word are the interesting ones, because
+// each is a nonce the screen lets through for the full compare to decide -- the
+// path that is otherwise reached once in four billion. A seventeenth target is
+// the digest itself, where every word is equal and the walk runs off the end,
+// which is the case a compare written with `<` rather than `<=` gets wrong and
+// no other case here would catch.
+bool compare_boundary(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
+                      const uint32_t *header)
+{
+    // The witness. Any nonce would do -- the targets are built from its digest,
+    // not the other way round -- except that a digest word of 0x00000000 has no
+    // target below it and one of 0xffffffff none above, so a word at either
+    // extreme would quietly drop a case instead of testing it.
+    uint32_t witness = 0;
+    uint32_t digest[8];
+    bool usable = false;
+    for (uint32_t i = 0; i < kWitnessSearch && !usable; i++) {
+        witness = kNonceBase + i;
+        algo.hash(header, witness, digest);
+        usable = true;
+        for (int w = 0; w < 8; w++)
+            if (digest[w] == 0 || digest[w] == 0xffffffffu)
+                usable = false;
+    }
+    if (!usable) {
+        fail("no nonce in %u produced a digest with room either side of every "
+             "word", kWitnessSearch);
+        return false;
+    }
+
+    const uint32_t start = witness - kBoundarySpan / 2;
+
+    struct Case {
+        uint32_t target[8];
+        bool     expect;   // whether the witness should meet it
+        int      word;     // where the comparison should be decided, -1 for "nowhere"
+    };
+    std::vector<Case> cases;
+
+    Case exact;
+    std::memcpy(exact.target, digest, sizeof exact.target);
+    exact.expect = true;                // hash == target is a share
+    exact.word = -1;
+    cases.push_back(exact);
+
+    for (int w = 7; w >= 0; w--) {
+        Case below, above;
+        target_at(digest, w, false, below.target);
+        below.expect = false;
+        below.word = w;
+        cases.push_back(below);
+
+        target_at(digest, w, true, above.target);
+        above.expect = true;
+        above.word = w;
+        cases.push_back(above);
+    }
+
+    unsigned survivors = 0;
+    for (const Case &c : cases) {
+        // What this case is worth is a property of the case, so it is checked
+        // rather than assumed: a target built wrongly would agree with the
+        // reference on both sides and pass while testing nothing. Ask the
+        // reference what the witness does with this target and require it to be
+        // what the construction claims.
+        uint32_t ignored[8];
+        const bool got = algo.verify(header, witness, c.target, ignored);
+        if (got != c.expect) {
+            fail("the reference says nonce 0x%08x %s a target built to be %s "
+                 "at word %d -- the construction is wrong, so this case tests "
+                 "nothing", witness, got ? "meets" : "misses",
+                 c.expect ? "met" : "missed", c.word);
+            print_hash("digest", digest);
+            print_hash("target", c.target);
+            return false;
+        }
+
+        size_t candidates = 0;
+        if (!compare_chunk(kernel, algo, header, c.target, start,
+                           kBoundarySpan, &candidates))
+            return false;
+
+        // The screen passes on the top word alone, so every case that keeps the
+        // top word equal is one the device carried into the full compare.
+        if (c.word != 7)
+            survivors++;
+    }
+
+    std::printf("ok   %u boundary target(s) at nonce 0x%08x, %u of them decided "
+                "below the top word\n", static_cast<unsigned>(cases.size()),
+                witness, survivors);
     return true;
 }
 
@@ -329,8 +476,8 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     size_t candidates = 0;
     for (uint32_t done = 0; done < total; done += kChunk) {
         const uint32_t count = std::min(kChunk, total - done);
-        if (!compare_chunk(*kernel, algo, header, kNonceBase + done, count,
-                           &candidates))
+        if (!compare_chunk(*kernel, algo, header, kTarget, kNonceBase + done,
+                           count, &candidates))
             return false;
     }
 
@@ -365,7 +512,13 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     std::printf("ok   %u nonces, %u candidate(s), up to %u dispatch%s in "
                 "flight\n", total, static_cast<unsigned>(pipelined), depth,
                 depth == 1 ? "" : "es");
-    return true;
+
+    return compare_boundary(*kernel, algo, header);
+}
+
+void usage(const char *program)
+{
+    std::printf("usage: %s [algo] [nonces] [queue-depth]\n", program);
 }
 
 }  // namespace
@@ -379,7 +532,7 @@ int main(int argc, char *argv[])
     if (argc > 2) {
         const long n = std::strtol(argv[2], nullptr, 0);
         if (n <= 0) {
-            std::printf("usage: %s [algo] [nonces] [queue-depth]\n", argv[0]);
+            usage(argv[0]);
             return 2;
         }
         total = static_cast<uint32_t>(n);
@@ -391,7 +544,7 @@ int main(int argc, char *argv[])
     if (argc > 3) {
         const long n = std::strtol(argv[3], nullptr, 0);
         if (n < 1 || n > 16) {
-            std::printf("usage: %s [algo] [nonces] [queue-depth]\n", argv[0]);
+            usage(argv[0]);
             return 2;
         }
         opt_queue_depth = static_cast<int>(n);

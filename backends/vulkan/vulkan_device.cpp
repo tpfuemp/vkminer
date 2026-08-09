@@ -88,6 +88,24 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(VkInstance instance,
     if (memory_budget)
         extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
 
+    // Asks the driver to keep, and hand back, what it compiled the shader into.
+    // Only under --vk-pipeline-stats: the pipelines then have to be created with
+    // a capture bit set, and a driver is entitled to compile differently when
+    // asked to preserve that information -- so a miner that always requested it
+    // would be measuring a shader it does not ship.
+    dev->pipeline_stats_ =
+        opt_vk_pipeline_stats
+        && has_extension(available,
+                         VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+    if (dev->pipeline_stats_)
+        extensions.push_back(
+            VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+    else if (opt_vk_pipeline_stats)
+        applog(LOG_WARNING, "Vulkan: %s does not offer %s, so there are no "
+                            "pipeline statistics to report for it",
+               info.name.c_str(),
+               VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+
     // 8-bit integers are core from 1.2 and an extension before it. Only asked
     // for when enumeration already found the feature present.
     const bool need_float16_int8_ext =
@@ -110,6 +128,18 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(VkInstance instance,
     if (info.int8
         && (need_float16_int8_ext || info.api_version >= VK_API_VERSION_1_2))
         features.pNext = &f16i8;
+
+    // Enabling the extension is not enough on its own; the feature bit is what
+    // makes the query legal, and the loader's validation says so loudly.
+    // Chained ahead of whatever is already there rather than assigned over it.
+    VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executable{};
+    executable.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
+    executable.pipelineExecutableInfo = VK_TRUE;
+    if (dev->pipeline_stats_) {
+        executable.pNext = features.pNext;
+        features.pNext = &executable;
+    }
 
     // One queue. A second queue on the same family would not add throughput --
     // the device is already saturated by one queue's worth of dispatches -- and

@@ -7,6 +7,14 @@
 // second block, which is where the nonce lives, and the 32-byte block that
 // hashes the first digest again.
 //
+// The host goes four rounds further than that. Of the sixteen words in the
+// nonce-bearing block only one is the nonce, so rounds 0..3 and message words
+// 16..19 depend on it either not at all or by a single addition -- and what
+// depends on a nonce by an addition can be computed once at a nonce of zero
+// and corrected here. This file therefore starts its first compression at
+// round 4. See sha256_advance_nonce_block() in src/core/sha256.c, which is the
+// other half of the same argument.
+//
 // Nothing here byte-swaps a header word. struct work already holds each of them
 // as a big-endian read of the wire, which is precisely the form SHA-256's
 // message schedule wants, so the words go in untouched. The one swap in this
@@ -17,6 +25,23 @@
 // differ by a byte reversal, and which one a kernel searches does not matter so
 // long as it is the one the host substitutes back: work.data[19] is written
 // straight from what comes out of here.
+//
+// Why this file spells out both compressions instead of calling the shared
+// sha256_compress(): only one of the thirty-two message words a nonce touches
+// varies with it. The rest are padding written here as literals or per-job
+// words the host sent, so most of the schedule expansion is adding zero to
+// zero -- which a compiler folds away, but only once it can name each word.
+// Rolled, w[i & 15u] is opaque and the work is done at full price on every
+// invocation. So the arithmetic still comes from sha256.glsl and only its shape
+// differs; the schedule is kept as all sixty-four words, the form the scalar
+// reference uses, because unrolled code can afford what a rolled loop cannot.
+//
+// The second compression also stops early. Its last state word is finished four
+// rounds before the block is, and that word alone rejects all but about one
+// nonce in 2^32 -- so the rounds after it run only for the invocations that get
+// that far. The rounds are split into macros at that boundary rather than
+// duplicated; see the screen in main(), which explains why it cannot reject a
+// nonce the full comparison would have kept.
 
 #version 450
 
@@ -27,17 +52,114 @@
 
 layout(local_size_x_id = 0) in;
 
-// 88 bytes, against a guaranteed minimum of 128. Mirrored by Sha256dPush in
-// algorithms/sha256d/sha256d.cpp, which asserts its own size and offsets --
-// this block and that struct are one definition written twice.
+// 124 bytes, against a guaranteed minimum of 128 -- so this fits everywhere,
+// and there is no longer room to add to it without taking something out.
+// Mirrored by Sha256dPush in algorithms/sha256d/sha256d.cpp, which asserts its
+// own size and offsets -- this block and that struct are one definition
+// written twice.
 layout(push_constant) uniform Push {
     uint midstate[8];  // SHA-256 state after header words 0..15
-    uint tail[3];      // header words 16..18; word 19 is the nonce
+    uint advanced[8];  // a..h entering round 4, at a nonce of zero
+    uint sched[4];     // message words 16..19, at a nonce of zero
     uint target[8];    // as fulltest() compares: little-endian, most significant last
     uint nonce_start;
-    uint count;        // invocations with a nonce to test
+    uint count;        // nonces to test, which is not the invocation count
     uint capacity;     // candidates the result buffer can hold
 } push;
+
+// One round of FIPS 180-4 §6.2.2, with the eight working variables passed in
+// the order they hold at that round rather than shuffled at the end of it. Both
+// assignments write the slot the next round will read under a different name,
+// so the rotation costs nothing: it happens in the argument list.
+// A plain block, not a do-while(false): the idiom that makes a multi-statement
+// macro safe in C costs a structured loop construct apiece in SPIR-V, and a
+// hundred and twenty-eight of them stop the compiler propagating the constants
+// this file exists to expose.
+#define SHA256D_ROUND(a, b, c, d, e, f, g, h, k, w)                        \
+    {                                                                      \
+        uint t1 = (h) + sha256_big_s1(e) + sha256_ch(e, f, g) + (k) + (w); \
+        uint t2 = sha256_big_s0(a) + sha256_maj(a, b, c);                  \
+        (d) += t1;                                                         \
+        (h)  = t1 + t2;                                                    \
+    }
+
+// Four rounds, which is half a turn of the rotation above: the names come back
+// shifted by four, which is exactly the argument order SHA256D_ROUND4_SHIFTED
+// starts from. Halves rather than whole turns because the two compressions
+// enter and leave the rotation at different points -- the first starts at
+// round 4, the second stops at round 60 -- and neither boundary is a multiple
+// of eight.
+#define SHA256D_ROUND4(i)                                                 \
+    SHA256D_ROUND(a, b, c, d, e, f, g, h, sha256_k[(i) + 0], w[(i) + 0]); \
+    SHA256D_ROUND(h, a, b, c, d, e, f, g, sha256_k[(i) + 1], w[(i) + 1]); \
+    SHA256D_ROUND(g, h, a, b, c, d, e, f, sha256_k[(i) + 2], w[(i) + 2]); \
+    SHA256D_ROUND(f, g, h, a, b, c, d, e, sha256_k[(i) + 3], w[(i) + 3])
+
+#define SHA256D_ROUND4_SHIFTED(i)                                         \
+    SHA256D_ROUND(e, f, g, h, a, b, c, d, sha256_k[(i) + 0], w[(i) + 0]); \
+    SHA256D_ROUND(d, e, f, g, h, a, b, c, sha256_k[(i) + 1], w[(i) + 1]); \
+    SHA256D_ROUND(c, d, e, f, g, h, a, b, sha256_k[(i) + 2], w[(i) + 2]); \
+    SHA256D_ROUND(b, c, d, e, f, g, h, a, sha256_k[(i) + 3], w[(i) + 3])
+
+// One full turn: the names return to where they started, so the block can be
+// repeated verbatim on any multiple of eight from where the rotation began.
+#define SHA256D_ROUND8(i)                                                  \
+    SHA256D_ROUND4(i); SHA256D_ROUND4_SHIFTED((i) + 4)
+
+// The second compression, which runs from round 0 and stops at 60 (see the
+// screen in main()).
+#define SHA256D_ROUNDS_TO55                                                \
+    SHA256D_ROUND8( 0); SHA256D_ROUND8( 8);                                \
+    SHA256D_ROUND8(16); SHA256D_ROUND8(24);                                \
+    SHA256D_ROUND8(32); SHA256D_ROUND8(40);                                \
+    SHA256D_ROUND8(48)
+
+#define SHA256D_ROUNDS_56_59  SHA256D_ROUND4(56)
+#define SHA256D_ROUNDS_60_63  SHA256D_ROUND4_SHIFTED(60)
+
+// The first compression, which the host started: it enters at round 4 with the
+// names canonical, so its turns land on 4, 12, 20 ... and the last four rounds
+// are half a turn. It leaves the rotation shifted by four, which is why the
+// feed-forward in main() reads e,f,g,h,a,b,c,d rather than a,b,c,d,e,f,g,h.
+#define SHA256D_ROUNDS_FROM4                                               \
+    SHA256D_ROUND8( 4); SHA256D_ROUND8(12);                                \
+    SHA256D_ROUND8(20); SHA256D_ROUND8(28);                                \
+    SHA256D_ROUND8(36); SHA256D_ROUND8(44);                                \
+    SHA256D_ROUND8(52); SHA256D_ROUND4(60)
+
+// w[i] = w[i-16] + s0(w[i-15]) + w[i-7] + s1(w[i-2]), the same recurrence as
+// the shared version but indexed absolutely, so every term is a word the
+// compiler can name -- and fold, where it is a constant this file wrote.
+#define SHA256D_SCHED(i)                                                   \
+    w[i] = w[(i) - 16] + sha256_small_s0(w[(i) - 15])                      \
+         + w[(i) -  7] + sha256_small_s1(w[(i) -  2])
+
+#define SHA256D_SCHED4(i)                                                  \
+    SHA256D_SCHED((i) + 0); SHA256D_SCHED((i) + 1);                        \
+    SHA256D_SCHED((i) + 2); SHA256D_SCHED((i) + 3)
+
+#define SHA256D_SCHED8(i)                                                  \
+    SHA256D_SCHED4(i); SHA256D_SCHED4((i) + 4)
+
+// The second compression's schedule, split where its rounds are and for the
+// same reason: it needs the schedule only as far as w[60] before it knows
+// whether the last three words are worth expanding.
+#define SHA256D_SCHEDULE_TO60                                              \
+    SHA256D_SCHED8(16); SHA256D_SCHED8(24);                                \
+    SHA256D_SCHED8(32); SHA256D_SCHED8(40);                                \
+    SHA256D_SCHED8(48); SHA256D_SCHED4(56);                                \
+    SHA256D_SCHED(60)
+
+#define SHA256D_SCHEDULE_61_63                                             \
+    SHA256D_SCHED(61); SHA256D_SCHED(62); SHA256D_SCHED(63)
+
+// The first compression's, which starts at 20: the host sent w[16..19], and
+// w[0..3] -- the only words those four read that this shader no longer has --
+// are not needed by anything from w[20] on.
+#define SHA256D_SCHEDULE_20_63                                             \
+    SHA256D_SCHED4(20); SHA256D_SCHED8(24);                                \
+    SHA256D_SCHED8(32); SHA256D_SCHED8(40);                                \
+    SHA256D_SCHED8(48); SHA256D_SCHED8(56)
 
 void main()
 {
@@ -47,39 +169,115 @@ void main()
 
     uint nonce = push.nonce_start + index;
 
-    // The header's second block: its last three words, the nonce, then the
-    // padding for an 80-byte message -- a 1 bit, zeros, and 640 as a 64-bit
-    // length in the last two words.
-    uint w[16] = uint[16](
-        push.tail[0], push.tail[1], push.tail[2], nonce,
-        0x80000000u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0x280u);
+    uint w[64];
 
+    // The header's second block: the padding for an 80-byte message -- a 1
+    // bit, zeros, and 640 as a 64-bit length in the last two words. w[0..3],
+    // the last three header words and the nonce, are deliberately not written:
+    // rounds 0..3 and message words 16..19 are the only things that read them,
+    // and the host has done both. Nothing below touches those four slots.
+    w[ 4] = 0x80000000u;   w[ 5] = 0u;
+    w[ 6] = 0u;            w[ 7] = 0u;
+    w[ 8] = 0u;            w[ 9] = 0u;
+    w[10] = 0u;            w[11] = 0u;
+    w[12] = 0u;            w[13] = 0u;
+    w[14] = 0u;            w[15] = 0x280u;
+
+    // Message words 16..19 as the host computed them at a nonce of zero, with
+    // this invocation's nonce added back. Each of the four is affine in the
+    // nonce: 16 and 17 do not read w[3] at all, 18 reads it only through
+    // sigma0, and 19 adds it. That is the whole reason four words can stand in
+    // for four expansions -- and the reason it stops at 19, since w[20] reads
+    // w[18] through sigma1, which is not affine in anything.
+    w[16] = push.sched[0];
+    w[17] = push.sched[1];
+    w[18] = push.sched[2] + sha256_small_s0(nonce);
+    w[19] = push.sched[3] + nonce;
+
+    SHA256D_SCHEDULE_20_63;
+
+    // Round 3 left the nonce in exactly two working variables, each by a
+    // single addition -- see sha256_advance_nonce_block() in src/core/sha256.c
+    // for which two and why.
+    uint a = push.advanced[0] + nonce, b = push.advanced[1];
+    uint c = push.advanced[2],         d = push.advanced[3];
+    uint e = push.advanced[4] + nonce, f = push.advanced[5];
+    uint g = push.advanced[6],         h = push.advanced[7];
+
+    SHA256D_ROUNDS_FROM4;
+
+    // Sixty rounds is seven and a half turns of the rotation, so the variables
+    // are shifted by four: the state word that would be called a is in e. The
+    // midstate is still the thing added, though -- the feed-forward is over the
+    // state this compression started from, not the state the host advanced to.
     uint first[8] = uint[8](
-        push.midstate[0], push.midstate[1], push.midstate[2], push.midstate[3],
-        push.midstate[4], push.midstate[5], push.midstate[6], push.midstate[7]);
-    sha256_compress(first, w);
+        push.midstate[0] + e, push.midstate[1] + f,
+        push.midstate[2] + g, push.midstate[3] + h,
+        push.midstate[4] + a, push.midstate[5] + b,
+        push.midstate[6] + c, push.midstate[7] + d);
 
     // The second SHA-256, over the 32 bytes the first produced. One block, and
-    // the length is 256 bits.
-    uint w2[16] = uint[16](
-        first[0], first[1], first[2], first[3],
-        first[4], first[5], first[6], first[7],
-        0x80000000u, 0u, 0u, 0u,
-        0u, 0u, 0u, 0x100u);
+    // the length is 256 bits. Half of this block is padding, and the state it
+    // starts from is the initialization vector rather than anything the host
+    // sent -- so the opening rounds are constant too, and fold away with it.
+    w[ 0] = first[0];      w[ 1] = first[1];
+    w[ 2] = first[2];      w[ 3] = first[3];
+    w[ 4] = first[4];      w[ 5] = first[5];
+    w[ 6] = first[6];      w[ 7] = first[7];
+    w[ 8] = 0x80000000u;   w[ 9] = 0u;
+    w[10] = 0u;            w[11] = 0u;
+    w[12] = 0u;            w[13] = 0u;
+    w[14] = 0u;            w[15] = 0x100u;
+
+    SHA256D_SCHEDULE_TO60;
+
+    a = sha256_iv[0]; b = sha256_iv[1]; c = sha256_iv[2]; d = sha256_iv[3];
+    e = sha256_iv[4]; f = sha256_iv[5]; g = sha256_iv[6]; h = sha256_iv[7];
+
+    SHA256D_ROUNDS_TO55;
+    SHA256D_ROUNDS_56_59;
+
+    // state[7] is finished four rounds early. Round 60 is
+    // SHA256D_ROUND(e, f, g, h, a, b, c, d, ...), whose first assignment adds t1
+    // to h -- and no later round writes h, which appears in rounds 61..63 only
+    // as a value read. So h + t1 is the last state word, and the most
+    // significant one once byte-swapped: exactly what the first iteration of the
+    // comparison below tests.
+    //
+    // Failing that test is failing the whole comparison, so returning here drops
+    // no share the full compare would have kept. Passing it means nothing on its
+    // own -- the surviving path still runs every remaining round and compares
+    // all 256 bits, so the host's re-check of a candidate stays a real check.
+    uint t60 = d + sha256_big_s1(a) + sha256_ch(a, b, c) + sha256_k[60] + w[60];
+    uint top = bswap32(sha256_iv[7] + h + t60);
+
+    // The one line every nonce in the dispatch reaches with a finished digest
+    // word in hand, which is what makes it the place to observe the search from
+    // rather than the candidates it produces. Compiled away unless the pipeline
+    // was built with the probe on; see candidates.glsl.
+    probe_best(top);
+
+    if (top > push.target[7])
+        return;
+
+    // Reached about as often as a candidate is found, so the three schedule
+    // words and four rounds it costs are charged to almost no invocation. Round
+    // 60 recomputes t60; that is a handful of instructions on this path, and the
+    // alternative is a second copy of the round arithmetic in this file.
+    SHA256D_SCHEDULE_61_63;
+    SHA256D_ROUNDS_60_63;
 
     uint state[8] = uint[8](
-        sha256_iv[0], sha256_iv[1], sha256_iv[2], sha256_iv[3],
-        sha256_iv[4], sha256_iv[5], sha256_iv[6], sha256_iv[7]);
-    sha256_compress(state, w2);
+        sha256_iv[0] + a, sha256_iv[1] + b, sha256_iv[2] + c, sha256_iv[3] + d,
+        sha256_iv[4] + e, sha256_iv[5] + f, sha256_iv[6] + g, sha256_iv[7] + h);
 
-    // The full 256-bit comparison, most significant word first, and not the
-    // cheaper test on the top 64 bits alone. The saving is a handful of
-    // instructions on a path taken once in billions of invocations; the cost of
-    // the shortcut is that the host's own re-check of every candidate starts
-    // rejecting some of them as a matter of routine, and the one warning that
-    // means "this kernel is wrong" stops meaning anything.
+    // The full 256-bit comparison, most significant word first. It repeats the
+    // screen above, which is the point: the screen decides what to skip
+    // computing, and this decides what is a share. Stopping at the top word, or
+    // the top two, would save a handful of instructions on a path taken once in
+    // billions of invocations, and would cost the host's re-check of every
+    // candidate its meaning -- once it rejects candidates as a matter of
+    // routine, the one warning that means "this kernel is wrong" means nothing.
     for (int i = 7; i >= 0; i--) {
         uint word = bswap32(state[i]);
         if (word > push.target[i])

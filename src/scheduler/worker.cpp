@@ -12,6 +12,7 @@
 
 #include "algorithms/registry.h"
 #include "backends/backend.h"
+#include "scheduler/candidate_log.h"
 #include "tune.h"
 
 extern "C" {
@@ -22,10 +23,12 @@ extern "C" {
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -86,14 +89,31 @@ constexpr auto kRateWindow = std::chrono::seconds(2);
 // after the pool had replaced the job they were launched under: not work thrown
 // away -- a share found in one is still submitted against its own job -- but
 // the number that says whether dispatches are sized for how fast jobs change.
+//
+// `best_ratio_sum` and `best_samples` are the --vk-probe-best pair, copied out
+// of the kernel so that the reporting thread can read them without touching it.
+// `hashes` is not part of the reading -- the kernel's terms are already scaled
+// by the nonces each covered -- and is carried alongside so that a line about
+// the probe can say how much work is behind it.
 struct BatchCount {
     std::atomic<uint64_t> total{0};
     std::atomic<uint64_t> stale{0};
+    std::atomic<double> best_ratio_sum{0.};
+    std::atomic<uint64_t> best_samples{0};
+    std::atomic<uint64_t> hashes{0};
 };
 
 // One entry per worker, allocated before any of them starts. Null in a build
 // that never calls worker_set_backend.
 std::unique_ptr<BatchCount[]> g_batches;
+
+// Candidates across every worker: the ones the host re-hashed and confirmed,
+// and the ones it refused. Not per worker, because the question these answer is
+// whether the emit-and-verify path runs at all, which is not a property of a
+// device. Counted whether mining or benchmarking; only --benchmark-target makes
+// the totals large enough to compare against a prediction.
+std::atomic<uint64_t> g_candidates_confirmed{0};
+std::atomic<uint64_t> g_candidates_rejected{0};
 
 // A job that never came from a pool. --benchmark measures how fast this machine
 // hashes, which needs a header and a target and nothing else.
@@ -129,7 +149,83 @@ bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
     // comparison doing the work it does when mining.
     work->target[7] = 0x00000000;
     work->target[6] = 0x0000ffff;
+
+    // ...which is exactly why a plain benchmark proves nothing about the path a
+    // candidate takes: at 2^-48 the emit, the readback and the host's
+    // re-verification never run, and a run that finds nothing looks identical
+    // whether they work or are broken. --benchmark-target says how often to
+    // find one, and nothing is submitted either way.
+    //
+    // The lower words are set to all ones so that the device's cheap screen --
+    // top digest word against target[7] -- and the host's full 256-bit compare
+    // accept exactly the same nonces. The expected count is then a single term,
+    // (t+1)/2^32 per nonce, with no partial match to reason about: a gap
+    // between prediction and count is the path itself and not the arithmetic.
+    if (opt_benchmark_target >= 0) {
+        work->target[7] = static_cast<uint32_t>(opt_benchmark_target);
+        for (int i = 0; i < 7; i++)
+            work->target[i] = 0xffffffffu;
+    }
     return true;
+}
+
+// What --vk-probe-best is for, said in one line per device. The kernel has
+// already done the arithmetic; this divides and prints it. 1.00 for a kernel
+// that searches every nonce it was handed, 2.00 for one that quietly searches
+// half of them, and it goes on reading 2.00 for as long as the run lasts.
+//
+// It is noisy at first. Each dispatch contributes a term distributed like an
+// exponential with mean one, so the reading is within about one over the square
+// root of the dispatch count -- ten percent at a hundred, one at ten thousand.
+// That is why the count is printed beside it, and why a run of a few seconds is
+// not evidence of anything.
+void report_probe()
+{
+    if (!opt_vk_probe_best || !g_batches)
+        return;
+
+    for (int i = 0; i < opt_n_threads; i++) {
+        const uint64_t hashes = g_batches[i].hashes.load(std::memory_order_relaxed);
+        const uint64_t samples =
+            g_batches[i].best_samples.load(std::memory_order_relaxed);
+        const double sum =
+            g_batches[i].best_ratio_sum.load(std::memory_order_relaxed);
+        if (!hashes)
+            continue;
+
+        if (!samples) {
+            applog2(LOG_ERR, "worker %d   the probe reported nothing after %.2f "
+                             "Ghash -- the shader was built without it, or it "
+                             "is not reaching the probe at all",
+                    i, static_cast<double>(hashes) / 1e9);
+            continue;
+        }
+
+        const double observed = sum / static_cast<double>(samples);
+
+        applog2(LOG_INFO, "worker %d   probe %.2fx expected, over %llu "
+                          "dispatch(es) and %.2f Ghash (+/- %.0f%%)",
+                i, observed, static_cast<unsigned long long>(samples),
+                static_cast<double>(hashes) / 1e9,
+                100. / std::sqrt(static_cast<double>(samples)));
+    }
+}
+
+// The two counters that should read zero for the life of a run. Printed only
+// when they do not, and at an error priority, because this is the miner saying
+// its own device is computing the wrong thing -- see candidate_log.h for why
+// that is otherwise so easy to miss.
+void report_disagreements()
+{
+    const uint64_t below = vkminer::candidates_below_target();
+    const uint64_t wrong = vkminer::candidates_wrong_digest();
+    if (!below && !wrong)
+        return;
+
+    applog2(LOG_ERR, "Device disagreed with the host %" PRIu64 " time(s): "
+                     "%" PRIu64 " candidate(s) that did not meet the target, "
+                     "%" PRIu64 " with a digest the host does not compute",
+            below + wrong, below, wrong);
 }
 
 void report_benchmark(const double *rates, int workers, double total)
@@ -145,6 +241,11 @@ void report_benchmark(const double *rates, int workers, double total)
             format_hashrate(rates[i], scaled);
             applog2(LOG_INFO, "worker %d   %s", i, scaled);
         }
+
+    // Here as well as in the periodic report: a benchmark never reaches that
+    // one, and a benchmark is where these two are usually switched on.
+    report_probe();
+    report_disagreements();
 }
 
 // Publishes what one worker managed over one window of wall clock.
@@ -230,6 +331,9 @@ void report_devices()
                 dev, rate, units, sharing, late,
                 g_backend->devices()[static_cast<size_t>(dev)].name.c_str());
     }
+
+    report_probe();
+    report_disagreements();
 }
 
 }  // namespace
@@ -259,6 +363,14 @@ int worker_count()
 int worker_exit_code()
 {
     return g_fatal.load(std::memory_order_relaxed);
+}
+
+void worker_candidate_counts(uint64_t *confirmed, uint64_t *rejected)
+{
+    if (confirmed)
+        *confirmed = g_candidates_confirmed.load(std::memory_order_relaxed);
+    if (rejected)
+        *rejected = g_candidates_rejected.load(std::memory_order_relaxed);
 }
 
 extern "C" void *miner_thread(void *userdata)
@@ -316,7 +428,10 @@ extern "C" void *miner_thread(void *userdata)
     // and strides by the number of workers, so no two of them ever build the
     // same coinbase, and it is re-armed rather than reused whenever the header
     // it belongs to changes.
-    uint64_t xnonce2 = 0;
+    //
+    // It only ever counts up -- see the new-job path below for why it must not
+    // restart.
+    uint64_t xnonce2 = static_cast<uint64_t>(thr_id);
     bool xnonce2_armed = false;
 
     // The rate window. `account` is called with the hashes a dispatch covered,
@@ -347,6 +462,31 @@ extern "C" void *miner_thread(void *userdata)
     const size_t depth = std::max<uint32_t>(1, kernel->queue_depth());
     std::deque<uint32_t> inflight;
 
+    // How many benchmark candidates this worker has spelled out in the log
+    // before falling back to counting them; see where it is used.
+    int bench_logged = 0;
+
+    // Writes down a candidate the host would not confirm, and returns what to
+    // put at the end of the warning about it: the file it went into, or nothing
+    // at all when it could not be kept. The header comes from this worker's own
+    // copy, which is the one the dispatch was launched under -- taking it from
+    // g_work would capture whatever the pool has sent since.
+    auto capture = [&](vkminer::CandidateFault fault,
+                       const vkminer::Solution &got,
+                       const uint32_t host_hash[8]) -> std::string {
+        vkminer::CapturedCandidate bad;
+        bad.fault = fault;
+        bad.device = device_index;
+        bad.nonce = got.nonce;
+        memcpy(bad.header, work.data, sizeof bad.header);
+        memcpy(bad.target, work.target, sizeof bad.target);
+        memcpy(bad.device_hash, got.hash, sizeof bad.device_hash);
+        memcpy(bad.host_hash, host_hash, sizeof bad.host_hash);
+
+        const std::string path = vkminer::capture_candidate(bad);
+        return path.empty() ? std::string() : ". Captured in " + path;
+    };
+
     // Takes the oldest outstanding dispatch and does whatever its results
     // deserve. False means the device failed -- that dispatch is retired
     // either way, so a caller emptying the rest keeps making progress.
@@ -354,8 +494,12 @@ extern "C" void *miner_thread(void *userdata)
         if (inflight.empty())
             return true;
 
-        vkminer::Solution found[16];
-        const int count = kernel->collect(found, 16);
+        // Sized by the device's own capacity, not by a number of its own: a
+        // smaller array here would drop candidates the device stored and the
+        // host would confirm, and nothing would say so -- the kernel's overflow
+        // warning only covers the ones that did not fit in the device buffer.
+        vkminer::Solution found[vkminer::kMaxCandidates];
+        const int count = kernel->collect(found, vkminer::kMaxCandidates);
         const uint32_t nonces = inflight.front();
         inflight.pop_front();
 
@@ -375,6 +519,17 @@ extern "C" void *miner_thread(void *userdata)
         // dispatch cannot be recalled, and this is the measurement that says
         // whether they are being sized to finish inside a job.
         if (g_batches) {
+            // Every part of the probe, updated together: what the kernel has
+            // accumulated, and the hashes it had to find it in. The kernel's
+            // pair is copied rather than added to, because it is keeping the
+            // running totals itself and this is only publishing them.
+            const vkminer::Kernel::BestDigest probe = kernel->best_digest();
+            g_batches[thr_id].hashes.fetch_add(nonces, std::memory_order_relaxed);
+            g_batches[thr_id].best_ratio_sum.store(probe.ratio_sum,
+                                                   std::memory_order_relaxed);
+            g_batches[thr_id].best_samples.store(probe.samples,
+                                                 std::memory_order_relaxed);
+
             bool late = false;
             if (!opt_benchmark) {
                 pthread_rwlock_rdlock(&g_work_lock);
@@ -397,12 +552,16 @@ extern "C" void *miner_thread(void *userdata)
             // invisible next to the batch that produced it.
             uint32_t hash[8];
             if (!algo->verify(work.data, found[i].nonce, work.target, hash)) {
+                g_candidates_rejected.fetch_add(1, std::memory_order_relaxed);
                 applog(LOG_WARNING,
                        "Worker %d: device %d reported nonce %08x, which does "
-                       "not meet the target -- share dropped",
-                       thr_id, device_index, found[i].nonce);
+                       "not meet the target -- share dropped%s",
+                       thr_id, device_index, found[i].nonce,
+                       capture(vkminer::CandidateFault::BelowTarget, found[i],
+                               hash).c_str());
                 continue;
             }
+            g_candidates_confirmed.fetch_add(1, std::memory_order_relaxed);
 
             // It is a real share, but the device's own arithmetic disagrees
             // with the host's. The share is still submitted, because the host
@@ -411,17 +570,32 @@ extern "C" void *miner_thread(void *userdata)
             if (memcmp(hash, found[i].hash, sizeof hash) != 0)
                 applog(LOG_WARNING,
                        "Worker %d: device %d returned a different hash for "
-                       "nonce %08x than the host computes",
-                       thr_id, device_index, found[i].nonce);
+                       "nonce %08x than the host computes%s",
+                       thr_id, device_index, found[i].nonce,
+                       capture(vkminer::CandidateFault::WrongDigest, found[i],
+                               hash).c_str());
 
             // A benchmark is not connected to anything and its target is not
             // anybody's. Finding a nonce that meets it says the kernel and the
             // comparison work, which is worth a line, and submitting it would
             // be an error.
             if (opt_benchmark) {
-                applog(LOG_INFO, "Benchmark: nonce %08x meets the synthetic "
-                                 "target; nothing is submitted",
-                       found[i].nonce);
+                // A loosened target can produce these by the thousand, and a
+                // line each would bury the run it is evidence about. The first
+                // few are worth seeing -- they are what "a candidate came back
+                // and the host confirmed it" looks like -- and the total comes
+                // out at the end, which is the number to compare against the
+                // prediction anyway.
+                if (bench_logged < 8) {
+                    bench_logged++;
+                    applog(LOG_INFO, "Benchmark: nonce %08x meets the "
+                                     "synthetic target; nothing is submitted",
+                           found[i].nonce);
+                } else if (bench_logged == 8) {
+                    bench_logged++;
+                    applog(LOG_INFO, "Benchmark: further candidates are "
+                                     "counted rather than logged");
+                }
                 continue;
             }
 
@@ -493,7 +667,18 @@ extern "C" void *miner_thread(void *userdata)
 
         if (new_job) {
             nonce = first_nonce;
-            xnonce2 = static_cast<uint64_t>(thr_id);
+
+            // Advanced, never restarted, and this is the part that is easy to
+            // get wrong: a job id is not unique. A pool switching between coins
+            // re-sends one it has already sent, and a worker that answers a new
+            // job by resetting this counter and the nonce both rebuilds the
+            // same coinbase and rescans the same range -- so it re-finds the
+            // nonce it already submitted, and the pool rejects it as a
+            // duplicate. Observed against a live pool: one reject in 95 shares,
+            // the second copy of a job id arriving a second after the first.
+            // Counting on costs nothing, because any value of this field is
+            // valid and the stride keeps the workers apart either way.
+            xnonce2 += static_cast<uint64_t>(opt_n_threads);
             xnonce2_armed = false;
             work_restart[thr_id].restart = 0;
 
@@ -537,8 +722,25 @@ extern "C" void *miner_thread(void *userdata)
             // keep measuring is to go round again. Retesting nonces is the
             // point of a benchmark and a bug in a miner, which is why the two
             // cases are written out separately.
+            //
+            // The header moves on rather than repeating, though: a device
+            // covers the whole nonce space in seconds, so a minute-long run
+            // would otherwise be the same few dozen dispatches hashed twenty
+            // times over. That costs the rate nothing, and it is what makes
+            // --vk-probe-best mean anything here -- its reading averages over
+            // dispatches, and averaging the same one twenty times buys no
+            // precision while looking exactly as though it had.
             if (opt_benchmark) {
+                // Drained before the header is touched, for the same reason
+                // the job-change path above drains: what the device is still
+                // holding was launched under the header `work` has right now,
+                // and every candidate that comes back is re-verified against
+                // whatever `work` holds by then. Changing it underneath them
+                // makes the host hash a different header from the device and
+                // report the disagreement as a fault in the kernel.
+                drain();
                 nonce = first_nonce;
+                work.data[15]++;
                 continue;
             }
             // The range is exhausted, which at device speed happens seconds

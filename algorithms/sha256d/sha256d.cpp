@@ -32,27 +32,34 @@ extern "C" {
 namespace vkminer {
 namespace {
 
-// The push constant block sha256d.comp declares, and the reason the kernel
-// only has two SHA-256 compressions to do per nonce rather than four.
+// The push constant block sha256d.comp declares, and the reason the kernel has
+// two SHA-256 compressions to do per nonce rather than four -- and now starts
+// the first of them at round 4 rather than round 0.
 //
-// 88 bytes against a guaranteed minimum of 128, so this fits on every device
-// Vulkan allows to exist. The asserts below are not ceremony: the GLSL and this
-// struct are one definition written in two languages, and nothing else would
-// notice a word inserted in one of them.
+// 124 bytes against a guaranteed minimum of 128, so this still fits on every
+// device Vulkan allows to exist, but it no longer fits with room to spare.
+// ⚠️ Anything added here from now on has to displace something, or move out of
+// push constants entirely. The asserts below are not ceremony: the GLSL and
+// this struct are one definition written in two languages, and nothing else
+// would notice a word inserted in one of them.
 struct Sha256dPush {
-    uint32_t midstate[8];
-    uint32_t tail[3];
-    uint32_t target[8];
+    uint32_t midstate[8];  // after header words 0..15; the feed-forward needs it
+    uint32_t advanced[8];  // working variables entering round 4, at nonce 0
+    uint32_t sched[4];     // message words 16..19, at nonce 0
+    uint32_t target[8];    // as fulltest() compares: little-endian, most significant last
     uint32_t nonce_start;
     uint32_t count;
     uint32_t capacity;
 };
 
-static_assert(sizeof(Sha256dPush) == 88,
-              "sha256d.comp's push block is 88 bytes");
-static_assert(offsetof(Sha256dPush, tail) == 32, "push block layout");
-static_assert(offsetof(Sha256dPush, target) == 44, "push block layout");
-static_assert(offsetof(Sha256dPush, nonce_start) == 76, "push block layout");
+static_assert(sizeof(Sha256dPush) == 124,
+              "sha256d.comp's push block is 124 bytes");
+static_assert(sizeof(Sha256dPush) <= 128,
+              "Vulkan guarantees only 128 bytes of push constants");
+static_assert(offsetof(Sha256dPush, advanced) == 32, "push block layout");
+static_assert(offsetof(Sha256dPush, sched) == 64, "push block layout");
+static_assert(offsetof(Sha256dPush, target) == 80, "push block layout");
+static_assert(offsetof(Sha256dPush, nonce_start) == 112, "push block layout");
 
 // Two mainnet block headers, exactly as they went over the wire, and the
 // digests they are known to produce. Both are checkable against any block
@@ -166,7 +173,9 @@ public:
 
     // Everything that is the same for every nonce in the dispatch. The first
     // 64 bytes of the header hold no nonce, so their compression is done here
-    // once instead of on the device a few billion times.
+    // once instead of on the device a few billion times -- and so are the
+    // first four rounds of the block that does hold it, which depend on the
+    // nonce only through additions the device can put back.
     size_t prepare(const Dispatch &dispatch, void *out,
                    size_t capacity) const override
     {
@@ -180,9 +189,17 @@ public:
         // second, and 19 is the nonce the kernel substitutes per invocation.
         // No swapping anywhere: each word already holds four header bytes in
         // the big-endian order SHA-256's message schedule reads them in.
-        sha256_midstate(push.midstate, dispatch.header);
+        uint32_t tail[3];
         for (size_t i = 0; i < 3; i++)
-            push.tail[i] = dispatch.header[16 + i];
+            tail[i] = dispatch.header[16 + i];
+
+        sha256_midstate(push.midstate, dispatch.header);
+
+        // The midstate stays even though the device no longer starts from it:
+        // rounds 0..3 do, and the feed-forward at the end of the compression
+        // adds it back word for word. Advancing the state does not retire it.
+        sha256_advance_nonce_block(push.advanced, push.sched,
+                                   push.midstate, tail);
 
         std::memcpy(push.target, dispatch.target, sizeof push.target);
         push.nonce_start = dispatch.nonce_start;

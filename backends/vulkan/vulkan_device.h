@@ -61,6 +61,11 @@ public:
     const VolkDeviceTable &fn() const { return fn_; }
     const DeviceInfo &info() const { return info_; }
 
+    // Whether this device was created able to say what it compiled a shader
+    // into -- --vk-pipeline-stats asked for it *and* the driver offers it.
+    // False on most of the device set, so every caller needs the other path.
+    bool pipeline_stats() const { return pipeline_stats_; }
+
     bool create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                        BufferKind kind, Buffer *out);
     void destroy_buffer(Buffer *buffer);
@@ -86,6 +91,7 @@ private:
     VmaAllocator     allocator_ = nullptr;
     VolkDeviceTable  fn_{};
     DeviceInfo       info_;
+    bool             pipeline_stats_ = false;
 };
 
 }  // namespace vkminer

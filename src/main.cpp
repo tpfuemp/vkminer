@@ -14,6 +14,7 @@ extern "C" {
 
 #include "algorithms/registry.h"
 #include "backends/backend.h"
+#include "replay.h"
 #include "scheduler/worker.h"
 #include "self_test.h"
 #include "tune.h"
@@ -259,6 +260,15 @@ int main(int argc, char *argv[])
 
     parse_cmdline(argc, argv);
 
+    // The statistics come out of building a pipeline, and the self-test is the
+    // shortest path that builds a real one on every selected device and then
+    // stops. Reusing it rather than adding a mode also means the numbers
+    // describe the pipeline the miner actually creates -- and the self-test
+    // still runs, so a shader that reports beautiful register counts and hashes
+    // wrongly does not get to look like a success.
+    if (opt_vk_pipeline_stats)
+        opt_self_test = true;
+
     // The backend comes up before the option checks that depend on it, so
     // that --device-list works without a pool, an algorithm or a wallet.
     g_backend = make_backend(opt_backend);
@@ -315,7 +325,7 @@ int main(int argc, char *argv[])
                             "which runs one dispatch at a time",
                g_backend->name());
 
-    if (!opt_benchmark && !opt_self_test && !short_url) {
+    if (!opt_benchmark && !opt_self_test && !opt_replay && !short_url) {
         std::fprintf(stderr, "%s: no URL supplied\n", argv[0]);
         show_usage_and_exit(1);
     }
@@ -343,6 +353,14 @@ int main(int argc, char *argv[])
 
     if (opt_self_test)
         return 0;
+
+    // After the self-test, because a capture replayed on a build that cannot
+    // hash correctly at all says nothing about the capture. Before the tuner,
+    // because a sweep would take minutes to arrive at a shader this is
+    // deliberately not running.
+    if (opt_replay)
+        return vkminer::replay_captures(*g_backend, g_device_map, opt_algo,
+                                        opt_replay) ? 0 : 1;
 
     // After the self-test, because a sweep is worth nothing on a device that
     // hashes wrongly, and before the pool, because a job's worth of nonces
@@ -602,6 +620,32 @@ int main(int argc, char *argv[])
                     applog(LOG_NOTICE, "Time limit of %ds reached, exiting. "
                                        "Benchmark: %s averaged over the run",
                            opt_time_limit, scaled);
+
+                    // The candidate path's own result, and the only part of a
+                    // benchmark that is evidence rather than a rate: how many
+                    // the devices emitted and the host confirmed, against how
+                    // many that many hashes should have produced. Printed only
+                    // when a target was chosen to produce some, because at the
+                    // default one the honest expectation is zero and a line
+                    // saying "0, expected 0.0" is noise.
+                    if (opt_benchmark_target >= 0) {
+                        uint64_t confirmed = 0, rejected = 0;
+                        worker_candidate_counts(&confirmed, &rejected);
+
+                        const double p = (static_cast<double>(
+                                              opt_benchmark_target) + 1.) /
+                                         4294967296.;
+                        const double expected = hashes * p;
+                        applog(LOG_NOTICE,
+                               "Benchmark: %llu candidate(s) confirmed by the "
+                               "host and %llu rejected, against %.1f expected "
+                               "from %.0f hashes at a target of %08llx",
+                               static_cast<unsigned long long>(confirmed),
+                               static_cast<unsigned long long>(rejected),
+                               expected, hashes,
+                               static_cast<unsigned long long>(
+                                   opt_benchmark_target));
+                    }
                 } else {
                     applog(LOG_NOTICE, "Time limit of %ds reached, exiting",
                            opt_time_limit);

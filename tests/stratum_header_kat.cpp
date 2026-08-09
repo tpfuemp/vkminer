@@ -78,8 +78,9 @@ const char kCoinb1[] =
     "01000000010000000000000000000000000000000000000000000000000000000000000000"
     "ffffffff4e03622842044358726a08";
 
-// "/zpool.ca/", the fabe6d6d merged-mining tag with its 32-byte commitment, then
-// the single output and the locktime.
+// The tail of the scriptSig -- the pool's tag, then the fabe6d6d merged-mining
+// marker with its 32-byte commitment -- and after it the single output and the
+// locktime.
 const char kCoinb2[] =
     "2f7a706f6f6c2e63612f1cd1999b2f00fabe6d6de7a6e06406823582fab852d1c437df1746"
     "38dc7345e1fdf8916e12e7cb7074f380000000000000000000000001806e87740100000019"

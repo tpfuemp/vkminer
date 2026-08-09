@@ -311,14 +311,16 @@ target_link_libraries(vkminer_tune_cache PRIVATE
 # ------------------------------------------------------------------- binary
 add_executable(vkminer
     src/main.cpp
+    src/replay.cpp
     src/self_test.cpp
     src/tune.cpp
+    src/scheduler/candidate_log.cpp
     src/scheduler/worker.cpp)
 
 target_include_directories(vkminer PRIVATE src "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer PRIVATE
     vkminer_backends vkminer_tune_cache vkminer_warnings vkminer_inherited
-    Threads::Threads)
+    vkminer_paths Threads::Threads)
 target_compile_definitions(vkminer PRIVATE
     VKMINER_VERSION="${PROJECT_VERSION}-dev")
 

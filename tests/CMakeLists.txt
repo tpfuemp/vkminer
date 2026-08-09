@@ -56,6 +56,22 @@ if(Python3_Interpreter_FOUND)
         --miner "$<TARGET_FILE:vkminer>" --backend null)
     set_tests_properties(reconnect
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS slow)
+
+    # A job id is not unique. Pools that switch between coins re-send one, and
+    # the miner has to come back to it with a coinbase it has not used before or
+    # it re-submits nonces it already sent. This pool re-sends a job on purpose
+    # and fails on any repeated submission.
+    #
+    # Needs a real device, unlike the reconnect test: the assertion is about
+    # shares, and the null backend produces none. SKIPs where there is none, and
+    # where the device is too slow to submit enough of them to conclude.
+    if(TARGET vkminer_shaders)
+        add_test(NAME duplicate_test COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/duplicate_test.py"
+            --miner "$<TARGET_FILE:vkminer>" --backend vulkan --devices 0)
+        set_tests_properties(duplicate_test
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS slow)
+    endif()
 endif()
 
 # Only exists where shaders were compiled, because there is nothing to embed
@@ -108,4 +124,38 @@ if(TARGET vkminer_shaders)
     add_test(NAME diff_test_depth1 COMMAND diff_test sha256d 100000 1)
     set_tests_properties(diff_test_depth1
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # The same dispatch repeatedly, at the size the miner would run it, with the
+    # queue full. Where diff_test asks whether the answers are right, this asks
+    # whether they are the same answers twice -- which is the only cheap way to
+    # see a race, and it needs a full-occupancy dispatch to see one, so it is
+    # much the more expensive of the two on a software rasterizer.
+    add_executable(race_test race_test.cpp)
+    target_link_libraries(race_test PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    add_test(NAME race_test COMMAND race_test sha256d 8)
+    set_tests_properties(race_test
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
+    # The negative half of the known-answer test, perturbing the device rather
+    # than the host reference. Cheap -- a couple of dozen single-nonce dispatches
+    # -- so it is not labelled slow and runs on a software rasterizer too.
+    add_executable(negative_kat negative_kat.cpp)
+    target_link_libraries(negative_kat PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    add_test(NAME negative_kat COMMAND negative_kat sha256d)
+    set_tests_properties(negative_kat PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # The calibration for --vk-probe-best, which is the only instrument that
+    # says anything about the nonces a kernel did *not* find. It is checked
+    # against the scalar reference at a size the host can hash, against itself
+    # at the size the device really runs, and -- because a single reading is a
+    # minimum and so a random quantity -- against its expectation over a few
+    # hundred dispatches that share neither header nor nonce range.
+    add_executable(probe_test probe_test.cpp)
+    target_link_libraries(probe_test PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    add_test(NAME probe_test COMMAND probe_test sha256d 4)
+    set_tests_properties(probe_test
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 endif()

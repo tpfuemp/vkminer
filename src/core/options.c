@@ -73,6 +73,12 @@ int opt_scantime = 5;
 int opt_time_limit = 0;
 int stratum_keepalive_timeout = 60;
 
+/* The most significant word of --benchmark's synthetic target, or -1 for the
+ * realistic one benchmark_work() picks by itself. Held wider than the 32 bits
+ * it carries so that "not given" is a value the type can hold and not a
+ * reserved target. */
+int64_t opt_benchmark_target = -1;
+
 double opt_diff_factor = 1.0;
 
 /* Every difficulty this miner prints is in the scale the pool quotes; every
@@ -104,6 +110,16 @@ bool opt_n_threads_set = false;
 char *opt_devices = NULL;
 bool opt_device_list = false;
 bool opt_vk_validate = false;
+bool opt_vk_pipeline_stats = false;
+
+/* Whether the shader keeps a running minimum of the digests it computes. It
+ * answers the one question a share count cannot -- whether the kernel is
+ * missing valid nonces -- and it costs an atomic per invocation to ask, so it
+ * is off, and a hash rate measured with it on is not a hash rate. */
+bool opt_vk_probe_best = false;
+
+/* A capture file to re-run instead of mining. NULL is the ordinary case. */
+char *opt_replay = NULL;
 
 /* Dispatches a worker may leave outstanding on its device. Zero lets the
  * backend pick, which is the setting to mine with; an explicit value exists so
@@ -171,6 +187,18 @@ Options:\n\
                         finds no solutions and is only for testing\n\
       --vk-validate     enable the Vulkan validation layers (slow; for\n\
                         debugging a backend, not for mining)\n\
+      --vk-pipeline-stats\n\
+                        report what the driver compiled each shader into --\n\
+                        registers, spills, occupancy -- and exit. Needs a\n\
+                        driver offering VK_KHR_pipeline_executable_properties,\n\
+                        and asking for the numbers can itself change what is\n\
+                        compiled, so it is not for mining either\n\
+      --vk-probe-best   have the shader report the best digest it saw, which\n\
+                        is the only way to see nonces it should have found and\n\
+                        did not. Costs an atomic per hash, so a rate measured\n\
+                        with this on is not a rate\n\
+      --replay=FILE     re-run the candidates a previous run failed to verify,\n\
+                        from the file it wrote, and exit\n\
       --algo-dir=DIR    load algorithm shaders from DIR instead of the\n\
                         installed location\n\
       --queue-depth=N   dispatches to keep queued on each device at once\n\
@@ -230,7 +258,15 @@ Options:\n\
       --hash-meter      log the hash rate of each worker, not just the total\n\
       --no-color        disable colored output\n\
       --bell            beep on an accepted share\n\
-      --benchmark       run without connecting to a pool\n"
+      --benchmark       run without connecting to a pool\n\
+      --benchmark-target=HEX\n\
+                        loosen --benchmark's synthetic target to HEX as its\n\
+                        most significant word, the rest all ones, so that\n\
+                        candidates are actually found: one nonce in\n\
+                        2^32/(HEX+1) passes. Nothing is ever submitted. Use it\n\
+                        to prove the emit and re-verification path runs at a\n\
+                        rate arithmetic predicts -- a silent benchmark is no\n\
+                        evidence that it works at all\n"
 #ifdef HAVE_SYSLOG_H
 "\
   -S, --syslog          use system log for output messages\n"
@@ -258,6 +294,7 @@ static struct option const options[] = {
    { "background",        0, NULL, 'B' },
    { "bell",              0, NULL, 1031 },
    { "benchmark",         0, NULL, 1005 },
+   { "benchmark-target",  1, NULL, 1052 },
    { "cert",              1, NULL, 1001 },
    { "config",            1, NULL, 'c' },
    { "debug",             0, NULL, 'D' },
@@ -281,6 +318,7 @@ static struct option const options[] = {
    { "proxy",             1, NULL, 'x' },
    { "queue-depth",       1, NULL, 1046 },
    { "quiet",             0, NULL, 'q' },
+   { "replay",            1, NULL, 1051 },
    { "retries",           1, NULL, 'r' },
    { "retry-pause",       1, NULL, 1025 },
    { "retune",            0, NULL, 1047 },
@@ -297,6 +335,8 @@ static struct option const options[] = {
    { "user",              1, NULL, 'u' },
    { "userpass",          1, NULL, 'O' },
    { "version",           0, NULL, 'V' },
+   { "vk-pipeline-stats", 0, NULL, 1049 },
+   { "vk-probe-best",     0, NULL, 1050 },
    { "vk-validate",       0, NULL, 1042 },
    { 0, 0, 0, 0 }
 };
@@ -569,6 +609,19 @@ void parse_arg( int key, char *arg )
          opt_n_threads_set = true;
          break;
 
+      case 1052: // benchmark-target
+      {
+         /* Hex, because a target is read as hex everywhere else in mining and
+          * because the useful values are powers of two minus one. strtoull
+          * rather than atoi: this is unsigned and the top bit is legal. */
+         char *end = NULL;
+         unsigned long long t = strtoull( arg, &end, 16 );
+         if ( !*arg || !end || *end || t > 0xffffffffULL )
+            show_usage_and_exit( 1 );
+         opt_benchmark_target = (int64_t) t;
+         break;
+      }
+
       case 1008: // time-limit
          v = atoi( arg );
          /* A negative limit would read as already expired and exit the miner
@@ -675,6 +728,19 @@ void parse_arg( int key, char *arg )
 
       case 1042: // vk-validate
          opt_vk_validate = true;
+         break;
+
+      case 1049: // vk-pipeline-stats
+         opt_vk_pipeline_stats = true;
+         break;
+
+      case 1050: // vk-probe-best
+         opt_vk_probe_best = true;
+         break;
+
+      case 1051: // replay
+         free( opt_replay );
+         opt_replay = strdup( arg );
          break;
 
       case 1045: // self-test

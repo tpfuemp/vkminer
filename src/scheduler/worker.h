@@ -4,6 +4,8 @@
 #ifndef VKMINER_SCHEDULER_WORKER_H__
 #define VKMINER_SCHEDULER_WORKER_H__
 
+#include <cstdint>
+
 #include "backends/backend.h"
 
 // Called by main before any worker starts. `device_map` has one entry per
@@ -28,5 +30,11 @@ int worker_count();
 // why and left its loop; it does not end the process itself, because the
 // teardown that follows waits for it to let go of its device first.
 int worker_exit_code();
+
+// What --benchmark-target is for: candidates the devices emitted and the host
+// re-hashed, confirmed and not. Zero and zero at the default target is the
+// expected answer and says nothing; only a loosened target makes these
+// evidence.
+void worker_candidate_counts(uint64_t *confirmed, uint64_t *rejected);
 
 #endif  // VKMINER_SCHEDULER_WORKER_H__

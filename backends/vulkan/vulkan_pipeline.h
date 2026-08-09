@@ -34,6 +34,13 @@ struct ComputePipelineDesc {
     uint32_t push_constant_bytes = 0;  // 0 for a shader with no push block
     uint32_t local_size_x        = 0;  // specialization constant 0
 
+    // Specialization constant 1: whether the shader maintains the best-digest
+    // word. A constant rather than a uniform so that the atomic is not in the
+    // module at all when it is off -- which is what makes it safe to have a
+    // debug probe on the path every invocation takes. Compare the two binary
+    // sizes under --vk-pipeline-stats to check that it really went.
+    bool probe_best = false;
+
     // Interchangeable descriptor sets to allocate, all of the same layout. One
     // per dispatch that may be in flight: a set may not be rewritten while a
     // command buffer using it is executing.
@@ -68,6 +75,19 @@ public:
                 const void *push, uint32_t push_bytes) const;
 
     uint32_t local_size_x() const { return local_size_x_; }
+
+    // Log what the driver compiled this pipeline into: register counts, spills,
+    // occupancy -- whatever it chose to expose, since the extension standardizes
+    // the mechanism and not one statistic name. `label` identifies the pipeline
+    // in the output, because a device may have several. A no-op unless the
+    // device was created under --vk-pipeline-stats, so it is safe to call
+    // unconditionally.
+    //
+    // Deliberately does not fetch internal representations. The same extension
+    // offers them, and on RADV they are the full ISA -- megabytes, per pipeline,
+    // through a line-oriented log. That is a file to write, not a thing to
+    // print, and nothing needs it yet.
+    void report_statistics(const char *label) const;
 
 private:
     ComputePipeline() = default;
