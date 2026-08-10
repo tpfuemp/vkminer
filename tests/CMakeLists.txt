@@ -13,6 +13,13 @@ target_link_libraries(sha256d_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME sha256d_kat COMMAND sha256d_kat)
 
+# The same question for the second algorithm. Its vectors are anchored
+# differently, on the headers' own difficulty; the test explains why.
+add_executable(blake2s_kat blake2s_kat.cpp)
+target_link_libraries(blake2s_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME blake2s_kat COMMAND blake2s_kat)
+
 # One level up again: not whether a header hashes correctly, but whether a
 # mining.notify turns into the right header in the first place.
 add_executable(stratum_header_kat stratum_header_kat.cpp)
@@ -132,6 +139,12 @@ if(TARGET vkminer_shaders)
     add_test(NAME diff_test COMMAND diff_test sha256d 100000)
     set_tests_properties(diff_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # The same for blake2s, and the only place its byte order -- the mirror
+    # image of sha256d's -- meets something that computes it independently.
+    add_test(NAME diff_test_blake2s COMMAND diff_test blake2s 100000)
+    set_tests_properties(diff_test_blake2s
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The same range with the queue held to one dispatch -- the path
     # --queue-depth 1 selects, and the baseline the pipelining is measured
     # against. It catches a kernel that only works with something queued behind
@@ -161,6 +174,10 @@ if(TARGET vkminer_shaders)
     add_test(NAME negative_kat COMMAND negative_kat sha256d)
     set_tests_properties(negative_kat PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
+    add_test(NAME negative_kat_blake2s COMMAND negative_kat blake2s)
+    set_tests_properties(negative_kat_blake2s
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
     # The calibration for --vk-probe-best, which is the only instrument that
     # says anything about the nonces a kernel did *not* find. It is checked
     # against the scalar reference at a size the host can hash, against itself
@@ -172,5 +189,12 @@ if(TARGET vkminer_shaders)
         vkminer_backends vkminer_warnings Threads::Threads)
     add_test(NAME probe_test COMMAND probe_test sha256d 4)
     set_tests_properties(probe_test
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
+    # Per algorithm, because which word a kernel hands to probe_best is the
+    # kernel's decision: a shader that screens on the right word and reports the
+    # wrong one mines correctly and lies about it.
+    add_test(NAME probe_test_blake2s COMMAND probe_test blake2s 4)
+    set_tests_properties(probe_test_blake2s
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 endif()

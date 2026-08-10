@@ -11,6 +11,9 @@ pipeline-cache.bin
 # wallet address; copy config-template.json and edit the copy.
 config.json
 
+# Left behind by the Python tests when ctest imports one of them.
+__pycache__/
+
 # Editor, tooling and OS noise.
 compile_commands.json
 .cache/

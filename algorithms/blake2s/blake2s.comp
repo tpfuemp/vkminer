@@ -1,0 +1,100 @@
+// BLAKE2s: one nonce per invocation.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// An 80-byte header is two BLAKE2s blocks. The first holds no nonce, so the host
+// compresses it once per dispatch and sends the chaining value; what is left
+// here is a single compression per nonce.
+//
+// ⚠️ The byte order is the mirror image of sha256d.comp's. SHA-256 reads its
+// message big-endian and struct work's words already are a big-endian read of
+// the wire, so that kernel swaps nothing in. BLAKE2s reads its message
+// little-endian, so every message word is the byte reversal of the header word
+// it comes from -- the host does that for the three per-job words, and the nonce
+// is reversed here because the nonce this kernel counts in has to stay struct
+// work's spelling. The digest needs no swap in either direction: BLAKE2s emits
+// its state little-endian, which is already the order the target is compared in.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "shaders/common/blake2s.glsl"
+#include "shaders/common/candidates.glsl"
+
+layout(local_size_x_id = 0) in;
+
+// 88 bytes, against a guaranteed minimum of 128. Mirrored by Blake2sPush in
+// blake2s.cpp, which asserts its own size and offsets.
+layout(push_constant) uniform Push {
+    uint midstate[8];  // chaining value after header bytes 0..63
+    uint block[3];     // final block message words 0..2, already byte-reversed
+    uint target[8];    // as fulltest() compares: little-endian, most significant last
+    uint nonce_start;
+    uint count;        // nonces to test, which is not the invocation count
+    uint capacity;     // candidates the result buffer can hold
+} push;
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= push.count)
+        return;
+
+    uint nonce = push.nonce_start + index;
+
+    // The four message words the final block has; Z is the zero padding. Every
+    // round adds Z eight to fourteen times, which the compiler folds away only
+    // because the permutation is applied here rather than through a table.
+    uint m0 = push.block[0];
+    uint m1 = push.block[1];
+    uint m2 = push.block[2];
+    uint m3 = bswap32(nonce);
+#define Z 0u
+
+    // 80 bytes hashed, and this is the last block: t = 80, f0 = ~0.
+    uint v[16];
+    BLAKE2S_INIT(v, push.midstate, 80u, true);
+
+    // Ten rounds, each line one round's sigma permutation (RFC 7693 §2.7)
+    // applied to the four words above. Generated from the table, not typed.
+    BLAKE2S_ROUND(v, m0, m1, m2, m3,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z);
+    BLAKE2S_ROUND(v,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z, m1,  Z, m0, m2,  Z,  Z,  Z, m3);
+    BLAKE2S_ROUND(v,  Z,  Z,  Z, m0,  Z, m2,  Z,  Z,  Z,  Z, m3,  Z,  Z, m1,  Z,  Z);
+    BLAKE2S_ROUND(v,  Z,  Z, m3, m1,  Z,  Z,  Z,  Z, m2,  Z,  Z,  Z,  Z, m0,  Z,  Z);
+    BLAKE2S_ROUND(v,  Z, m0,  Z,  Z, m2,  Z,  Z,  Z,  Z, m1,  Z,  Z,  Z,  Z, m3,  Z);
+    BLAKE2S_ROUND(v, m2,  Z,  Z,  Z, m0,  Z,  Z, m3,  Z,  Z,  Z,  Z,  Z,  Z, m1,  Z);
+    BLAKE2S_ROUND(v,  Z,  Z, m1,  Z,  Z,  Z,  Z,  Z, m0,  Z,  Z, m3,  Z, m2,  Z,  Z);
+    BLAKE2S_ROUND(v,  Z,  Z,  Z,  Z,  Z, m1, m3,  Z,  Z, m0,  Z,  Z,  Z,  Z, m2,  Z);
+    BLAKE2S_ROUND(v,  Z,  Z,  Z,  Z,  Z, m3, m0,  Z,  Z, m2,  Z,  Z, m1,  Z,  Z,  Z);
+    BLAKE2S_ROUND(v,  Z, m2,  Z,  Z,  Z,  Z, m1,  Z,  Z,  Z,  Z,  Z, m3,  Z,  Z, m0);
+
+#undef Z
+
+    // The most significant digest word, and the only one that decides all but
+    // one nonce in 2^32. Unlike sha256d.comp there is no early exit above it:
+    // v[7] and v[15] are both written by the last round, so splitting it would
+    // save two G functions out of eighty -- worth doing against a measurement.
+    uint top = push.midstate[7] ^ v[7] ^ v[15];
+
+    probe_best(top);
+
+    if (top > push.target[7])
+        return;
+
+    uint state[8];
+    for (uint i = 0u; i < 8u; i++)
+        state[i] = push.midstate[i] ^ v[i] ^ v[i + 8u];
+
+    // The full 256-bit comparison, most significant word first. It repeats the
+    // screen above deliberately: the screen decides what to skip computing, this
+    // decides what is a share, and a host re-check that rejects candidates as a
+    // matter of routine is a warning that has stopped meaning anything.
+    for (int i = 7; i >= 0; i--) {
+        if (state[i] > push.target[i])
+            return;
+        if (state[i] < push.target[i])
+            break;
+    }
+
+    emit_candidate(push.capacity, nonce, state);
+}

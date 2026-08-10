@@ -3,6 +3,7 @@
 
 #include "algorithms/registry.h"
 
+#include "algorithms/blake2s/blake2s.h"
 #include "algorithms/sha256d/sha256d.h"
 
 #include <cstring>
@@ -22,6 +23,7 @@ struct Entry {
 
 const Entry kAlgorithms[] = {
     { "sha256d", "", make_sha256d },
+    { "blake2s", "", make_blake2s },
 };
 
 bool same_name(const char *a, const char *b)

@@ -222,7 +222,8 @@ endif()
 add_library(vkminer_algorithms STATIC
     algorithms/algorithm.cpp
     algorithms/registry.cpp
-    algorithms/sha256d/sha256d.cpp)
+    algorithms/sha256d/sha256d.cpp
+    algorithms/blake2s/blake2s.cpp)
 
 target_include_directories(vkminer_algorithms PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer_algorithms PUBLIC vkminer_inherited)
@@ -241,6 +242,7 @@ if(VKMINER_BUILD_SHADERS)
     add_spirv_shaders(vkminer_shader_kernels
                       SOURCES shaders/toolchain-check.comp
                               algorithms/sha256d/sha256d.comp
+                              algorithms/blake2s/blake2s.comp
                       INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
                       EMBED "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_spirv.cpp")
 
