@@ -20,6 +20,14 @@ target_link_libraries(blake2s_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME blake2s_kat COMMAND blake2s_kat)
 
+# And for the third, which is the first with an anchor in a standards document:
+# RFC 7914 publishes vectors for scrypt itself, so the reference is checked
+# against the RFC as well as against mined headers.
+add_executable(scrypt_kat scrypt_kat.cpp)
+target_link_libraries(scrypt_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME scrypt_kat COMMAND scrypt_kat)
+
 # One level up again: not whether a header hashes correctly, but whether a
 # mining.notify turns into the right header in the first place.
 add_executable(stratum_header_kat stratum_header_kat.cpp)
@@ -145,6 +153,17 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_blake2s
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # And for the third, over a fifth of the range. Both halves of this
+    # comparison compute four thousand Salsa20 cores per nonce, and the host's
+    # half is a deliberately unoptimized reference: 20,011 nonces is 11 seconds
+    # on the dev host's software rasterizer where the two above are a fifth of
+    # one, and the aarch64 box is several times slower again. Hence the shorter
+    # range and the label. What it buys is candidates, and twenty of them
+    # exercise the same paths a hundred would.
+    add_test(NAME diff_test_scrypt COMMAND diff_test scrypt 20011)
+    set_tests_properties(diff_test_scrypt
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
     # The same range with the queue held to one dispatch -- the path
     # --queue-depth 1 selects, and the baseline the pipelining is measured
     # against. It catches a kernel that only works with something queued behind
@@ -178,6 +197,10 @@ if(TARGET vkminer_shaders)
     set_tests_properties(negative_kat_blake2s
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
+    add_test(NAME negative_kat_scrypt COMMAND negative_kat scrypt)
+    set_tests_properties(negative_kat_scrypt
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
     # The calibration for --vk-probe-best, which is the only instrument that
     # says anything about the nonces a kernel did *not* find. It is checked
     # against the scalar reference at a size the host can hash, against itself
@@ -196,5 +219,9 @@ if(TARGET vkminer_shaders)
     # wrong one mines correctly and lies about it.
     add_test(NAME probe_test_blake2s COMMAND probe_test blake2s 4)
     set_tests_properties(probe_test_blake2s
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
+    add_test(NAME probe_test_scrypt COMMAND probe_test scrypt 4)
+    set_tests_properties(probe_test_scrypt
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 endif()

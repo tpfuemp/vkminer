@@ -90,10 +90,29 @@ struct KernelSpec {
     uint32_t push_constant_bytes = 0;
     uint32_t local_size_x        = 0;  // 0 lets the backend choose
 
+    // Device-local bytes each invocation needs to itself, bound after the
+    // result buffer. Zero for a kernel whose whole state fits in registers.
+    //
+    // An algorithm states its appetite and gets no say in what follows: how
+    // much memory is free, and how much is spoken for by dispatches in flight,
+    // is not something the algorithm axis can see. The backend decides how many
+    // invocations it can afford and caps the batch there.
+    uint64_t scratch_bytes = 0;
+
     // Dispatches this kernel may hold at once; 0 lets the backend choose. Not
     // an algorithm's business -- it is here so a caller sweeping both axes can
     // ask for one combination without going through a process-wide global.
     uint32_t queue_depth = 0;
+
+    // Kernels the caller will hold alive on this device at once, itself
+    // included; the backend divides its scratch budget by this. Zero and one
+    // both mean alone. Only the caller can know it -- the others are
+    // allocations that have not happened yet.
+    //
+    // Each gets an equal share rather than whatever is left when it is built,
+    // so that a tuner racing several can compare them and not their build
+    // order. Nothing but the batch size changes.
+    uint32_t concurrent_kernels = 1;
 
     // The CPU half: the scalar reference every algorithm must supply. A
     // backend with no way to run SPIR-V runs this instead, and the differential
@@ -141,6 +160,16 @@ public:
     // Nonces the caller should ask for per dispatch to keep the device busy
     // without holding it long enough to miss a new job.
     virtual uint32_t preferred_batch() const = 0;
+
+    // The largest dispatch this kernel will accept at all: preferred_batch is
+    // an answer about time, this one is about memory. A caller sizing a
+    // dispatch from anything else, as the tests do, has to ask -- more than
+    // this is refused.
+    //
+    // Unbounded by default, because a kernel holding its state in registers has
+    // no such limit and answering with the tuner's opening guess would make a
+    // test measure the tuner.
+    virtual uint32_t max_batch() const { return 0xffffffffu; }
 
     // The width this kernel was built at, which need not be the one asked for:
     // a spec naming none leaves the backend to pick off the device's limits. A

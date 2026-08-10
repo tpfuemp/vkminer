@@ -18,6 +18,15 @@ uint rotr32(uint x, uint n)
     return (x >> n) | (x << (32u - n));
 }
 
+// The other direction, on the same terms and for the same reason. Salsa20 is
+// specified entirely in left rotates, and spelling them as rotr32(x, 32u - n)
+// would make every line of it something to decode rather than something to
+// compare against the specification.
+uint rotl32(uint x, uint n)
+{
+    return (x << n) | (x >> (32u - n));
+}
+
 // Reverse the four bytes of a word.
 //
 // This is not the header endianness hazard -- the block header is normalized on

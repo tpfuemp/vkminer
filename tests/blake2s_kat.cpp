@@ -10,8 +10,13 @@
 // CBlockHeader::GetHash() returns the scrypt hash whatever mined the block. So
 // the anchor here is that each digest clears the nBits its own header declares,
 // decoded below from the wire bytes rather than taken on trust from the miner.
-// Those targets leave ~39 bits of margin, so two vectors clearing them is a
-// 2^-78 coincidence unless the assembly and the algorithm are both right.
+//
+// What makes that an anchor is not the margin -- a mined block's digest sits
+// just under its target, by less than a factor of two, which is exactly what
+// mining it means. It is that a *wrong* implementation's digest is uniform over
+// 2^256, and both these headers declare a target near 2^208.7. So a wrong
+// assembly or a wrong round structure clears one with probability about 2^-47,
+// and both with about 2^-94.
 //
 // The digests come from the algorithm's own table rather than being written out
 // again: duplicating them would only check that two copies of an unverifiable

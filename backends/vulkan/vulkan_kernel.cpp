@@ -87,6 +87,7 @@ public:
             for (Slot &slot : slot_) {
                 device_->destroy_buffer(&slot.results);
                 device_->destroy_buffer(&slot.readback);
+                device_->destroy_buffer(&slot.scratch);
             }
     }
 
@@ -144,6 +145,14 @@ public:
         // One result buffer per in-flight dispatch, not one shared: the host
         // reads a dispatch's results long after the next has started writing,
         // and they would be the two of them in the same words. A kilobyte each.
+        // Dispatches overlap and every invocation in one owns a scratchpad, so
+        // the bill is depth * batch * scratch and the batch is the only free
+        // variable in it.
+        scratch_bytes_ = spec.scratch_bytes;
+        concurrent_ = spec.concurrent_kernels ? spec.concurrent_kernels : 1;
+        if (scratch_bytes_ && !size_scratch(info))
+            return false;
+
         const VkDeviceSize bytes = kResultWords * sizeof(uint32_t);
         slot_.resize(depth_);
         queue_.resize(depth_);
@@ -166,10 +175,26 @@ public:
                 return false;
             }
 
+            if (scratch_bytes_) {
+                const VkDeviceSize scratch =
+                    static_cast<VkDeviceSize>(max_batch_) * scratch_bytes_;
+                if (!device.create_buffer(scratch,
+                                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                          BufferKind::DeviceLocal,
+                                          &slot_[i].scratch)) {
+                    applog(LOG_ERR, "Vulkan: could not allocate a %llu MiB "
+                                    "scratchpad for '%s' (slot %u of %u)",
+                           static_cast<unsigned long long>(scratch >> 20),
+                           name_, i, depth_);
+                    return false;
+                }
+            }
+
             // Once, here, and never again: a set may not be updated while a
             // command buffer using it is in flight, and once the pipeline is
             // full there is no instant at which none of them is.
-            pipeline_->bind(i, &slot_[i].results, 1);
+            const Buffer bound[2] = { slot_[i].results, slot_[i].scratch };
+            pipeline_->bind(i, bound, scratch_bytes_ ? 2 : 1);
         }
 
         ring_ = CommandRing::create(device, depth_);
@@ -195,6 +220,16 @@ public:
     {
         if (!count)
             return false;
+
+        // Scratch is indexed by invocation and only max_batch_ of them were
+        // allocated. Past that the device writes wherever the arithmetic lands:
+        // no fault, no validation error, just a wrong digest somewhere the host
+        // will never look.
+        if (count > max_batch_) {
+            applog(LOG_ERR, "Vulkan: '%s' was handed %u nonces, and has "
+                            "scratchpads for %u", name_, count, max_batch_);
+            return false;
+        }
 
         // The caller is told how many it may have outstanding. Refusing beats
         // overwriting: the alternative is a dispatch's results silently
@@ -368,6 +403,8 @@ public:
 
     uint32_t preferred_batch() const override { return batch_; }
 
+    uint32_t max_batch() const override { return max_batch_; }
+
     uint32_t local_size() const override { return local_; }
 
     uint32_t queue_depth() const override { return depth_; }
@@ -411,12 +448,88 @@ private:
             hold_ = depth_;
     }
 
+    // How many invocations this device can afford in flight at once. Sets
+    // max_batch_, within which the time-based tuning below then chooses, and
+    // fails rather than allocating something that will not run: a device
+    // without room should say so at startup and not mid-dispatch.
+    bool size_scratch(const DeviceInfo &info)
+    {
+        if (!info.memory) {
+            applog(LOG_ERR, "Vulkan: '%s' needs %llu bytes of scratch per hash "
+                            "and %s does not report how much memory it has",
+                   name_, static_cast<unsigned long long>(scratch_bytes_),
+                   info.name.c_str());
+            return false;
+        }
+
+        // Not the whole heap. The driver, the command buffers, the result
+        // buffers and -- on a device also driving a display -- a framebuffer
+        // this cannot see all live there too. VK_EXT_memory_budget would give a
+        // real answer; this is the honest guess without it.
+        //
+        // A software rasterizer gets far less, and not out of politeness: its
+        // "device memory" is the host's RAM, so three quarters of it is a
+        // swapping machine. It is there to say whether the kernel is correct,
+        // which takes a few thousand invocations and not a few million.
+        const bool soft = info.kind == DeviceKind::Cpu;
+        const uint64_t usable =
+            soft ? static_cast<uint64_t>(static_cast<double>(info.memory) * 0.15)
+                 : static_cast<uint64_t>(static_cast<double>(info.memory) * 0.75);
+        const uint64_t ceiling = soft ? (256ull << 20) : ~0ull;
+        uint64_t budget = usable < ceiling ? usable : ceiling;
+
+        // Split with whoever else the caller is about to build. Nothing here
+        // can see them, and a driver that over-commits lets them all succeed
+        // and then loses the device on the first dispatch that touches what it
+        // paged out.
+        budget /= concurrent_;
+
+        // Every dispatch in flight owns a full set of scratchpads, so the depth
+        // is a multiplier on the memory and not just on the latency.
+        const uint64_t per_invocation = scratch_bytes_ * depth_;
+        uint64_t fits = budget / (per_invocation ? per_invocation : 1);
+
+        if (fits > kMaxBatch)
+            fits = kMaxBatch;
+
+        // Below a workgroup there is nothing to dispatch: the device saying it
+        // cannot run this algorithm, which is a real answer.
+        if (fits < local_) {
+            applog(LOG_ERR, "Vulkan: '%s' needs %llu KiB per hash, and %s has "
+                            "room for %llu at a time -- fewer than the %u in a "
+                            "workgroup", name_,
+                   static_cast<unsigned long long>(scratch_bytes_ >> 10),
+                   info.name.c_str(), static_cast<unsigned long long>(fits),
+                   local_);
+            return false;
+        }
+
+        // Whole workgroups, so that the last one is not a partial dispatch that
+        // indexes scratch nobody allocated.
+        max_batch_ = static_cast<uint32_t>(fits / local_) * local_;
+
+        applog(LOG_INFO, "Vulkan: '%s' takes %llu MiB of scratch on %s -- "
+                         "%u hashes in flight, %llu KiB each%s",
+               name_,
+               static_cast<unsigned long long>(
+                   (static_cast<uint64_t>(max_batch_) * per_invocation) >> 20),
+               info.name.c_str(), max_batch_,
+               static_cast<unsigned long long>(scratch_bytes_ >> 10),
+               concurrent_ > 1 ? ", sharing the device" : "");
+        return true;
+    }
+
     void clamp_batch(const DeviceInfo &info)
     {
         if (batch_ < kMinBatch)
             batch_ = kMinBatch;
         if (batch_ > kMaxBatch)
             batch_ = kMaxBatch;
+
+        // The scratchpads were allocated for max_batch_ invocations and a
+        // dispatch indexes them by invocation, so this is not a preference.
+        if (batch_ > max_batch_)
+            batch_ = max_batch_;
 
         // A dispatch is workgroups, and there is a limit on how many of them
         // one call may have. Well above anything wanted here on a desktop
@@ -441,6 +554,10 @@ private:
     struct Slot {
         Buffer results{};
         Buffer readback{};
+        // Only for a kernel that asked for scratch, and one per slot rather
+        // than shared: dispatches overlap, and two of them in one scratchpad
+        // would both be wrong, differently on every run.
+        Buffer scratch{};
     };
     std::vector<Slot> slot_;
 
@@ -481,6 +598,14 @@ private:
 
     uint32_t local_ = 0;
     uint32_t batch_ = kMinBatch;
+
+    // Device-local bytes per invocation, the batch that many of them fit in,
+    // and how many kernels the spec says share this device. Zero and kMaxBatch
+    // for a kernel wanting no scratch, which leaves every compute-bound
+    // algorithm on the path it had.
+    uint64_t scratch_bytes_ = 0;
+    uint32_t max_batch_ = kMaxBatch;
+    uint32_t concurrent_ = 1;
 
     // The per-dispatch minima the probe has reported, each scaled to an
     // expected value of one, and how many contributed. Both stay at zero

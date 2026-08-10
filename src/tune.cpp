@@ -159,10 +159,12 @@ struct Candidate {
 std::unique_ptr<Kernel> build(ComputeBackend &backend, int device_index,
                               const Algorithm &algo, KernelSpec spec,
                               uint32_t local, uint32_t depth,
+                              uint32_t concurrent,
                               const KnownAnswer *answers, size_t answer_count)
 {
     spec.local_size_x = local;
     spec.queue_depth = depth;
+    spec.concurrent_kernels = concurrent;
 
     std::unique_ptr<Kernel> kernel = backend.create_kernel(device_index, spec);
     if (!kernel)
@@ -263,17 +265,38 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
 
     const auto started = std::chrono::steady_clock::now();
 
+    // race() runs the candidates interleaved, so all of them are alive at once
+    // and a kernel wanting memory per invocation has to be told how many that
+    // is. The default is included: it must be measured on the same terms as
+    // what it is compared against.
+    //
+    // An upper bound, not a count -- local_sizes may or may not contain the
+    // default, and a width that fails to build leaves its share unclaimed.
+    // Over-declaring costs a smaller batch during the sweep and nothing else.
+    const uint32_t width_share =
+        static_cast<uint32_t>(local_sizes(info).size()) + 1;
+
     // The default first, everything else measured against it. Asking for no
     // width and no depth gets exactly what this device would run untuned, read
     // back off the kernel because the rule that picks it is the backend's.
     std::vector<Candidate> candidates;
     {
         Candidate c;
-        c.kernel = build(backend, device_index, algo, base, 0, 0, answers,
-                         answer_count);
+        c.kernel = build(backend, device_index, algo, base, 0, 0, width_share,
+                         answers, answer_count);
         if (!c.kernel) {
-            applog(LOG_WARNING, "Tuning: device %d would not build its own "
-                                "default; mining untuned", device_index);
+            // Two different failures, and the difference is worth printing: a
+            // device with room to run this kernel and none to hold a field of
+            // them is not a broken kernel and does not stop the run.
+            if (base.scratch_bytes && width_share > 1)
+                applog(LOG_WARNING, "Tuning: device %d cannot hold %u "
+                                    "candidates of '%s' at once, and a sweep is "
+                                    "candidates raced against each other; "
+                                    "mining untuned", device_index, width_share,
+                       algo.name());
+            else
+                applog(LOG_WARNING, "Tuning: device %d would not build its own "
+                                    "default; mining untuned", device_index);
             return false;
         }
         c.local = c.kernel->local_size();
@@ -290,7 +313,7 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
             continue;
         Candidate c;
         c.kernel = build(backend, device_index, algo, base, local,
-                         default_depth, answers, answer_count);
+                         default_depth, width_share, answers, answer_count);
         if (!c.kernel)
             continue;   // build() said why; a width that will not build is not
         c.local = local;   // a failure of the sweep
@@ -314,15 +337,24 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
     out->queue_depth = candidates[static_cast<size_t>(winner)].depth;
     out->rate = candidates[static_cast<size_t>(winner)].score();
 
+    // Released before the depth pass builds anything: the winner is three
+    // numbers, and holding the kernels that produced them would make the two
+    // passes share the device as well.
+    candidates.clear();
+
     // The depth pass, at the width that just won. Skipped when --queue-depth
     // named one: that option exists to compare runs at a depth of the user's
     // choosing, and a tuner overruling it would make them the same run.
     if (opt_queue_depth <= 0) {
+        const uint32_t depth_share =
+            static_cast<uint32_t>(queue_depths().size());
+
         std::vector<Candidate> depths;
         for (const uint32_t depth : queue_depths()) {
             Candidate c;
             c.kernel = build(backend, device_index, algo, base,
-                             out->local_size_x, depth, answers, answer_count);
+                             out->local_size_x, depth, depth_share, answers,
+                             answer_count);
             if (!c.kernel)
                 continue;
             c.local = out->local_size_x;
@@ -353,6 +385,17 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
                          "was measured while the device was still cold and is "
                          "a ranking, not a benchmark.",
                default_local, default_depth);
+
+    // A second reason the rate is not a benchmark, where there is a scratchpad:
+    // the candidates raced on a share of the device each, so all of them ran at
+    // a fraction of the batch a mining run gets. The *same* fraction, which is
+    // what keeps the ranking sound and the number unusable.
+    if (base.scratch_bytes)
+        applog(LOG_INFO, "Tuning: '%s' keeps %llu KiB per hash, so the "
+                         "candidates split the device's memory between them "
+                         "and each hashed a smaller batch than mining will.",
+               algo.name(),
+               static_cast<unsigned long long>(base.scratch_bytes >> 10));
 
     return true;
 }

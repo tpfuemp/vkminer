@@ -400,6 +400,15 @@ extern "C" void *miner_thread(void *userdata)
         algo->kernel(g_backend->devices()[device_index]);
     vkminer::apply_tuning(device_index, &spec);
 
+    // And how many of us are on this card, which matters only to a kernel
+    // wanting memory per invocation: two workers each sizing a scratchpad as
+    // though they were alone is how the second fails to start.
+    uint32_t sharing = 0;
+    for (int i = 0; i < opt_n_threads; i++)
+        if (g_worker_device[i] == device_index)
+            sharing++;
+    spec.concurrent_kernels = sharing;
+
     std::unique_ptr<vkminer::Kernel> kernel =
         g_backend->create_kernel(device_index, spec);
     if (!kernel) {

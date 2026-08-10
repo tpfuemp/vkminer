@@ -54,6 +54,12 @@ public:
     // elsewhere and a hard-coded 19 would be a lie the day one is added.
     virtual size_t nonce_word() const { return 19; }
 
+    // The factor between the scale a pool quotes difficulty in and the scale
+    // this algorithm's target is compared in. One where a difficulty of d means
+    // 2^32 * d hashes, which is everything descended from Bitcoin; 65536 for
+    // scrypt, whose pools all speak the convention its first miners set.
+    virtual double target_factor() const { return 1.; }
+
     // What to run on this device. Passing the device lets an algorithm choose
     // a variant off what the hardware reports -- a 64-bit kernel where
     // shaderInt64 is present, a 2x32-bit one where it is not.

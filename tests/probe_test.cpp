@@ -83,6 +83,12 @@ void fail(const char *fmt, ...)
 // anything about the device -- a couple of million is a few seconds, and the
 // expected minimum over them is around two thousand, which is far enough from
 // zero that an equality means something.
+//
+// ⚠️ It is also a single dispatch, and a memory-bound kernel cannot take one
+// that large. The check runs at whichever of the two is smaller, which weakens
+// it -- a shorter range has a larger expected minimum -- but does not empty it:
+// an equality between two independently computed minima is still an equality
+// between two 32-bit values.
 constexpr uint32_t kExactNonces = 1u << 21;
 
 constexpr uint32_t kNonceBase = 0x7fff0000u;
@@ -347,16 +353,18 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     for (size_t i = 0; i < 20; i++)
         header[i] = be32dec(kHeader + i * 4);
 
+    const uint32_t exact = std::min(kExactNonces, kernel->max_batch());
+
     uint32_t device_best = 0;
-    if (!probe_dispatch(*kernel, header, kNonceBase, kExactNonces, &device_best))
+    if (!probe_dispatch(*kernel, header, kNonceBase, exact, &device_best))
         return false;
 
     const uint32_t host_best =
-        reference_best(algo, header, kNonceBase, kExactNonces);
+        reference_best(algo, header, kNonceBase, exact);
 
     if (device_best != host_best) {
         fail("over %u nonces from 0x%08x the probe says the smallest digest "
-             "word is %08x and the reference says %08x", kExactNonces,
+             "word is %08x and the reference says %08x", exact,
              kNonceBase, device_best, host_best);
         // Which way it is wrong says which bug it is: below the reference means
         // the shader is seeing digests from nonces it was not given, and above
@@ -366,7 +374,7 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
         return false;
     }
     std::printf("ok   %u nonces, smallest digest word %08x, probe and "
-                "reference agree exactly\n", kExactNonces, device_best);
+                "reference agree exactly\n", exact, device_best);
 
     // Everything from here runs at the size the device would really run, which
     // the host cannot follow -- so it is warmed up first, for the same reason

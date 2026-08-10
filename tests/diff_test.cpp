@@ -85,6 +85,19 @@ void fail(const char *fmt, ...)
 // nonces the host never asked about.
 constexpr uint32_t kChunk = 8000;
 
+// ...but a kernel may not be able to take that many: a memory-bound one owns a
+// scratchpad per invocation, so the device's memory decides how large a dispatch
+// can be. The chunk is the smaller of what this test wants and what the kernel
+// says it will take.
+//
+// That costs the partial-workgroup property above, because a capped batch is a
+// whole number of workgroups. The last chunk of a run is still partial whenever
+// the total is not a multiple of this, which is why the totals are not round.
+uint32_t chunk_for(const vkminer::Kernel &kernel)
+{
+    return std::min(kChunk, kernel.max_batch());
+}
+
 // Where the range starts. Not zero: a kernel that ignores nonce_start, or that
 // treats the nonce as signed, agrees with the reference at zero and nowhere
 // else. This start also crosses 0x80000000 partway through a hundred thousand
@@ -294,10 +307,12 @@ bool compare_pipelined(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     };
     std::deque<Launched> inflight;
 
+    const uint32_t chunk = chunk_for(kernel);
+
     uint32_t done = 0;
     while (done < total || !inflight.empty()) {
         while (done < total && inflight.size() < depth) {
-            const uint32_t count = std::min(kChunk, total - done);
+            const uint32_t count = std::min(chunk, total - done);
             const uint32_t start = kNonceBase + done;
             if (!kernel.dispatch(header, kTarget, start, count)) {
                 fail("dispatch of %u nonces from 0x%08x was refused with %u "
@@ -473,9 +488,11 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     for (size_t i = 0; i < 20; i++)
         header[i] = be32dec(kHeader + i * 4);
 
+    const uint32_t chunk = chunk_for(*kernel);
+
     size_t candidates = 0;
-    for (uint32_t done = 0; done < total; done += kChunk) {
-        const uint32_t count = std::min(kChunk, total - done);
+    for (uint32_t done = 0; done < total; done += chunk) {
+        const uint32_t count = std::min(chunk, total - done);
         if (!compare_chunk(*kernel, algo, header, kTarget, kNonceBase + done,
                            count, &candidates))
             return false;

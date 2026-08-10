@@ -1,0 +1,280 @@
+// scrypt(N=1024, r=1, p=1): one nonce per invocation, 128 KiB of VRAM each.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The first kernel here whose cost is memory rather than arithmetic. Seventeen
+// SHA-256 compressions set the block up and read the answer out; between them
+// sit 2,048 calls to scryptBlockMix over a scratchpad that no cache holds and
+// whose second pass is indexed by the data itself, so nothing can be prefetched
+// and nothing can be skipped. That is the whole function, and it is why the host
+// caps the batch at what the device's memory can hold rather than at what keeps
+// it busy -- see KernelSpec::scratch_bytes.
+//
+// ⚠️ Every invocation owns kScratchWords of `scratch`, starting at its global
+// index, and the host allocates for exactly the batch it dispatches. An index
+// past that writes over a neighbour rather than failing, so the batch cap is a
+// correctness mechanism and not a tuning one.
+//
+// Byte order: struct work's header words are a big-endian read of the wire,
+// which is what SHA-256 wants, so they go in unswapped. scrypt itself reads and
+// writes its blocks little-endian, so every word crossing between the two is
+// byte-reversed here -- and the final digest is reversed once more into the
+// order the target is compared in.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "shaders/common/candidates.glsl"
+#include "shaders/common/scrypt.glsl"
+#include "shaders/common/sha256.glsl"
+
+layout(local_size_x_id = 0) in;
+
+// The parameters, fixed rather than specialized. The host budgets device memory
+// from a constant it computes from these; a kernel that could be built for
+// another N would let the two disagree, and the failure would be a scratchpad
+// overrun rather than a compile error.
+const uint kN = 1024u;
+const uint kBlockWords = 32u;                  // 128 bytes, one block at r = 1
+const uint kScratchWords = kN * kBlockWords;   // 128 KiB per invocation
+
+// 120 bytes, against a guaranteed minimum of 128. Mirrored by ScryptPush in
+// scrypt.cpp, which asserts its own size and offsets.
+//
+// The whole header is here, not a midstate: hoisting one of seventeen
+// compressions would buy nothing against four thousand Salsa20 cores, and would
+// cost the property that this file reads as RFC 7914 with a header substituted.
+layout(push_constant) uniform Push {
+    uint header[19];   // wire words 0..18; word 19 is the nonce, substituted below
+    uint target[8];    // as fulltest() compares: little-endian, most significant last
+    uint nonce_start;
+    uint count;        // nonces to test, which is also the invocation count
+    uint capacity;     // candidates the result buffer can hold
+} push;
+
+// One scratchpad per invocation. Bound after the candidate buffer, which is the
+// order backends/backend.h states and the only thing tying this binding to what
+// the host allocated.
+layout(std430, set = 0, binding = 1) buffer Scratch {
+    uint word[];
+} scratch;
+
+void sha256_init(out uint state[8])
+{
+    for (uint i = 0u; i < 8u; i++)
+        state[i] = sha256_iv[i];
+}
+
+// HMAC's K0, RFC 2104: the key is the 80-byte header, which is longer than
+// SHA-256's block, so it is hashed first. Two compressions, the second carrying
+// the nonce and the padding.
+void header_key(uint nonce, out uint key[8])
+{
+    uint w[16];
+    for (uint i = 0u; i < 16u; i++)
+        w[i] = push.header[i];
+
+    sha256_init(key);
+    sha256_compress(key, w);
+
+    w[0] = push.header[16];
+    w[1] = push.header[17];
+    w[2] = push.header[18];
+    w[3] = nonce;
+    w[4] = 0x80000000u;
+    for (uint i = 5u; i < 15u; i++)
+        w[i] = 0u;
+    w[15] = 640u;   // 80 bytes
+    sha256_compress(key, w);
+}
+
+// The states the two padded key blocks leave behind. Both PBKDF2 passes below
+// key their HMACs on the same header, so these are computed once per nonce and
+// every inner and outer hash starts from one of them.
+void hmac_keys(uint nonce, out uint ipad[8], out uint opad[8])
+{
+    uint key[8];
+    header_key(nonce, key);
+
+    uint w[16];
+    for (uint i = 0u; i < 8u; i++)
+        w[i] = key[i] ^ 0x36363636u;
+    for (uint i = 8u; i < 16u; i++)
+        w[i] = 0x36363636u;
+    sha256_init(ipad);
+    sha256_compress(ipad, w);
+
+    for (uint i = 0u; i < 8u; i++)
+        w[i] = key[i] ^ 0x5c5c5c5cu;
+    for (uint i = 8u; i < 16u; i++)
+        w[i] = 0x5c5c5c5cu;
+    sha256_init(opad);
+    sha256_compress(opad, w);
+}
+
+// HMAC's outer hash: the opad state over the 32-byte inner digest, which is one
+// block including its padding.
+void hmac_outer(uint opad[8], uint inner[8], out uint mac[8])
+{
+    uint w[16];
+    for (uint i = 0u; i < 8u; i++)
+        w[i] = inner[i];
+    w[8] = 0x80000000u;
+    for (uint i = 9u; i < 15u; i++)
+        w[i] = 0u;
+    w[15] = 768u;   // 64 pad bytes + 32 digest bytes
+
+    for (uint i = 0u; i < 8u; i++)
+        mac[i] = opad[i];
+    sha256_compress(mac, w);
+}
+
+// PBKDF2-HMAC-SHA256(header, header, c = 1, dkLen = 128), RFC 7914 §6 step 1 --
+// scrypt's parameters as Litecoin fixed them, password and salt both the header.
+// One iteration, so each output block is a single HMAC, and the inner hash's
+// first block is the header's first 64 bytes for all four of them: that
+// compression is done once and the four branch from it.
+void pbkdf2_expand(uint nonce, uint ipad[8], uint opad[8], out uint b[32])
+{
+    uint w[16];
+    for (uint i = 0u; i < 16u; i++)
+        w[i] = push.header[i];
+
+    uint prefix[8];
+    for (uint i = 0u; i < 8u; i++)
+        prefix[i] = ipad[i];
+    sha256_compress(prefix, w);
+
+    for (uint blk = 1u; blk <= 4u; blk++) {
+        uint inner[8];
+        for (uint i = 0u; i < 8u; i++)
+            inner[i] = prefix[i];
+
+        w[0] = push.header[16];
+        w[1] = push.header[17];
+        w[2] = push.header[18];
+        w[3] = nonce;
+        w[4] = blk;            // INT(i), big-endian, which a word already is
+        w[5] = 0x80000000u;
+        for (uint i = 6u; i < 15u; i++)
+            w[i] = 0u;
+        w[15] = 1184u;         // 64 pad + 80 salt + 4 counter bytes
+        sha256_compress(inner, w);
+
+        uint mac[8];
+        hmac_outer(opad, inner, mac);
+
+        // Into scrypt's byte order, once, here: everything downstream of this
+        // line is little-endian until the digest comes back out.
+        for (uint i = 0u; i < 8u; i++)
+            b[(blk - 1u) * 8u + i] = bswap32(mac[i]);
+    }
+}
+
+// PBKDF2-HMAC-SHA256(header, B, c = 1, dkLen = 32), RFC 7914 §6 step 3. One
+// output block, and it is the digest.
+void pbkdf2_finish(uint ipad[8], uint opad[8], uint b[32], out uint digest[8])
+{
+    uint inner[8];
+    for (uint i = 0u; i < 8u; i++)
+        inner[i] = ipad[i];
+
+    uint w[16];
+    for (uint i = 0u; i < 16u; i++)
+        w[i] = bswap32(b[i]);
+    sha256_compress(inner, w);
+    for (uint i = 0u; i < 16u; i++)
+        w[i] = bswap32(b[16u + i]);
+    sha256_compress(inner, w);
+
+    w[0] = 1u;             // the single output block's counter
+    w[1] = 0x80000000u;
+    for (uint i = 2u; i < 15u; i++)
+        w[i] = 0u;
+    w[15] = 1568u;         // 64 pad + 128 salt + 4 counter bytes
+    sha256_compress(inner, w);
+
+    uint mac[8];
+    hmac_outer(opad, inner, mac);
+
+    // Back out of SHA-256's byte order and into the one the target is compared
+    // in, which is the same reversal sha256d.comp ends with.
+    for (uint i = 0u; i < 8u; i++)
+        digest[i] = bswap32(mac[i]);
+}
+
+// scryptROMix, RFC 7914 §5. The first loop fills this invocation's scratchpad
+// with the 1,024 states the block passes through; the second reads it back at an
+// index the block itself decides, which is what makes the function sequentially
+// memory-hard and what makes the whole kernel a memory benchmark.
+void romix(uint base, inout uint b0[16], inout uint b1[16])
+{
+    for (uint i = 0u; i < kN; i++) {
+        uint o = base + i * kBlockWords;
+        for (uint k = 0u; k < 16u; k++) {
+            scratch.word[o + k] = b0[k];
+            scratch.word[o + 16u + k] = b1[k];
+        }
+        block_mix(b0, b1);
+    }
+
+    for (uint i = 0u; i < kN; i++) {
+        // Integerify: block 2r-1 read as a little-endian integer, which at
+        // r = 1 is the second half and of which only the low word can matter.
+        // N is a power of two, so the modulo is a mask.
+        uint o = base + (b1[0] & (kN - 1u)) * kBlockWords;
+        for (uint k = 0u; k < 16u; k++) {
+            b0[k] ^= scratch.word[o + k];
+            b1[k] ^= scratch.word[o + 16u + k];
+        }
+        block_mix(b0, b1);
+    }
+}
+
+void main()
+{
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= push.count)
+        return;
+
+    uint nonce = push.nonce_start + index;
+
+    uint ipad[8];
+    uint opad[8];
+    hmac_keys(nonce, ipad, opad);
+
+    uint b[32];
+    pbkdf2_expand(nonce, ipad, opad, b);
+
+    uint b0[16];
+    uint b1[16];
+    for (uint k = 0u; k < 16u; k++) {
+        b0[k] = b[k];
+        b1[k] = b[16u + k];
+    }
+
+    romix(index * kScratchWords, b0, b1);
+
+    for (uint k = 0u; k < 16u; k++) {
+        b[k] = b0[k];
+        b[16u + k] = b1[k];
+    }
+
+    uint state[8];
+    pbkdf2_finish(ipad, opad, b, state);
+
+    probe_best(state[7]);
+
+    // No early exit on the top word before the rest of the digest: the other
+    // kernels have one because it saves compressions, and here the digest is
+    // already complete by the time there is anything to screen. What follows is
+    // the full 256-bit comparison and nothing else.
+    for (int i = 7; i >= 0; i--) {
+        if (state[i] > push.target[i])
+            return;
+        if (state[i] < push.target[i])
+            break;
+    }
+
+    emit_candidate(push.capacity, nonce, state);
+}

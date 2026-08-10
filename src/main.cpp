@@ -303,6 +303,21 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // Difficulty is printed in the scale the pool quotes and compared in the
+    // scale the algorithm defines. Set once, before anything can read it: the
+    // algorithm cannot change for the life of the process, and a factor applied
+    // to some difficulties and not others is worse than a wrong one applied to
+    // all of them.
+    {
+        const std::unique_ptr<vkminer::Algorithm> algo =
+            vkminer::create_algorithm(opt_algo);
+        opt_target_factor = algo->target_factor();
+        if (opt_target_factor != 1.)
+            applog(LOG_INFO, "'%s' quotes difficulty %g times the Bitcoin "
+                             "scale, so a stratum difficulty here is not one "
+                             "of sha256d's", opt_algo, opt_target_factor);
+    }
+
     // A typo here would otherwise mean "use the built-in shaders after all",
     // reported once per worker and easy to read past. --algo-dir is only ever
     // set deliberately, so it not existing is a mistake worth stopping for.
