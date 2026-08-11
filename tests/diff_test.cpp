@@ -535,7 +535,8 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
 
 void usage(const char *program)
 {
-    std::printf("usage: %s [algo] [nonces] [queue-depth]\n", program);
+    std::printf("usage: %s [algo] [nonces] [queue-depth] [--no-int64]\n",
+                program);
 }
 
 }  // namespace
@@ -544,10 +545,27 @@ int main(int argc, char *argv[])
 {
     pthread_mutex_init(&applog_lock, nullptr);
 
-    const char *name = argc > 1 ? argv[1] : "sha256d";
+    // --no-int64 is taken from anywhere among the arguments, so that a caller
+    // who wants it need not spell out the three numbers before it. It is the
+    // only way to point this test at an algorithm's 2x32 fallback on a device
+    // that has shaderInt64, and it must be set before the backend exists.
+    const char *args[4] = { argv[0], nullptr, nullptr, nullptr };
+    int count = 1;
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--no-int64") == 0) {
+            opt_no_int64 = true;
+        } else if (count < 4) {
+            args[count++] = argv[i];
+        } else {
+            usage(argv[0]);
+            return 2;
+        }
+    }
+
+    const char *name = count > 1 ? args[1] : "sha256d";
     uint32_t total = 100000;
-    if (argc > 2) {
-        const long n = std::strtol(argv[2], nullptr, 0);
+    if (count > 2) {
+        const long n = std::strtol(args[2], nullptr, 0);
         if (n <= 0) {
             usage(argv[0]);
             return 2;
@@ -558,8 +576,8 @@ int main(int argc, char *argv[])
     // The pipelined pass below runs at whatever depth the kernel reports, so
     // this is what lets the same check be pointed at a depth --queue-depth can
     // ask for. Without it every depth but the default ships untested.
-    if (argc > 3) {
-        const long n = std::strtol(argv[3], nullptr, 0);
+    if (count > 3) {
+        const long n = std::strtol(args[3], nullptr, 0);
         if (n < 1 || n > 16) {
             usage(argv[0]);
             return 2;
@@ -585,8 +603,8 @@ int main(int argc, char *argv[])
         return 77;  // ctest's convention for a test that could not run
     }
 
-    std::printf("%s: %u nonces from 0x%08x per device\n", name, total,
-                kNonceBase);
+    std::printf("%s: %u nonces from 0x%08x per device%s\n", name, total,
+                kNonceBase, opt_no_int64 ? ", shaderInt64 disabled" : "");
 
     for (const vkminer::DeviceInfo &info : backend->devices())
         run_device(*backend, info, *algo, total);

@@ -6,6 +6,7 @@
 #include "algorithms/blake2s/blake2s.h"
 #include "algorithms/scrypt/scrypt.h"
 #include "algorithms/sha256d/sha256d.h"
+#include "algorithms/sha3t/sha3t.h"
 
 #include <cstring>
 #include <string>
@@ -26,6 +27,7 @@ const Entry kAlgorithms[] = {
     { "sha256d", "", make_sha256d },
     { "blake2s", "", make_blake2s },
     { "scrypt",  "", make_scrypt  },
+    { "sha3t",   "", make_sha3t   },
 };
 
 bool same_name(const char *a, const char *b)

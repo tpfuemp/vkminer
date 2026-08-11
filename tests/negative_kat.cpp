@@ -291,7 +291,16 @@ int main(int argc, char *argv[])
 {
     pthread_mutex_init(&applog_lock, nullptr);
 
-    const char *name = argc > 1 ? argv[1] : "sha256d";
+    // --no-int64 as the differential test takes it: an algorithm with a 2x32
+    // fallback has two kernels, and the one this device would not otherwise
+    // choose is the one nobody ever runs.
+    const char *name = "sha256d";
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--no-int64") == 0)
+            opt_no_int64 = true;
+        else
+            name = argv[i];
+    }
 
     std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(name);
     if (!algo) {

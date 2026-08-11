@@ -1,0 +1,16 @@
+// sha3t with 64-bit lanes, for a device that reports shaderInt64.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The kernel is sha3t_kernel.glsl, the same text sha3t32.comp compiles; this
+// file is the two lines that decide what a lane is made of. The extension is
+// declared here because an #extension directive belongs at the top of a
+// compilation unit.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#define VKMINER_SHA3_INT64 1
+
+#include "algorithms/sha3t/sha3t_kernel.glsl"

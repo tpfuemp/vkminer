@@ -118,6 +118,13 @@ bool opt_vk_pipeline_stats = false;
  * is off, and a hash rate measured with it on is not a hash rate. */
 bool opt_vk_probe_best = false;
 
+/* Report every device as lacking shaderInt64. The feature is optional, so an
+ * algorithm with a 64-bit state ships two kernels, and this is how the one
+ * written for hardware without it gets run on hardware with it. The device is
+ * created without the feature too, so a 64-bit module chosen by mistake is a
+ * validation error here rather than a fault on someone else's phone. */
+bool opt_no_int64 = false;
+
 /* A capture file to re-run instead of mining. NULL is the ordinary case. */
 char *opt_replay = NULL;
 
@@ -197,6 +204,10 @@ Options:\n\
                         is the only way to see nonces it should have found and\n\
                         did not. Costs an atomic per hash, so a rate measured\n\
                         with this on is not a rate\n\
+      --no-int64        report every device as having no shaderInt64, so an\n\
+                        algorithm carrying both a 64-bit and a 32-bit kernel\n\
+                        takes the 32-bit one. That feature is optional, and\n\
+                        this runs the path written for devices without it\n\
       --replay=FILE     re-run the candidates a previous run failed to verify,\n\
                         from the file it wrote, and exit\n\
       --algo-dir=DIR    load algorithm shaders from DIR instead of the\n\
@@ -308,6 +319,7 @@ static struct option const options[] = {
    { "no-extranonce",     0, NULL, 1012 },
    { "no-gbt",            0, NULL, 1011 },
    { "no-getwork",        0, NULL, 1010 },
+   { "no-int64",          0, NULL, 1053 },
    { "no-longpoll",       0, NULL, 1003 },
    { "no-redirect",       0, NULL, 1009 },
    { "no-stratum",        0, NULL, 1007 },
@@ -736,6 +748,10 @@ void parse_arg( int key, char *arg )
 
       case 1050: // vk-probe-best
          opt_vk_probe_best = true;
+         break;
+
+      case 1053: // no-int64
+         opt_no_int64 = true;
          break;
 
       case 1051: // replay

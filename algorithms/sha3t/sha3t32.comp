@@ -1,0 +1,15 @@
+// sha3t with each 64-bit lane held as two 32-bit words.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// For every device without shaderInt64, where this is the only kernel there is
+// -- not a debug path. `--no-int64` makes a device that has the feature report
+// that it does not, which is how this one gets tested.
+//
+// The kernel is the same text sha3t.comp compiles; the macro it defines is the
+// only difference.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "algorithms/sha3t/sha3t_kernel.glsl"

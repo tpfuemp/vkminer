@@ -28,6 +28,13 @@ target_link_libraries(scrypt_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME scrypt_kat COMMAND scrypt_kat)
 
+# And for the fourth, anchored on published block hashes: BitcoinIII makes
+# sha3t its block hash, not only its proof of work.
+add_executable(sha3t_kat sha3t_kat.cpp)
+target_link_libraries(sha3t_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME sha3t_kat COMMAND sha3t_kat)
+
 # One level up again: not whether a header hashes correctly, but whether a
 # mining.notify turns into the right header in the first place.
 add_executable(stratum_header_kat stratum_header_kat.cpp)
@@ -164,6 +171,20 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_scrypt
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 
+    # The first algorithm with two kernels: 64-bit Keccak lanes where the device
+    # has shaderInt64, a 2x32 module where it does not. This arm gets whichever
+    # the machine has.
+    add_test(NAME diff_test_sha3t COMMAND diff_test sha3t 100000)
+    set_tests_properties(diff_test_sha3t
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # And the other one, which a device with the feature would otherwise only
+    # compile and never run. --no-int64 withholds the feature at device creation
+    # too, so a run that took the 64-bit module anyway fails validation.
+    add_test(NAME diff_test_sha3t32 COMMAND diff_test sha3t 100000 --no-int64)
+    set_tests_properties(diff_test_sha3t32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The same range with the queue held to one dispatch -- the path
     # --queue-depth 1 selects, and the baseline the pipelining is measured
     # against. It catches a kernel that only works with something queued behind
@@ -201,6 +222,17 @@ if(TARGET vkminer_shaders)
     set_tests_properties(negative_kat_scrypt
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
+    # Both of sha3t's kernels, for the reason the differential test runs twice,
+    # and worth doing per kernel: a lane type that drops the top half of a word
+    # is only visible as a perturbed bit in the half being dropped.
+    add_test(NAME negative_kat_sha3t COMMAND negative_kat sha3t)
+    set_tests_properties(negative_kat_sha3t
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_sha3t32 COMMAND negative_kat sha3t --no-int64)
+    set_tests_properties(negative_kat_sha3t32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
     # The calibration for --vk-probe-best, which is the only instrument that
     # says anything about the nonces a kernel did *not* find. It is checked
     # against the scalar reference at a size the host can hash, against itself
@@ -223,5 +255,11 @@ if(TARGET vkminer_shaders)
 
     add_test(NAME probe_test_scrypt COMMAND probe_test scrypt 4)
     set_tests_properties(probe_test_scrypt
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
+    # Once for sha3t, not twice: which word reaches probe_best is written in the
+    # kernel body both modules include, so they cannot disagree about it.
+    add_test(NAME probe_test_sha3t COMMAND probe_test sha3t 4)
+    set_tests_properties(probe_test_sha3t
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 endif()

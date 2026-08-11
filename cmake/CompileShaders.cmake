@@ -64,9 +64,13 @@ function(add_spirv_shaders target)
     # directories is coarser than a depfile -- every shader rebuilds when any
     # include changes -- but it is right, and a stale kernel is not a mistake
     # worth being efficient about. New include files still need a re-configure.
+    #
+    # Two places, because not every included .glsl is shared: a kernel compiled
+    # twice over different types keeps its body beside its algorithm.
     set(include_deps "")
     foreach(dir IN LISTS ARG_INCLUDE_DIRS)
-        file(GLOB_RECURSE found "${dir}/shaders/common/*.glsl")
+        file(GLOB_RECURSE found "${dir}/shaders/common/*.glsl"
+                                "${dir}/algorithms/*.glsl")
         list(APPEND include_deps ${found})
     endforeach()
 

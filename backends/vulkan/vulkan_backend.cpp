@@ -356,7 +356,10 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
     out->max_workgroup_size = base.limits.maxComputeWorkGroupSize[0];
     out->max_workgroup_count = base.limits.maxComputeWorkGroupCount[0];
 
-    out->int64 = features.features.shaderInt64 == VK_TRUE;
+    // --no-int64 lies here rather than where the answer is read, because the
+    // device is created from this struct too: a 64-bit module chosen anyway
+    // then fails validation instead of quietly working.
+    out->int64 = !opt_no_int64 && features.features.shaderInt64 == VK_TRUE;
     out->int16 = features.features.shaderInt16 == VK_TRUE;
     out->int8 = f16i8.shaderInt8 == VK_TRUE;
 }
