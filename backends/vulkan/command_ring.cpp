@@ -69,7 +69,10 @@ CommandRing::~CommandRing()
 
     // Nothing may be executing when the buffers go away, and a fence wait is
     // not enough on an error path where a submission failed after signalling.
-    fn.vkDeviceWaitIdle(dev);
+    // Through the device for the same reason submissions go through it: two
+    // workers on one card reach here at the same moment when the miner stops,
+    // and this call is externally synchronised against every queue as well.
+    device_->wait_idle();
 
     for (Slot &slot : slots_)
         if (slot.fence != VK_NULL_HANDLE)
@@ -117,8 +120,10 @@ bool CommandRing::submit(Slot *slot)
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &slot->cmd;
 
-    if (!vk_ok(fn.vkQueueSubmit(device_->queue(), 1, &submit, slot->fence),
-               "vkQueueSubmit"))
+    // Through the device rather than onto its queue directly: one card can be
+    // driven by several workers, and each has its own ring but they all end at
+    // the same queue.
+    if (!device_->submit(submit, slot->fence))
         return false;
 
     slot->pending = true;

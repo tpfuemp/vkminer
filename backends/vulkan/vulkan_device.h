@@ -18,6 +18,7 @@
 #include "backends/vulkan/vma.h"
 
 #include <memory>
+#include <mutex>
 
 namespace vkminer {
 
@@ -55,7 +56,6 @@ public:
 
     VkDevice handle() const { return device_; }
     VkPhysicalDevice physical() const { return physical_; }
-    VkQueue queue() const { return queue_; }
     uint32_t queue_family() const { return family_; }
     VmaAllocator allocator() const { return allocator_; }
     const VolkDeviceTable &fn() const { return fn_; }
@@ -77,6 +77,13 @@ public:
     bool flush(const Buffer &buffer);
     bool invalidate(const Buffer &buffer);
 
+    // The only way to reach the queue, and the reason there is no accessor for
+    // it. A VkQueue is externally synchronised and there is exactly one per
+    // device, so two workers on one card would otherwise submit on it from two
+    // threads -- undefined behaviour that shows up as a stale result read back
+    // under a fence that answered for somebody else's dispatch.
+    bool submit(const VkSubmitInfo &info, VkFence fence);
+
     // Wait for everything submitted to the queue. Only for shutdown and for
     // error paths: a dispatch is waited on with a fence, not with this.
     void wait_idle();
@@ -92,6 +99,11 @@ private:
     VolkDeviceTable  fn_{};
     DeviceInfo       info_;
     bool             pipeline_stats_ = false;
+
+    // Held across every call the queue must be externally synchronised for.
+    // Uncontended it is one atomic against a dispatch that costs tens of
+    // milliseconds, which is why a second queue is not the answer.
+    std::mutex       queue_lock_;
 };
 
 }  // namespace vkminer

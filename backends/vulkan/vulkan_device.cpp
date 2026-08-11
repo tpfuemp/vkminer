@@ -261,10 +261,23 @@ bool VulkanDevice::invalidate(const Buffer &buffer)
                  "vmaInvalidateAllocation");
 }
 
+bool VulkanDevice::submit(const VkSubmitInfo &info, VkFence fence)
+{
+    std::lock_guard<std::mutex> held(queue_lock_);
+    return vk_ok(fn_.vkQueueSubmit(queue_, 1, &info, fence), "vkQueueSubmit");
+}
+
 void VulkanDevice::wait_idle()
 {
-    if (device_ != VK_NULL_HANDLE)
-        fn_.vkDeviceWaitIdle(device_);
+    if (device_ == VK_NULL_HANDLE)
+        return;
+
+    // Under the same lock as a submission: vkDeviceWaitIdle is specified as
+    // externally synchronised against every queue the device owns, so shutting
+    // down while another worker is submitting is the same violation by a
+    // different call.
+    std::lock_guard<std::mutex> held(queue_lock_);
+    fn_.vkDeviceWaitIdle(device_);
 }
 
 }  // namespace vkminer
