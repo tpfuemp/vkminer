@@ -20,6 +20,7 @@
 #ifndef VKMINER_TUNE_H__
 #define VKMINER_TUNE_H__
 
+#include "algorithms/algorithm.h"
 #include "backends/backend.h"
 
 #include <vector>
@@ -33,10 +34,12 @@ void tune_devices(ComputeBackend &backend,
                   const std::vector<int> &device_indices,
                   const char *algo_name);
 
-// Apply what was settled for this device to a spec the algorithm just built.
-// A no-op where nothing was, so a caller applies it unconditionally rather
-// than having to ask first.
-void apply_tuning(int device_index, KernelSpec *spec);
+// The kernel this device was settled on: which of the algorithm's kernels won,
+// at the width and depth it won at. Where nothing was settled this is what the
+// algorithm would have handed out anyway, so a caller asks unconditionally
+// rather than having to know whether tuning happened.
+KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
+                        const DeviceInfo &device);
 
 }  // namespace vkminer
 

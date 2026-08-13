@@ -25,6 +25,12 @@ struct Tuning {
     uint32_t local_size_x = 0;
     uint32_t queue_depth  = 0;
 
+    // Which of the algorithm's kernels won, where it has more than one. Empty
+    // means the one the algorithm would have chosen unaided, which is also how
+    // an entry written before there was a second kernel reads -- correctly, it
+    // was measured on the only one there was.
+    std::string variant;
+
     // What the sweep measured, and how long the device had been under load when
     // it did. The second is not decoration: a card reading 20% faster cold than
     // soaked disagrees with its own file for no reason but temperature, and

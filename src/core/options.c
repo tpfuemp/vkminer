@@ -133,6 +133,11 @@ char *opt_replay = NULL;
  * one binary can be run at two depths and the difference measured. */
 int opt_queue_depth = 0;
 
+/* Invocations per workgroup, for the same reason: the tuner's other axis, and
+ * two runs at two widths are the only way to check that tuning it is worth
+ * anything. Zero lets the backend pick. */
+int opt_workgroup = 0;
+
 /* What to do about the tuning file. By default it is read and a sweep runs only
  * where this device, driver, algorithm and shader are not in it; --retune
  * sweeps regardless, for when a measurement is in doubt; --no-tune neither
@@ -217,6 +222,9 @@ Options:\n\
                         submit-and-wait. Higher keeps the device fed but costs\n\
                         N dispatches of latency on every job change. For\n\
                         measuring the difference, not for mining\n\
+      --workgroup=N     invocations per workgroup (vulkan only; default: let\n\
+                        the backend choose). The tuner's other axis, named so\n\
+                        that two runs can be compared at two widths\n\
       --retune          measure the workgroup size and queue depth this GPU\n\
                         runs fastest at, even though they are already known.\n\
                         The sweep takes a few seconds, runs against the\n\
@@ -350,6 +358,7 @@ static struct option const options[] = {
    { "vk-pipeline-stats", 0, NULL, 1049 },
    { "vk-probe-best",     0, NULL, 1050 },
    { "vk-validate",       0, NULL, 1042 },
+   { "workgroup",         1, NULL, 1054 },
    { 0, 0, 0, 0 }
 };
 
@@ -565,6 +574,16 @@ void parse_arg( int key, char *arg )
          if ( v < 1 || v > 16 )
             show_usage_and_exit( 1 );
          opt_queue_depth = v;
+         break;
+
+      case 1054: // workgroup
+         v = atoi( arg );
+         /* The upper bound Vulkan guarantees; what this device actually allows
+          * is checked where the pipeline is built, which is the only place that
+          * knows it. */
+         if ( v < 1 || v > 1024 )
+            show_usage_and_exit( 1 );
+         opt_workgroup = v;
          break;
 
       case 1047: // retune

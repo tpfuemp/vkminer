@@ -125,6 +125,12 @@ bool tune_cache_load(const std::string &path, const std::string &key,
             tuning.soak_seconds =
                 json_number_value(json_object_get(entry, "soak_seconds"));
 
+            // Absent is a legal answer and means the default kernel, so this is
+            // read where it is present and not required to be.
+            if (const char *variant =
+                    json_string_value(json_object_get(entry, "variant")))
+                tuning.variant = variant;
+
             // Both, or neither. An entry missing half of what it decides would
             // otherwise silently tune one axis and leave the other at a
             // default that was never measured against it.
@@ -166,6 +172,9 @@ bool tune_cache_store(const std::string &path, const std::string &key,
     json_object_set_new(entry, "local_size_x",
                         json_integer(tuning.local_size_x));
     json_object_set_new(entry, "queue_depth", json_integer(tuning.queue_depth));
+    if (!tuning.variant.empty())
+        json_object_set_new(entry, "variant",
+                            json_string(tuning.variant.c_str()));
     json_object_set_new(entry, "rate", json_real(tuning.rate));
     json_object_set_new(entry, "soak_seconds", json_real(tuning.soak_seconds));
     json_object_set_new(entry, "measured", json_string(now_utc().c_str()));

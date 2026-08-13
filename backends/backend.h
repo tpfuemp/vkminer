@@ -81,6 +81,12 @@ class Algorithm;
 struct KernelSpec {
     const char *name = "";  // the algorithm's name, for logs and errors
 
+    // Which of the algorithm's kernels this is, where it has more than one --
+    // "int64" against "2x32", say; empty where there is only one. The backend
+    // never reads it, only logs it: it is how the tuner names what it raced and
+    // how the cache remembers which one won.
+    const char *variant = "";
+
     // The GPU half. Null SPIR-V is not an error -- it means this algorithm has
     // no shader for this device, which is exactly the state an algorithm is in
     // while its CPU reference is being written.

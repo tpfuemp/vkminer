@@ -51,7 +51,8 @@ const uint32_t kShader[] = {0x07230203, 0x00010000, 0x0008000a, 0x0000002a};
 bool same(const vkminer::Tuning &a, const vkminer::Tuning &b)
 {
     return a.local_size_x == b.local_size_x && a.queue_depth == b.queue_depth
-        && a.rate == b.rate && a.soak_seconds == b.soak_seconds;
+        && a.variant == b.variant && a.rate == b.rate
+        && a.soak_seconds == b.soak_seconds;
 }
 
 // Everything the key is made of, changed one at a time -- each a real way a
@@ -115,6 +116,7 @@ void check_round_trip(const std::string &path)
     vkminer::Tuning wrote;
     wrote.local_size_x = 128;
     wrote.queue_depth = 2;
+    wrote.variant = "2x32";
     wrote.rate = 1452000000.;
     wrote.soak_seconds = 6.5;
 
@@ -129,9 +131,10 @@ void check_round_trip(const std::string &path)
         return;
     }
     if (!same(wrote, read))
-        fail("read back %u/%u at %.0f, wrote %u/%u at %.0f", read.local_size_x,
-             read.queue_depth, read.rate, wrote.local_size_x, wrote.queue_depth,
-             wrote.rate);
+        fail("read back %u/%u '%s' at %.0f, wrote %u/%u '%s' at %.0f",
+             read.local_size_x, read.queue_depth, read.variant.c_str(),
+             read.rate, wrote.local_size_x, wrote.queue_depth,
+             wrote.variant.c_str(), wrote.rate);
 
     // Not what the entry is for, but what somebody comparing two runs reads. A
     // double written through as an integer is quietly wrong, not missing.
@@ -234,6 +237,34 @@ void check_refuses_junk(const std::string &path)
         fail("a tuning was read out of a file that does not exist");
 }
 
+// The entry every file written before there was a second kernel looks like. It
+// has to keep meaning what it meant -- the algorithm's own choice, measured on
+// the only kernel there was -- rather than be rejected or versioned away.
+void check_no_variant_is_the_default(const std::string &path)
+{
+    const std::string key =
+        vkminer::tune_key(a_device(), "sha256d", kShader, 4);
+
+    std::string body = "{\"version\": 1, \"entries\": {\"KEY\": "
+                       "{\"local_size_x\": 64, \"queue_depth\": 2}}}";
+    body.replace(body.find("KEY"), 3, key);
+
+    FILE *f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        fail("could not write %s", path.c_str());
+        return;
+    }
+    std::fwrite(body.data(), 1, body.size(), f);
+    std::fclose(f);
+
+    vkminer::Tuning read;
+    if (!vkminer::tune_cache_load(path, key, &read))
+        fail("an entry written before kernels had names was refused");
+    else if (!read.variant.empty())
+        fail("an entry naming no kernel read back as '%s'",
+             read.variant.c_str());
+}
+
 }  // namespace
 
 int main()
@@ -247,6 +278,7 @@ int main()
     check_round_trip(path);
     check_second_device_kept(path);
     check_refuses_junk(path);
+    check_no_variant_is_the_default(path);
 
     std::remove(path.c_str());
 

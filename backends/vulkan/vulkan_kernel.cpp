@@ -125,8 +125,11 @@ public:
         desc.spirv_words = spec.spirv_words;
         desc.storage_buffers = spec.storage_buffers ? spec.storage_buffers : 1;
         desc.push_constant_bytes = push_bytes_;
-        desc.local_size_x = spec.local_size_x ? spec.local_size_x
-                                              : choose_local_size(info);
+        // The width by the same rule as the depth: the spec, then the option,
+        // then this device's default.
+        desc.local_size_x = spec.local_size_x  ? spec.local_size_x
+                          : opt_workgroup > 0  ? static_cast<uint32_t>(opt_workgroup)
+                                               : choose_local_size(info);
         probe_best_ = opt_vk_probe_best;
         desc.probe_best = probe_best_;
         desc.sets = depth_;
@@ -209,9 +212,13 @@ public:
 
         // The depth is on this line so that a log says which run it was --
         // comparing one against another is the point of the option existing.
+        // The variant is there for the same reason, where the algorithm has
+        // more than one kernel and the tuner may have preferred either.
         applog(LOG_INFO, "Vulkan: '%s' on %s, workgroup %u, %u dispatch%s in "
-                         "flight", name_, info.name.c_str(), local_, depth_,
-               depth_ == 1 ? "" : "es");
+                         "flight%s%s", name_, info.name.c_str(), local_, depth_,
+               depth_ == 1 ? "" : "es",
+               spec.variant && spec.variant[0] ? ", kernel " : "",
+               spec.variant ? spec.variant : "");
         return true;
     }
 

@@ -18,6 +18,15 @@ size_t Algorithm::prepare(const Dispatch &dispatch, void *out,
     return 0;
 }
 
+size_t Algorithm::kernels(const DeviceInfo &device, KernelSpec *out,
+                          size_t max) const
+{
+    if (!max)
+        return 0;
+    out[0] = kernel(device);
+    return out[0].spirv ? 1 : 0;
+}
+
 size_t Algorithm::known_answers(const KnownAnswer **out) const
 {
     *out = nullptr;

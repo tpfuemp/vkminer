@@ -65,6 +65,17 @@ public:
     // shaderInt64 is present, a 2x32-bit one where it is not.
     virtual KernelSpec kernel(const DeviceInfo &device) const = 0;
 
+    // Every kernel this device could run, best guess first, written to `out`
+    // and counted by the return. The default is the one kernel() chose, which
+    // is the whole answer for an algorithm with a single shader.
+    //
+    // An algorithm overrides this where the guess is only a guess -- sha3t's
+    // 2x32 module also runs where shaderInt64 is present, and which is faster
+    // is a measurement. Only kernels this device can build belong here: a
+    // module it would reject is not a candidate, it is a failure to race.
+    virtual size_t kernels(const DeviceInfo &device, KernelSpec *out,
+                           size_t max) const;
+
     // Write the push constants for one dispatch, and return how many bytes
     // that was -- which must be the push_constant_bytes the spec declared, or
     // the backend refuses to dispatch rather than let a shader read a block

@@ -7,14 +7,15 @@ vkminer targets the one GPU API that every current desktop and mobile driver imp
 set of shaders is meant to run on NVIDIA, AMD, Intel, the Mesa drivers and, eventually,
 mobile GPUs — without a vendor SDK anywhere in the build.
 
-> ### Status: early development
+> ### Status: it mines, but it is young
 >
-> **There is nothing to mine with yet.** The pool-side plumbing is being ported and the first
-> compute kernel is not finished. No algorithm is usable, no release has been made, and the
-> command lines below describe the intended interface rather than a working program.
+> Four algorithms work — **SHA-256d, Blake2s, Scrypt (N=1024) and SHA3-256t** — and each has
+> had shares accepted by a real pool. There is no tagged release and no binary to download:
+> build it yourself, and expect the command-line surface to keep moving.
 >
-> Watch the repository if you are interested; there is no point trying to build it for
-> production use today.
+> It has been run on NVIDIA cards (Pascal and Ampere, proprietary driver) and on Mesa's
+> `lavapipe` software rasterizer, on x86-64 and on aarch64. **No AMD or Intel GPU has been
+> tested yet.** The shaders are written to run there and nobody has confirmed that they do.
 
 ## Why Vulkan
 
@@ -29,10 +30,11 @@ mobile GPUs — without a vendor SDK anywhere in the build.
 
 | Algorithm | Status |
 | :--- | :--- |
-| SHA-256d | planned — first target |
-| Blake2s / Blakecoin | planned |
-| Scrypt (N=1024) | planned |
-| KawPoW | planned — needs the DAG machinery, so it comes late |
+| `sha256d` | Working. Pool shares accepted |
+| `blake2s` | Working. Pool shares accepted. Blakecoin is a *different* algorithm — BLAKE-256, eight rounds — and is not this one |
+| `scrypt` | Working, N=1024, r=1, p=1. Pool shares accepted. The one memory-bound kernel: 128 KiB of scratchpad per invocation, so how many hashes fit is a property of the card |
+| `sha3t` | Working. Three SHA3-256 passes over the 80-byte header, with SHA3 padding rather than Keccak's — `sha3d` is something else. Pool shares accepted from both of its kernels |
+| `kawpow` | Planned — needs the DAG machinery, so it comes late |
 
 ## Requirements
 
@@ -86,7 +88,7 @@ List the GPUs vkminer can see, and check that the one you want is not a software
 implementation:
 
 ```sh
-./build/vkminer --devices
+./build/vkminer --device-list
 ```
 
 If that prints `llvmpipe`, `lavapipe`, or a device type of `CPU`, you are looking at a
@@ -119,11 +121,16 @@ cp config-template.json config.json     # then edit config.json
 | `-u, --user USER` | Wallet address or pool username, usually `ADDRESS.WORKER` |
 | `-p, --pass PASS` | Pool password, often just `x` |
 | `-c, --config FILE` | Read options from a JSON file |
+| `--device-list` | List the Vulkan devices found, with their indices, and exit |
 | `--devices LIST` | GPUs to use, by index: `--devices 0,2`. Default is all |
+| `--backend NAME` | `vulkan` (default), or `cpu` to run each algorithm's reference implementation — the control the GPU is checked against |
 | `--benchmark` | Measure hashrate without connecting to a pool. Never submits |
 | `--self-test` | Run the built-in known-answer tests and exit |
+| `--hash-meter` | Log each worker's rate, not just the total |
 | `--vk-validate` | Enable Vulkan validation layers. Much slower; for debugging |
+| `--no-int64` | Report every device as lacking `shaderInt64`, so an algorithm carrying both a 64-bit and a 32-bit kernel takes the 32-bit one |
 | `--queue-depth N` | Dispatches to keep queued on each GPU at once. Leave it alone to mine; set it to compare throughput at one depth against another |
+| `--workgroup N` | Invocations per workgroup. The other half of the same idea: leave it alone to mine, set it to compare two runs at two widths |
 | `--retune` | Measure the workgroup size and queue depth again, even though they are already known |
 | `--no-tune` | Do not measure and do not use a measurement. Two runs of one binary are then comparable |
 | `--time-limit N` | Stop cleanly after N seconds of mining, counted from the first job so a slow pool does not eat into it. With `--benchmark`, prints the rate for the whole run on the way out |
@@ -146,8 +153,30 @@ allowed to win. The answer goes in `%APPDATA%\vkminer\tune.json` or
 driver or an edited shader is measured again by itself. A card that will not tune mines at
 the built-in defaults.
 
-The rate printed by the sweep is a ranking, not a benchmark: it is taken in the first seconds
-of load, which on a thermally capped card are its best.
+Where an algorithm has more than one kernel, which one to run is measured the same way rather
+than chosen from a feature bit. `sha3t` ships a 64-bit and a 2×32-bit shader, and the faster
+of the two is not the one the hardware's advertised support predicts on every card.
+
+Two numbers a reader should not over-read. The rate printed by the sweep is a ranking, not a
+benchmark: it is taken in the first seconds of load, which on a thermally capped card are its
+best. And a candidate only displaces the default if it beats it by more than the sweep's own
+rounds disagreed with each other, so on a noisy device the tuner will decline to move at all.
+
+## Performance
+
+One card, one driver, so read them as an order of magnitude rather than a table to buy
+hardware from. Measured on an RTX 3060 under sustained load, not from the tuner's own line:
+
+| Algorithm | Rate |
+| :--- | :--- |
+| `blake2s` | ~4.6 GH/s |
+| `sha256d` | ~750 MH/s |
+| `sha3t` | ~240 MH/s |
+| `scrypt` | ~300 kH/s |
+
+Scrypt is the one with a fair comparison available: ccminer manages about 408 kH/s on the
+same card, so vkminer is at roughly three quarters of a mature CUDA implementation on the
+algorithm that stresses memory hardest. Closing that gap is open work.
 
 ## How results are verified
 
@@ -170,7 +199,7 @@ it cannot happen.
 
 Please include:
 
-- the output of `vkminer --devices` and of `vulkaninfo --summary`
+- the output of `vkminer --device-list` and of `vulkaninfo --summary`
 - your GPU, driver version, and operating system
 - the algorithm and the pool, and the exact command line with credentials removed
 

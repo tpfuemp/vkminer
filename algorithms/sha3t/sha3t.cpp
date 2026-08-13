@@ -239,45 +239,50 @@ public:
     // rejects the module however unreachable the 64-bit half becomes.
     KernelSpec kernel(const DeviceInfo &device) const override
     {
-        KernelSpec spec;
-        spec.name = name();
-        spec.algorithm = this;
-
 #ifdef VKMINER_HAVE_SHADERS
         const bool wide = device.int64;
 
-        if (!announced_) {
+        // Only where the device leaves no choice. Where both modules build,
+        // this would be a guess the tuner is about to overrule, and the kernel
+        // logs which one it really created.
+        if (!wide && !announced_) {
             announced_ = true;
-            applog(wide ? LOG_DEBUG : LOG_INFO,
-                   "sha3t on %s: %s", device.name.c_str(), wide
-                       ? "64-bit Keccak lanes"
-                       : "32-bit lane pairs, because shaderInt64 is not "
-                         "available here");
+            applog(LOG_INFO, "sha3t on %s: 32-bit lane pairs, because "
+                             "shaderInt64 is not available here",
+                   device.name.c_str());
         }
 
-        // Loaded on first use and kept, because the spec hands out a pointer
-        // into it. One Algorithm belongs to one worker, so this needs no lock;
-        // if that ever stops being true, this is what breaks.
-        ShaderModule &module = wide ? module64_ : module32_;
-        if (module.words.empty()
-            && !load_shader(wide ? "sha3t" : "sha3t32", &module))
-            return spec;  // no shader: the CPU backend still has a reference
+        return spec_for(wide);
+#else
+        (void)device;
+        return spec_for(false);
+#endif
+    }
 
-        spec.spirv = module.words.data();
-        spec.spirv_words = module.words.size();
-
-        // A replacement shader loaded through --algo-dir may declare its own
-        // layout, and then it is the one that has to be believed.
-        spec.storage_buffers = module.storage_buffers
-                             ? module.storage_buffers : 1;
-        spec.push_constant_bytes = module.push_constant_bytes
-                                 ? module.push_constant_bytes
-                                 : sizeof(Sha3tPush);
-        spec.local_size_x = module.local_size_x;  // 0: the backend chooses
+    // Both, where the device can build both: which is faster is not a question
+    // the feature bit answers, so the 64-bit one goes first as the guess and
+    // the tuner settles it. Without the feature there is one candidate, a
+    // module declaring the Int64 capability being rejected before anything can
+    // be measured about it.
+    size_t kernels(const DeviceInfo &device, KernelSpec *out,
+                   size_t max) const override
+    {
+        size_t count = 0;
+#ifdef VKMINER_HAVE_SHADERS
+        if (device.int64 && count < max) {
+            const KernelSpec spec = spec_for(true);
+            if (spec.spirv)
+                out[count++] = spec;
+        }
 #else
         (void)device;
 #endif
-        return spec;
+        if (count < max) {
+            const KernelSpec spec = spec_for(false);
+            if (spec.spirv)
+                out[count++] = spec;
+        }
+        return count;
     }
 
     // Nothing per-job to precompute, so this is the byte order and nothing
@@ -320,13 +325,48 @@ public:
         sha3t_80(out, data);
     }
 
-#ifdef VKMINER_HAVE_SHADERS
 private:
+    // One of the two modules, named so a log and a tuning file can say which
+    // ran. A spec with no SPIR-V is not an error here either: the CPU backend
+    // still has the reference.
+    KernelSpec spec_for(bool wide) const
+    {
+        KernelSpec spec;
+        spec.name = name();
+        spec.algorithm = this;
+        spec.variant = wide ? "int64" : "2x32";
+
+#ifdef VKMINER_HAVE_SHADERS
+        // Loaded on first use and kept, because the spec hands out a pointer
+        // into it. One Algorithm belongs to one worker, so this needs no lock;
+        // if that ever stops being true, this is what breaks.
+        ShaderModule &module = wide ? module64_ : module32_;
+        if (module.words.empty()
+            && !load_shader(wide ? "sha3t" : "sha3t32", &module))
+            return spec;
+
+        spec.spirv = module.words.data();
+        spec.spirv_words = module.words.size();
+
+        // A replacement shader loaded through --algo-dir may declare its own
+        // layout, and then it is the one that has to be believed.
+        spec.storage_buffers = module.storage_buffers
+                             ? module.storage_buffers : 1;
+        spec.push_constant_bytes = module.push_constant_bytes
+                                 ? module.push_constant_bytes
+                                 : sizeof(Sha3tPush);
+        spec.local_size_x = module.local_size_x;  // 0: the backend chooses
+#endif
+        return spec;
+    }
+
+#ifdef VKMINER_HAVE_SHADERS
     mutable ShaderModule module64_;
     mutable ShaderModule module32_;
 
-    // Which kernel a device got is worth one line: a run that quietly took the
-    // other one is a run whose numbers describe something else.
+    // A device that cannot run the 64-bit module is worth one line: a run that
+    // quietly took the other path is a run whose numbers describe something
+    // else.
     mutable bool announced_ = false;
 #endif
 };

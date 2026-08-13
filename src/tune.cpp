@@ -32,10 +32,15 @@ constexpr int kRounds = 3;
 constexpr double kRoundSeconds = 0.25;
 constexpr double kWarmupSeconds = 0.25;
 
-// How much better than the backend's default a candidate must be to be worth
-// moving to. Clocks decaying across a sweep separate identical configurations
-// by a few percent, so a winner inside this is a measurement of the weather.
+// The floor under how much better than the backend's default a candidate must
+// be to be worth moving to. Only the floor: what it really has to clear is
+// whatever its own rounds said the noise was, and this is what is asked of a
+// device quiet enough to have said nothing.
 constexpr double kMargin = 0.02;
+
+// Kernels one algorithm may offer for one device. Fixed, so an algorithm
+// cannot make the tuner allocate.
+constexpr size_t kMaxVariants = 4;
 
 // Wider groups are legal on desktop parts and useful on none: a dispatch is
 // already millions of invocations, so width past this only costs occupancy.
@@ -131,6 +136,7 @@ double burst(Kernel &kernel, const uint32_t *header, uint32_t *nonce,
 struct Candidate {
     uint32_t local = 0;
     uint32_t depth = 0;
+    const char *variant = "";   // set only where the pass is about kernels
     std::unique_ptr<Kernel> kernel;
     std::vector<double> rate;
 
@@ -149,6 +155,33 @@ struct Candidate {
         if (sorted.front() < 0.)
             return -1.;       // a failed round disqualifies the candidate
         return sorted[sorted.size() / 2];
+    }
+
+    // How far the rounds disagreed, as a fraction of the score: half the range,
+    // so it reads as the +/- either side of the median. A coarse estimate of
+    // this device's noise, and the alternative is a constant that estimates
+    // some other machine's.
+    double spread() const
+    {
+        const double middle = score();
+        if (middle <= 0.)
+            return 0.;
+        std::vector<double> sorted = rate;
+        std::sort(sorted.begin(), sorted.end());
+        return (sorted.back() - sorted.front()) / (2. * middle);
+    }
+
+    // What this candidate varies, for a log line: a pass sweeps one axis, so
+    // naming the other two would be naming what every candidate shares.
+    std::string describe() const
+    {
+        char buf[64];
+        if (variant[0])
+            std::snprintf(buf, sizeof buf, "kernel '%s'", variant);
+        else
+            std::snprintf(buf, sizeof buf, "workgroup %u, depth %u", local,
+                          depth);
+        return buf;
     }
 };
 
@@ -170,9 +203,13 @@ std::unique_ptr<Kernel> build(ComputeBackend &backend, int device_index,
     if (!kernel)
         return nullptr;
 
-    char label[96];
-    std::snprintf(label, sizeof label, "device %d at workgroup %u, depth %u",
-                  device_index, kernel->local_size(), kernel->queue_depth());
+    // Named down to the module: a candidate that hashes wrongly is a shader
+    // bug, and this label is the whole report of it.
+    char label[128];
+    std::snprintf(label, sizeof label, "device %d at workgroup %u, depth %u%s%s",
+                  device_index, kernel->local_size(), kernel->queue_depth(),
+                  spec.variant && spec.variant[0] ? ", kernel " : "",
+                  spec.variant ? spec.variant : "");
 
     for (size_t i = 0; i < answer_count; i++)
         if (!kernel_reproduces(*kernel, algo, answers[i], label)) {
@@ -190,8 +227,8 @@ std::unique_ptr<Kernel> build(ComputeBackend &backend, int device_index,
 // a card that reads 20% faster cold than hot would otherwise favour whatever
 // was tried first. That is bias, not noise -- more samples do not remove it and
 // only ordering does.
-int race(std::vector<Candidate> &candidates, const uint32_t *header,
-         uint32_t *nonce)
+int race(int device_index, std::vector<Candidate> &candidates,
+         const uint32_t *header, uint32_t *nonce)
 {
     for (Candidate &c : candidates)
         if (burst(*c.kernel, header, nonce, kWarmupSeconds) < 0.)
@@ -219,9 +256,25 @@ int race(std::vector<Candidate> &candidates, const uint32_t *header,
     if (best < 0 || fallback < 0 || best == fallback)
         return best;
 
-    const double gain = candidates[static_cast<size_t>(best)].score()
-                      / candidates[static_cast<size_t>(fallback)].score() - 1.;
-    return gain > kMargin ? best : fallback;
+    const Candidate &winner = candidates[static_cast<size_t>(best)];
+    const Candidate &standing = candidates[static_cast<size_t>(fallback)];
+    const double gain = winner.score() / standing.score() - 1.;
+
+    // What the candidate has to clear is the noise the rounds themselves
+    // showed, both candidates' worth of it, with kMargin only as a floor. Two
+    // configurations whose bands overlap have not been told apart, however the
+    // medians came out.
+    const double required = std::max(kMargin,
+                                     winner.spread() + standing.spread());
+    if (gain > required)
+        return best;
+
+    if (gain > 0.)
+        applog(LOG_INFO, "Tuning: device %d measured %s %.1f%% above the "
+                         "default, which is inside the %.1f%% its own rounds "
+                         "varied by; keeping the default", device_index,
+               winner.describe().c_str(), gain * 100., required * 100.);
+    return fallback;
 }
 
 // Widths worth trying: whole subgroups, doubling, up to what the device allows.
@@ -265,16 +318,63 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
 
     const auto started = std::chrono::steady_clock::now();
 
+    // Which kernel first, where the algorithm has more than one: a different
+    // module is the coarsest axis, and the width that suits one need not suit
+    // the other, so the passes below run on whichever wins. At the default
+    // width and depth, the only footing they share before either is known.
+    KernelSpec chosen = base;
+    {
+        KernelSpec variants[kMaxVariants];
+        const size_t count = algo.kernels(info, variants, kMaxVariants);
+
+        std::vector<KernelSpec> specs;
+        std::vector<Candidate> candidates;
+        for (size_t i = 0; count > 1 && i < count; i++) {
+            Candidate c;
+            c.kernel = build(backend, device_index, algo, variants[i], 0, 0,
+                             static_cast<uint32_t>(count), answers,
+                             answer_count);
+            if (!c.kernel)
+                continue;
+            c.local = c.kernel->local_size();
+            c.depth = c.kernel->queue_depth();
+            c.variant = variants[i].variant;
+
+            // The one the algorithm would have handed out unaided. A second
+            // module has to beat it, not merely differ from it.
+            c.is_default = variants[i].spirv == base.spirv;
+            specs.push_back(variants[i]);
+            candidates.push_back(std::move(c));
+        }
+
+        if (candidates.size() > 1) {
+            applog(LOG_INFO, "Tuning: device %d (%s) can run %u kernels of "
+                             "'%s'", device_index, info.name.c_str(),
+                   static_cast<unsigned>(candidates.size()), algo.name());
+
+            const int best = race(device_index, candidates, header.data(),
+                                  &nonce);
+            if (best >= 0)
+                chosen = specs[static_cast<size_t>(best)];
+        }
+    }
+
+    // The widths to try, and none where --workgroup named one: that option
+    // exists so two runs can be compared at two widths, and a tuner overruling
+    // it would make them the same run. --queue-depth skips the depth pass the
+    // same way.
+    const std::vector<uint32_t> widths =
+        opt_workgroup > 0 ? std::vector<uint32_t>() : local_sizes(info);
+
     // race() runs the candidates interleaved, so all of them are alive at once
     // and a kernel wanting memory per invocation has to be told how many that
     // is. The default is included: it must be measured on the same terms as
     // what it is compared against.
     //
-    // An upper bound, not a count -- local_sizes may or may not contain the
-    // default, and a width that fails to build leaves its share unclaimed.
+    // An upper bound, not a count -- widths may or may not contain the default,
+    // and a width that fails to build leaves its share unclaimed.
     // Over-declaring costs a smaller batch during the sweep and nothing else.
-    const uint32_t width_share =
-        static_cast<uint32_t>(local_sizes(info).size()) + 1;
+    const uint32_t width_share = static_cast<uint32_t>(widths.size()) + 1;
 
     // The default first, everything else measured against it. Asking for no
     // width and no depth gets exactly what this device would run untuned, read
@@ -282,13 +382,13 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
     std::vector<Candidate> candidates;
     {
         Candidate c;
-        c.kernel = build(backend, device_index, algo, base, 0, 0, width_share,
+        c.kernel = build(backend, device_index, algo, chosen, 0, 0, width_share,
                          answers, answer_count);
         if (!c.kernel) {
             // Two different failures, and the difference is worth printing: a
             // device with room to run this kernel and none to hold a field of
             // them is not a broken kernel and does not stop the run.
-            if (base.scratch_bytes && width_share > 1)
+            if (chosen.scratch_bytes && width_share > 1)
                 applog(LOG_WARNING, "Tuning: device %d cannot hold %u "
                                     "candidates of '%s' at once, and a sweep is "
                                     "candidates raced against each other; "
@@ -308,11 +408,11 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
     const uint32_t default_local = candidates[0].local;
     const uint32_t default_depth = candidates[0].depth;
 
-    for (const uint32_t local : local_sizes(info)) {
+    for (const uint32_t local : widths) {
         if (local == default_local)
             continue;
         Candidate c;
-        c.kernel = build(backend, device_index, algo, base, local,
+        c.kernel = build(backend, device_index, algo, chosen, local,
                          default_depth, width_share, answers, answer_count);
         if (!c.kernel)
             continue;   // build() said why; a width that will not build is not
@@ -326,7 +426,7 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
            static_cast<unsigned>(candidates.size()),
            candidates.size() * (kWarmupSeconds + kRounds * kRoundSeconds));
 
-    int winner = race(candidates, header.data(), &nonce);
+    int winner = race(device_index, candidates, header.data(), &nonce);
     if (winner < 0) {
         applog(LOG_WARNING, "Tuning: device %d failed every configuration; "
                             "mining untuned", device_index);
@@ -336,6 +436,7 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
     out->local_size_x = candidates[static_cast<size_t>(winner)].local;
     out->queue_depth = candidates[static_cast<size_t>(winner)].depth;
     out->rate = candidates[static_cast<size_t>(winner)].score();
+    out->variant = chosen.variant ? chosen.variant : "";
 
     // Released before the depth pass builds anything: the winner is three
     // numbers, and holding the kernels that produced them would make the two
@@ -352,7 +453,7 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
         std::vector<Candidate> depths;
         for (const uint32_t depth : queue_depths()) {
             Candidate c;
-            c.kernel = build(backend, device_index, algo, base,
+            c.kernel = build(backend, device_index, algo, chosen,
                              out->local_size_x, depth, depth_share, answers,
                              answer_count);
             if (!c.kernel)
@@ -363,7 +464,7 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
             depths.push_back(std::move(c));
         }
 
-        const int best = race(depths, header.data(), &nonce);
+        const int best = race(device_index, depths, header.data(), &nonce);
         if (best >= 0) {
             out->queue_depth = depths[static_cast<size_t>(best)].depth;
             out->rate = depths[static_cast<size_t>(best)].score();
@@ -373,10 +474,11 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
     out->soak_seconds = std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - started).count();
 
-    applog(LOG_INFO, "Tuning: device %d chose workgroup %u, depth %u -- "
+    applog(LOG_INFO, "Tuning: device %d chose %s%sworkgroup %u, depth %u -- "
                      "%.2f MH/s after %.0f seconds under load",
-           device_index, out->local_size_x, out->queue_depth,
-           out->rate / 1e6, out->soak_seconds);
+           device_index, out->variant.c_str(), out->variant.empty() ? "" : ", ",
+           out->local_size_x, out->queue_depth, out->rate / 1e6,
+           out->soak_seconds);
 
     // Said plainly: a sweep is the first seconds of load a card sees, which on
     // a thermally capped part is its best, so the rate above will not hold.
@@ -390,12 +492,12 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
     // the candidates raced on a share of the device each, so all of them ran at
     // a fraction of the batch a mining run gets. The *same* fraction, which is
     // what keeps the ranking sound and the number unusable.
-    if (base.scratch_bytes)
+    if (chosen.scratch_bytes)
         applog(LOG_INFO, "Tuning: '%s' keeps %llu KiB per hash, so the "
                          "candidates split the device's memory between them "
                          "and each hashed a smaller batch than mining will.",
                algo.name(),
-               static_cast<unsigned long long>(base.scratch_bytes >> 10));
+               static_cast<unsigned long long>(chosen.scratch_bytes >> 10));
 
     return true;
 }
@@ -439,12 +541,15 @@ void tune_devices(ComputeBackend &backend,
 
         Tuning tuning;
         if (!opt_retune && tune_cache_load(path, key, &tuning)) {
-            // The depth as it will be, not as it was filed: apply_tuning leaves
-            // --queue-depth alone, so the stored one would be a number the run
-            // is not using.
-            applog(LOG_INFO, "Tuning: device %d (%s) uses workgroup %u, depth "
-                             "%u, measured earlier at %.2f MH/s", index,
-                   info.name.c_str(), tuning.local_size_x,
+            // The sizes as they will be, not as they were filed: tuned_kernel
+            // leaves --workgroup and --queue-depth alone, so the stored ones
+            // would be numbers the run is not using.
+            applog(LOG_INFO, "Tuning: device %d (%s) uses %s%sworkgroup %u, "
+                             "depth %u, measured earlier at %.2f MH/s", index,
+                   info.name.c_str(), tuning.variant.c_str(),
+                   tuning.variant.empty() ? "" : ", ",
+                   opt_workgroup > 0 ? static_cast<uint32_t>(opt_workgroup)
+                                     : tuning.local_size_x,
                    opt_queue_depth > 0 ? static_cast<uint32_t>(opt_queue_depth)
                                        : tuning.queue_depth,
                    tuning.rate / 1e6);
@@ -457,10 +562,11 @@ void tune_devices(ComputeBackend &backend,
 
         g_tuning[index] = tuning;
 
-        // Used for this run but not filed, because half of it was not measured:
-        // --queue-depth skipped the depth pass. The key says nothing about the
-        // option, so writing it would make a one-off experiment permanent.
-        if (opt_queue_depth > 0)
+        // Used for this run but not filed, because part of it was not measured:
+        // --workgroup and --queue-depth each skip a pass. The key says nothing
+        // about either option, so writing it would make a one-off experiment
+        // permanent.
+        if (opt_workgroup > 0 || opt_queue_depth > 0)
             continue;
 
         const std::string description = info.name + " (" + info.driver + "), "
@@ -471,18 +577,39 @@ void tune_devices(ComputeBackend &backend,
     }
 }
 
-void apply_tuning(int device_index, KernelSpec *spec)
+KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
+                        const DeviceInfo &device)
 {
-    const std::map<int, Tuning>::const_iterator found = g_tuning.find(device_index);
+    KernelSpec spec = algo.kernel(device);
+
+    const std::map<int, Tuning>::const_iterator found =
+        g_tuning.find(device_index);
     if (found == g_tuning.end())
-        return;
+        return spec;
 
-    spec->local_size_x = found->second.local_size_x;
+    const Tuning &tuning = found->second;
 
-    // Not the depth when the user named one: the kernel prefers the spec over
+    // A named kernel is looked up, not trusted: the entry may name one this
+    // build no longer offers. Not finding it leaves the algorithm's own choice
+    // carrying sizes measured on a different module -- a slower start, not a
+    // wrong one.
+    if (!tuning.variant.empty()) {
+        KernelSpec variants[kMaxVariants];
+        const size_t count = algo.kernels(device, variants, kMaxVariants);
+        for (size_t i = 0; i < count; i++)
+            if (variants[i].variant && tuning.variant == variants[i].variant) {
+                spec = variants[i];
+                break;
+            }
+    }
+
+    // Neither size when the user named one: the kernel prefers the spec over
     // the option, which is right for the sweep and wrong here.
+    if (opt_workgroup <= 0)
+        spec.local_size_x = tuning.local_size_x;
     if (opt_queue_depth <= 0)
-        spec->queue_depth = found->second.queue_depth;
+        spec.queue_depth = tuning.queue_depth;
+    return spec;
 }
 
 }  // namespace vkminer

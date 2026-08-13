@@ -404,6 +404,7 @@ extern bool opt_vk_validate;   /* Vulkan validation layers */
 extern bool opt_vk_pipeline_stats; /* report what the driver compiled a shader into */
 extern bool opt_vk_probe_best; /* have the shader track the best digest it sees */
 extern bool opt_no_int64;      /* report every device as having no shaderInt64 */
+extern int opt_workgroup;      /* invocations per workgroup, 0 to let the backend pick */
 extern char *opt_replay;       /* capture file to re-run, NULL to mine */
 extern bool opt_self_test;     /* run the known-answer vectors and exit */
 extern char *opt_backend;      /* backend name, NULL means the default */

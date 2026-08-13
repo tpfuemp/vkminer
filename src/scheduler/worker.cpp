@@ -392,13 +392,12 @@ extern "C" void *miner_thread(void *userdata)
     }
 
     // The algorithm chooses what to run from what the device can do; the
-    // backend reads the result without asking what it computes. Then the
-    // tuning, which is neither's business: what this device was measured to
-    // like, overriding the width the algorithm would have accepted and the
-    // depth the backend would have picked.
-    vkminer::KernelSpec spec =
-        algo->kernel(g_backend->devices()[device_index]);
-    vkminer::apply_tuning(device_index, &spec);
+    // backend reads the result without asking what it computes. Through the
+    // tuning, which is neither's business: where this device was measured, its
+    // answer stands in for the algorithm's guess at which kernel and for the
+    // width and depth the two of them would have settled on unaided.
+    vkminer::KernelSpec spec = vkminer::tuned_kernel(
+        *algo, device_index, g_backend->devices()[device_index]);
 
     // And how many of us are on this card, which matters only to a kernel
     // wanting memory per invocation: two workers each sizing a scratchpad as
