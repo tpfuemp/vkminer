@@ -4,11 +4,11 @@
 // One worker per device. It takes whatever job the Stratum thread last
 // published, hands nonce ranges to a Kernel, and submits whatever comes back.
 //
-// Upstream this loop was miner_thread, and it both scheduled and hashed. Here
-// it only schedules: the hashing is a dispatch to a device that runs whether
-// this thread is looking or not, so the loop is written around the latency of
-// a dispatch rather than the cost of a hash. Hence the queue: a device with
-// nothing behind what it is finishing goes idle until this thread notices.
+// This loop only schedules. The hashing is a dispatch to a device that runs
+// whether this thread is looking or not, so the loop is written around the
+// latency of a dispatch rather than the cost of a hash -- hence the queue: a
+// device with nothing behind what it is finishing goes idle until this thread
+// notices.
 
 #include "algorithms/registry.h"
 #include "backends/backend.h"
@@ -91,10 +91,9 @@ constexpr auto kRateWindow = std::chrono::seconds(2);
 // the number that says whether dispatches are sized for how fast jobs change.
 //
 // `best_ratio_sum` and `best_samples` are the --vk-probe-best pair, copied out
-// of the kernel so that the reporting thread can read them without touching it.
-// `hashes` is not part of the reading -- the kernel's terms are already scaled
-// by the nonces each covered -- and is carried alongside so that a line about
-// the probe can say how much work is behind it.
+// of the kernel so the reporting thread can read them without touching it.
+// `hashes` is carried alongside only so a line about the probe can say how much
+// work is behind it; the kernel's terms are already scaled per dispatch.
 struct BatchCount {
     std::atomic<uint64_t> total{0};
     std::atomic<uint64_t> stale{0};
@@ -115,12 +114,23 @@ std::unique_ptr<BatchCount[]> g_batches;
 std::atomic<uint64_t> g_candidates_confirmed{0};
 std::atomic<uint64_t> g_candidates_rejected{0};
 
-// A job that never came from a pool. --benchmark measures how fast this machine
-// hashes, which needs a header and a target and nothing else.
+// Which header word a benchmark moves to stop remeasuring the same nonces.
+// Word 15 for a Bitcoin header, which is inside the merkle root -- a field a
+// pool rewrites constantly anyway. Word 0 for anything shorter, which for the
+// one such algorithm is the head of the header hash and is exactly as free.
 //
-// The header is one of the algorithm's own published vectors, so the words the
-// kernel schedules are the shape of the thing it will be given in earnest
-// rather than a pattern that might optimize differently.
+// Never a word the algorithm reads structurally. KawPoW's word 8 is the block
+// height, and moving that would step the epoch and the program rather than the
+// header, which is a benchmark measuring a DAG rebuild.
+size_t benchmark_word(const vkminer::Algorithm &algo)
+{
+    return algo.header_bytes() / 4 > 15 ? 15 : 0;
+}
+
+// A job that never came from a pool: --benchmark needs a header and a target
+// and nothing else. The header is one of the algorithm's own published vectors,
+// so the kernel schedules the shape of thing it will be given in earnest rather
+// than a pattern that might optimize differently.
 bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
 {
     const vkminer::KnownAnswer *answers = nullptr;
@@ -137,10 +147,8 @@ bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
     // One bit off the published header, because the published header is a
     // solved one. A GPU covers the whole nonce space in seconds, so the block's
     // own nonce would be rediscovered on every pass -- correct, useless, and a
-    // line of log every few seconds. Word 15 is inside the merkle root, which
-    // is a field a pool rewrites constantly anyway.
-    if (words > 15)
-        work->data[15] ^= 1u;
+    // line of log every few seconds.
+    work->data[benchmark_word(algo)] ^= 1u;
 
     // 0x000000000000ffff0000...0000, most significant word last, which is the
     // order fulltest() compares in: an ordinary pool share target, met about
@@ -150,17 +158,17 @@ bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
     work->target[7] = 0x00000000;
     work->target[6] = 0x0000ffff;
 
-    // ...which is exactly why a plain benchmark proves nothing about the path a
+    // ...which is why a plain benchmark proves nothing about the path a
     // candidate takes: at 2^-48 the emit, the readback and the host's
-    // re-verification never run, and a run that finds nothing looks identical
+    // re-verification never run, and a run that finds nothing looks the same
     // whether they work or are broken. --benchmark-target says how often to
     // find one, and nothing is submitted either way.
     //
-    // The lower words are set to all ones so that the device's cheap screen --
-    // top digest word against target[7] -- and the host's full 256-bit compare
-    // accept exactly the same nonces. The expected count is then a single term,
-    // (t+1)/2^32 per nonce, with no partial match to reason about: a gap
-    // between prediction and count is the path itself and not the arithmetic.
+    // The lower words are all ones so that the device's cheap screen -- top
+    // digest word against target[7] -- and the host's full 256-bit compare
+    // accept exactly the same nonces. The expected count is then one term,
+    // (t+1)/2^32 per nonce: a gap between prediction and count is the path
+    // itself and not the arithmetic.
     if (opt_benchmark_target >= 0) {
         work->target[7] = static_cast<uint32_t>(opt_benchmark_target);
         for (int i = 0; i < 7; i++)
@@ -174,11 +182,10 @@ bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
 // that searches every nonce it was handed, 2.00 for one that quietly searches
 // half of them, and it goes on reading 2.00 for as long as the run lasts.
 //
-// It is noisy at first. Each dispatch contributes a term distributed like an
+// Noisy at first: each dispatch contributes a term distributed like an
 // exponential with mean one, so the reading is within about one over the square
 // root of the dispatch count -- ten percent at a hundred, one at ten thousand.
-// That is why the count is printed beside it, and why a run of a few seconds is
-// not evidence of anything.
+// Hence the count printed beside it.
 void report_probe()
 {
     if (!opt_vk_probe_best || !g_batches)
@@ -250,11 +257,9 @@ void report_benchmark(const double *rates, int workers, double total)
 
 // Publishes what one worker managed over one window of wall clock.
 //
-// Upstream divided a batch by the time that batch took, answering "how fast is
-// this device while hashing" -- the same number whether the miner is mining or
-// waiting on a pool that stopped sending jobs. A device is idle between
-// dispatches, between jobs and for a whole reconnect, and none of that shows
-// unless the divisor is wall clock.
+// The divisor is wall clock, not the time a batch took. A device is idle
+// between dispatches, between jobs and for a whole reconnect, and none of that
+// shows in a rate that only counts the hashing.
 void publish_hashrate(int thr_id, double hashes, double seconds)
 {
     pthread_mutex_lock(&stats_lock);
@@ -391,44 +396,71 @@ extern "C" void *miner_thread(void *userdata)
         return nullptr;
     }
 
+    // How many of us are on this card, which matters only to a kernel wanting
+    // memory per invocation: two workers each sizing a scratchpad as though
+    // they were alone is how the second fails to start.
+    uint32_t sharing = 0;
+    for (int i = 0; i < opt_n_threads; i++)
+        if (g_worker_device[i] == device_index)
+            sharing++;
+
+    // How many dispatches the device will hold at once. A device with the next
+    // dispatch already queued starts it the moment it finishes one, instead of
+    // waiting out a round trip through this thread.
+    std::unique_ptr<vkminer::Kernel> kernel;
+    size_t depth = 1;
+
     // The algorithm chooses what to run from what the device can do; the
     // backend reads the result without asking what it computes. Through the
     // tuning, which is neither's business: where this device was measured, its
     // answer stands in for the algorithm's guess at which kernel and for the
     // width and depth the two of them would have settled on unaided.
-    vkminer::KernelSpec spec = vkminer::tuned_kernel(
-        *algo, device_index, g_backend->devices()[device_index]);
+    //
+    // Called again whenever retarget() says this algorithm has been resized --
+    // the spec is where the size of a shared table is stated, and the kernel is
+    // where that becomes descriptor sets that cannot be rewritten.
+    auto build_kernel = [&]() -> bool {
+        vkminer::KernelSpec spec = vkminer::tuned_kernel(
+            *algo, device_index, g_backend->devices()[device_index]);
+        spec.concurrent_kernels = sharing;
 
-    // And how many of us are on this card, which matters only to a kernel
-    // wanting memory per invocation: two workers each sizing a scratchpad as
-    // though they were alone is how the second fails to start.
-    uint32_t sharing = 0;
-    for (int i = 0; i < opt_n_threads; i++)
-        if (g_worker_device[i] == device_index)
-            sharing++;
-    spec.concurrent_kernels = sharing;
+        kernel = g_backend->create_kernel(device_index, spec);
+        if (!kernel) {
+            // Fatal rather than one worker quietly leaving. With more than one
+            // device this is how a GPU that failed to open would show up: the
+            // miner carrying on at half its hashrate with one line in the
+            // scrollback, which is exactly the failure nobody notices for a
+            // week.
+            applog(LOG_ERR, "Worker %d: backend '%s' has no kernel for '%s' on "
+                            "device %d", thr_id, g_backend->name(), opt_algo,
+                   device_index);
+            fail_run(1);
+            return false;
+        }
+        depth = std::max<uint32_t>(1, kernel->queue_depth());
+        return true;
+    };
 
-    std::unique_ptr<vkminer::Kernel> kernel =
-        g_backend->create_kernel(device_index, spec);
-    if (!kernel) {
-        // Fatal rather than one worker quietly leaving. With more than one
-        // device this is how a GPU that failed to open would show up: the miner
-        // carrying on at half its hashrate with one line in the scrollback,
-        // which is exactly the failure nobody notices for a week.
-        applog(LOG_ERR, "Worker %d: backend '%s' has no kernel for '%s' on "
-                        "device %d", thr_id, g_backend->name(), opt_algo,
-               device_index);
-        fail_run(1);
-        return nullptr;
-    }
-
-    const uint32_t range = 0xffffffffU / static_cast<uint32_t>(opt_n_threads);
-    const uint32_t first_nonce = range * static_cast<uint32_t>(thr_id);
-    const uint32_t end_nonce = first_nonce + range - kRangeMargin;
+    // The nonce space this worker walks, split evenly between the workers so
+    // that no two of them ever test the same one. Thirty-two bits for every
+    // algorithm whose nonce is a header word; a KawPoW pool hands out the top
+    // sixteen of a 64-bit field and leaves 48.
+    //
+    // The width decides whether there is an extranonce2 roll at all: 32 bits is
+    // seconds of a device, and a fresh coinbase on the same job is what covers
+    // that. Anything wider needs none -- and the dialect that is wider has no
+    // coinbase, so rolling one would build a header the pool never sent.
+    const uint32_t walk_bits = std::min<uint32_t>(algo->nonce_bits(), 64);
+    const bool roll_xnonce2 = walk_bits <= 32;
+    const uint64_t space = walk_bits >= 64 ? ~UINT64_C(0)
+                                           : UINT64_C(1) << walk_bits;
+    const uint64_t range = space / static_cast<uint64_t>(opt_n_threads);
+    const uint64_t first_nonce = range * static_cast<uint64_t>(thr_id);
+    const uint64_t end_nonce = first_nonce + range - kRangeMargin;
 
     struct work work;
     memset(&work, 0, sizeof work);
-    uint32_t nonce = first_nonce;
+    uint64_t nonce = first_nonce;
     bool have_job = false;
     auto last_report = std::chrono::steady_clock::now();
 
@@ -459,15 +491,11 @@ extern "C" void *miner_thread(void *userdata)
         window_hashes = 0.;
     };
 
-    // How many dispatches the device will hold at once, and how many nonces
-    // each outstanding one covers, oldest first. A device with the next
-    // dispatch already queued starts it the moment it finishes one, instead of
-    // waiting out a round trip through this thread.
+    // How many nonces each outstanding dispatch covers, oldest first.
     //
     // The deque deliberately holds no header: everything in flight was launched
     // under the one in `work`, because every point that changes `work` drains
     // this first -- see drain().
-    const size_t depth = std::max<uint32_t>(1, kernel->queue_depth());
     std::deque<uint32_t> inflight;
 
     // How many benchmark candidates this worker has spelled out in the log
@@ -562,9 +590,10 @@ extern "C" void *miner_thread(void *userdata)
             if (!algo->verify(work.data, found[i].nonce, work.target, hash)) {
                 g_candidates_rejected.fetch_add(1, std::memory_order_relaxed);
                 applog(LOG_WARNING,
-                       "Worker %d: device %d reported nonce %08x, which does "
+                       "Worker %d: device %d reported nonce %s, which does "
                        "not meet the target -- share dropped%s",
-                       thr_id, device_index, found[i].nonce,
+                       thr_id, device_index,
+                       vkminer::nonce_hex(found[i].nonce).c_str(),
                        capture(vkminer::CandidateFault::BelowTarget, found[i],
                                hash).c_str());
                 continue;
@@ -578,8 +607,9 @@ extern "C" void *miner_thread(void *userdata)
             if (memcmp(hash, found[i].hash, sizeof hash) != 0)
                 applog(LOG_WARNING,
                        "Worker %d: device %d returned a different hash for "
-                       "nonce %08x than the host computes%s",
-                       thr_id, device_index, found[i].nonce,
+                       "nonce %s than the host computes%s",
+                       thr_id, device_index,
+                       vkminer::nonce_hex(found[i].nonce).c_str(),
                        capture(vkminer::CandidateFault::WrongDigest, found[i],
                                hash).c_str());
 
@@ -589,16 +619,15 @@ extern "C" void *miner_thread(void *userdata)
             // be an error.
             if (opt_benchmark) {
                 // A loosened target can produce these by the thousand, and a
-                // line each would bury the run it is evidence about. The first
-                // few are worth seeing -- they are what "a candidate came back
-                // and the host confirmed it" looks like -- and the total comes
-                // out at the end, which is the number to compare against the
-                // prediction anyway.
+                // line each would bury the run they are evidence about. The
+                // first few show what "a candidate came back and the host
+                // confirmed it" looks like; the total at the end is the number
+                // to compare against the prediction.
                 if (bench_logged < 8) {
                     bench_logged++;
-                    applog(LOG_INFO, "Benchmark: nonce %08x meets the "
+                    applog(LOG_INFO, "Benchmark: nonce %s meets the "
                                      "synthetic target; nothing is submitted",
-                           found[i].nonce);
+                           vkminer::nonce_hex(found[i].nonce).c_str());
                 } else if (bench_logged == 8) {
                     bench_logged++;
                     applog(LOG_INFO, "Benchmark: further candidates are "
@@ -607,7 +636,22 @@ extern "C" void *miner_thread(void *userdata)
                 continue;
             }
 
-            work.data[STD_NONCE_INDEX] = found[i].nonce;
+            // Where the nonce goes depends on whether the header has a word for
+            // it. Every Bitcoin-descended one does, and that word is what the
+            // submit is built from. KawPoW's has not -- the pool sent a hash
+            // and nothing may be written into it -- so the whole 64 bits travel
+            // beside the header instead.
+            work.nonce = found[i].nonce;
+            if (algo->nonce_word() * 4 < algo->header_bytes())
+                work.data[algo->nonce_word()] =
+                    static_cast<uint32_t>(found[i].nonce);
+
+            // And the mix hash, for the dialect whose share is the nonce and
+            // the mix together. False, and left false, for every algorithm
+            // whose submit says nothing but which header and which nonce.
+            work.have_mixhash =
+                algo->submit_mix(work.data, found[i].nonce, work.mixhash);
+
             submit_solution(&work, hash, mythr);
         }
 
@@ -676,16 +720,35 @@ extern "C" void *miner_thread(void *userdata)
         if (new_job) {
             nonce = first_nonce;
 
-            // Advanced, never restarted, and this is the part that is easy to
-            // get wrong: a job id is not unique. A pool switching between coins
-            // re-sends one it has already sent, and a worker that answers a new
-            // job by resetting this counter and the nonce both rebuilds the
-            // same coinbase and rescans the same range -- so it re-finds the
-            // nonce it already submitted, and the pool rejects it as a
-            // duplicate. Observed against a live pool: one reject in 95 shares,
-            // the second copy of a job id arriving a second after the first.
-            // Counting on costs nothing, because any value of this field is
-            // valid and the stride keeps the workers apart either way.
+            // Is this job for the same table the kernel was built around? For
+            // almost every algorithm the answer is always yes and this costs a
+            // call; for KawPoW it is no once every 7500 blocks, and the answer
+            // is a new kernel, because the DAG's size reached the descriptor
+            // sets when the old one was built.
+            //
+            // Also how the first kernel gets built at all: an algorithm sized
+            // by the job cannot be given one before there is a job, and a
+            // guessed epoch would generate a gigabyte the first notify throws
+            // away.
+            if (algo->retarget(work.data) || !kernel) {
+                if (kernel) {
+                    drain();
+                    kernel.reset();
+                    applog(LOG_NOTICE, "Worker %d: this job needs different "
+                                       "device state; rebuilding the kernel",
+                           thr_id);
+                }
+                if (!build_kernel())
+                    break;
+            }
+
+            // Advanced, never restarted: a job id is not unique. A pool
+            // switching between coins re-sends one it has already sent, and a
+            // worker that answered by resetting this counter and the nonce
+            // would rebuild the same coinbase, rescan the same range, re-find
+            // the nonce it already submitted and be rejected as a duplicate.
+            // Counting on costs nothing -- any value of this field is valid,
+            // and the stride keeps the workers apart either way.
             xnonce2 += static_cast<uint64_t>(opt_n_threads);
             xnonce2_armed = false;
             work_restart[thr_id].restart = 0;
@@ -694,7 +757,12 @@ extern "C" void *miner_thread(void *userdata)
             // job, which a device finishes in seconds and cannot extend. That
             // is a pool this miner cannot work with; saying so once beats a
             // warning every few seconds for the rest of the session.
-            if (!opt_benchmark && !work.xnonce2_len) {
+            //
+            // Only for an algorithm that would run out. One with 48 bits of its
+            // own has nowhere it needs to go, and for that dialect an
+            // extranonce2 is not a field the pool forgot -- there is no
+            // coinbase for it to be part of.
+            if (!opt_benchmark && roll_xnonce2 && !work.xnonce2_len) {
                 applog(LOG_ERR, "This pool gave the miner no extranonce2 "
                                 "field. A device covers a whole nonce range "
                                 "in seconds and would have nowhere to go from "
@@ -707,7 +775,7 @@ extern "C" void *miner_thread(void *userdata)
         // The header this worker mines is its own: same job as everyone else's,
         // different coinbase. Re-derived here rather than at the point it
         // changes, so that a job arriving in between is picked up first.
-        if (!opt_benchmark && !xnonce2_armed) {
+        if (!opt_benchmark && roll_xnonce2 && !xnonce2_armed) {
             // Arming rewrites the merkle root, which is the header the device
             // is mining. Every path that reaches here has drained already; this
             // is what keeps that a fact rather than an assumption, and it costs
@@ -724,18 +792,18 @@ extern "C" void *miner_thread(void *userdata)
 
         uint32_t batch = kernel->preferred_batch();
         if (nonce > end_nonce - batch)
-            batch = end_nonce - nonce;
+            batch = static_cast<uint32_t>(end_nonce - nonce);
         if (!batch) {
             // A benchmark has no pool to send a new job, so the only way to
             // keep measuring is to go round again. Retesting nonces is the
             // point of a benchmark and a bug in a miner, which is why the two
             // cases are written out separately.
             //
-            // The header moves on rather than repeating, though: a device
-            // covers the whole nonce space in seconds, so a minute-long run
-            // would otherwise be the same few dozen dispatches hashed twenty
-            // times over. That costs the rate nothing, and it is what makes
-            // --vk-probe-best mean anything here -- its reading averages over
+            // The header moves on rather than repeating: a device covers the
+            // whole nonce space in seconds, so a minute-long run would
+            // otherwise be the same few dozen dispatches over and over. It
+            // costs the rate nothing, and it is what makes --vk-probe-best mean
+            // anything here -- its reading averages over
             // dispatches, and averaging the same one twenty times buys no
             // precision while looking exactly as though it had.
             if (opt_benchmark) {
@@ -748,7 +816,7 @@ extern "C" void *miner_thread(void *userdata)
                 // report the disagreement as a fault in the kernel.
                 drain();
                 nonce = first_nonce;
-                work.data[15]++;
+                work.data[benchmark_word(*algo)]++;
                 continue;
             }
             // The range is exhausted, which at device speed happens seconds
@@ -756,13 +824,55 @@ extern "C" void *miner_thread(void *userdata)
             // gives a different coinbase and a fresh range on the same job --
             // the difference between mining continuously and mining for the
             // first few seconds after every notify.
-            xnonce2 += static_cast<uint64_t>(opt_n_threads);
-            xnonce2_armed = false;
+            //
+            // For a 48-bit range this is weeks of one device rather than
+            // seconds, and it takes a job change long before it takes this. The
+            // range restarts, which is what a job change would have done to it
+            // anyway; there is nothing else it could correctly do, because
+            // there is no coinbase to move.
+            if (roll_xnonce2) {
+                xnonce2 += static_cast<uint64_t>(opt_n_threads);
+                xnonce2_armed = false;
+            }
             nonce = first_nonce;
             continue;
         }
 
-        if (!kernel->dispatch(work.data, work.target, nonce, batch)) {
+        // What the device hashes against, for an algorithm that keeps such a
+        // thing: nothing for the ones that do not, a comparison for the ones
+        // that do, and a rebuild only where this header names something the
+        // device is not already holding. Here rather than in the job-change
+        // path above because the extranonce2 and a benchmark's own counter
+        // move the header too, and the header is what decides.
+        if (!kernel->prepare_state(algo->state_key(work.data))) {
+            applog(LOG_ERR, "Worker %d: could not prepare the state this job "
+                            "hashes against", thr_id);
+            drain();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            account(0.);
+            continue;
+        }
+
+        // And the other half of the same idea, for a kernel whose instructions
+        // are part of the pipeline: this header's program, built if it is not
+        // the one already loaded. Usually free -- the backend was told the next
+        // key when it took this one and has been building it on another thread
+        // ever since -- and the cost when it is not is a compile, once every
+        // few blocks, against a job that lasts far longer.
+        if (!kernel->prepare_program(algo->program_key(work.data))) {
+            applog(LOG_ERR, "Worker %d: could not build the kernel this job's "
+                            "program needs", thr_id);
+            drain();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            account(0.);
+            continue;
+        }
+
+        // The pool's prefix and this worker's offset into what it left. Zero
+        // for every algorithm whose nonce is a header word, so this is the
+        // worker's own range and nothing else.
+        if (!kernel->dispatch(work.data, work.target, work.nonce_base | nonce,
+                              batch)) {
             applog(LOG_ERR, "Worker %d: dispatch failed", thr_id);
             drain();
             std::this_thread::sleep_for(std::chrono::seconds(1));

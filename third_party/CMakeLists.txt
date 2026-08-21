@@ -32,3 +32,22 @@ endif()
 add_library(vma INTERFACE)
 target_include_directories(vma SYSTEM INTERFACE VulkanMemoryAllocator/include)
 target_link_libraries(vma INTERFACE vulkan_headers)
+
+# cpp-kawpow: the CPU reference for the Ethash/ProgPoW family -- light cache,
+# dataset item, keccak-f800 and the ProgPoW hash. It is the only third-party
+# code here that computes anything; the rest is Vulkan plumbing.
+#
+# The one place in this project where a hash is not written from the
+# specification, and deliberately: this family's "specification" is the code the
+# network agrees with, its official vectors are the fork's own, and a
+# hand-written reference would be a second implementation to debug rather than
+# something to differentially test a shader against. The device kernels are
+# still first-party, and this is what says whether they are right.
+add_library(ethash STATIC
+    ethash/lib/ethash/ethash.cpp
+    ethash/lib/ethash/primes.c
+    ethash/lib/ethash/progpow.cpp
+    ethash/lib/keccak/keccak.c
+    ethash/lib/keccak/keccakf1600.c
+    ethash/lib/keccak/keccakf800.c)
+target_include_directories(ethash SYSTEM PUBLIC ethash/include)

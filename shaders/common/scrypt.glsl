@@ -6,7 +6,7 @@
 // resource layout for it. What is here is everything that is pure arithmetic on
 // sixteen or thirty-two words, which is the part worth having written once.
 //
-// ⚠️ block_mix below is specialized to r = 1 and the general function's final
+// block_mix below is specialized to r = 1 and the general function's final
 // even/odd shuffle is therefore absent, because at r = 1 it is the identity. The
 // scalar reference in scrypt.cpp does the general thing and this does not, which
 // is the one place the two implementations the differential test compares are
@@ -52,7 +52,7 @@ void salsa20_8(inout uint block[16])
         block[i] += x[i];
 }
 
-// scryptBlockMix at r = 1, RFC 7914 §4. The two halves of a 128-byte block go
+// scryptBlockMix at r = 1, RFC 7914 sec. 4. The two halves of a 128-byte block go
 // in and come back replaced: the first half is Salsa20/8 of the two halves
 // XORed, and the second is Salsa20/8 of that against the original second half.
 void block_mix(inout uint b0[16], inout uint b1[16])

@@ -6,7 +6,7 @@
 #
 #   1. no tracked file is covered by an ignore rule
 #   2. no relative link or "see <file>" reference points at a path that would
-#      not be published — dangling references rot silently and mislead readers.
+#     not be published -- dangling references rot silently and mislead readers.
 #      Vendored code is exempt: its comments point into the upstream project's
 #      own documentation tree, which is not vendored along with the sources.
 #   3. no machine-local details: private-range addresses, ssh targets, absolute
@@ -37,7 +37,7 @@ detail() { printf '        %s\n' "$*" >&2; }
 
 mapfile -t PUBLISHED < <(git ls-files --cached --others --exclude-standard)
 if [ "${#PUBLISHED[@]}" -eq 0 ]; then
-    echo "nothing to publish yet — nothing to check"
+    echo "nothing to publish yet -- nothing to check"
     exit 0
 fi
 
@@ -69,7 +69,7 @@ scannable() {
 # A tracked file that an ignore rule also covers means someone forced it in.
 ignored=$(git ls-files -z | xargs -0 -r git check-ignore --no-index 2>/dev/null || true)
 if [ -n "$ignored" ]; then
-    fail "tracked files are covered by ignore rules — were these force-added?"
+    fail "tracked files are covered by ignore rules -- were these force-added?"
     while IFS= read -r f; do detail "$f"; done <<< "$ignored"
 else
     pass "no tracked file is covered by an ignore rule"
@@ -85,7 +85,7 @@ resolve_and_check() {
     [ -z "$ref" ] && return
     case "$ref" in
         *://*|mailto:*|'#'*|'$'*|'~'*) return ;;   # external / templated
-        /*|[A-Za-z]:*) return ;;                   # absolute — check 3's job
+        /*|[A-Za-z]:*) return ;;                   # absolute -- check 3's job
         *' '*) return ;;
     esac
     [ -n "${ALLOWED[$ref]:-}" ] && return

@@ -10,11 +10,11 @@
 // and a difficulty of 1 still means 2^32 hashes, so there is no target_factor()
 // below and the Stratum side needs nothing.
 //
-// ⚠️ Two things the name hides, either of which hashes plausibly and has every
+// Two things the name hides, either of which hashes plausibly and has every
 // share rejected: the padding is SHA3's (0x06), not Keccak's (0x01), and it is
 // three hashes, not two -- sha3d is the two-hash algorithm.
 //
-// ⚠️ The byte order is BLAKE2s's, not SHA-256d's: SHA3 absorbs little-endian,
+// The byte order is BLAKE2s's, not SHA-256d's: SHA3 absorbs little-endian,
 // so every message word is the byte reversal of the header word it comes from.
 // The digest needs no swap, SHA3 squeezing little-endian already.
 
@@ -62,7 +62,7 @@ static_assert(offsetof(Sha3tPush, nonce_start) == 108, "push block layout");
 // oracle every device candidate is re-checked against, so it has to stay
 // readable against the specification.
 
-// FIPS 202 §3.2.5, the round constants of iota.
+// FIPS 202 sec. 3.2.5, the round constants of iota.
 const uint64_t kRc[24] = {
     0x0000000000000001ull, 0x0000000000008082ull, 0x800000000000808aull,
     0x8000000080008000ull, 0x000000000000808bull, 0x0000000080000001ull,
@@ -74,7 +74,7 @@ const uint64_t kRc[24] = {
     0x8000000000008080ull, 0x0000000080000001ull, 0x8000000080008008ull,
 };
 
-// FIPS 202 §3.2.2, the rotation offsets of rho, indexed x + 5y as the state is.
+// FIPS 202 sec. 3.2.2, the rotation offsets of rho, indexed x + 5y as the state is.
 const unsigned kRho[25] = {
      0,  1, 62, 28, 27,
     36, 44,  6, 55, 20,
@@ -123,8 +123,8 @@ void keccakf(uint64_t a[25])
 // here: 80 bytes once and 32 bytes twice. One block, one permutation, and the
 // first four lanes squeezed out little-endian.
 //
-// 0x06 is the domain separation and the first pad bit together (FIPS 202 §B.2);
-// 0x80 is the last pad bit. ⚠️ Keccak-256, as Ethereum and Maxcoin use it,
+// 0x06 is the domain separation and the first pad bit together (FIPS 202 sec. B.2);
+// 0x80 is the last pad bit. Keccak-256, as Ethereum and Maxcoin use it,
 // differs from this in that byte and nowhere else.
 void sha3_256(unsigned char out[32], const unsigned char *in, size_t len)
 {
@@ -234,7 +234,7 @@ public:
     // lane is 64 bits and shaderInt64 is optional, so the two shaders are the
     // same text compiled over two lane types.
     //
-    // ⚠️ It cannot be a specialization constant. Int64 is an OpCapability,
+    // It cannot be a specialization constant. Int64 is an OpCapability,
     // declared for the module as a whole, and a device without the feature
     // rejects the module however unreachable the 64-bit half becomes.
     KernelSpec kernel(const DeviceInfo &device) const override
@@ -304,7 +304,8 @@ public:
             push.block[i] = le32dec(header + i * 4);
 
         std::memcpy(push.target, dispatch.target, sizeof push.target);
-        push.nonce_start = dispatch.nonce_start;
+        // The low half: this kernel's nonce is one header word, as hash()'s is.
+        push.nonce_start = static_cast<uint32_t>(dispatch.nonce_start);
         push.count = dispatch.count;
         push.capacity = dispatch.capacity;
 
@@ -312,7 +313,7 @@ public:
         return sizeof push;
     }
 
-    void hash(const uint32_t *header, uint32_t nonce,
+    void hash(const uint32_t *header, uint64_t nonce,
               uint32_t out[8]) const override
     {
         // Byte for byte the buffer sha256d builds: the algorithms differ in how
@@ -320,7 +321,7 @@ public:
         unsigned char data[80];
         for (size_t i = 0; i < 19; i++)
             be32enc(data + i * 4, header[i]);
-        be32enc(data + 19 * 4, nonce);
+        be32enc(data + 19 * 4, static_cast<uint32_t>(nonce));
 
         sha3t_80(out, data);
     }

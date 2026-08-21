@@ -18,6 +18,7 @@
 #include "backends/vulkan/vulkan_kernel.h"
 
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace vkminer {
@@ -102,6 +103,7 @@ bool VulkanBackend::init()
 
     open_.resize(devices_.size());
     caches_.resize(devices_.size());
+    shared_.resize(devices_.size());
     return true;
 }
 
@@ -146,10 +148,47 @@ std::unique_ptr<Kernel> VulkanBackend::create_kernel(int device_index,
         cache = caches_[device_index]->handle();
     }
 
+    // One shared table per device, by the same argument and a heavier one: the
+    // tuner builds four of these kernels at once to race them, and the table an
+    // algorithm asks for here is measured in gigabytes. Four copies is not a
+    // slower miner, it is a device that cannot start.
+    std::shared_ptr<SharedState> shared;
+    if (spec.shared_bytes) {
+        std::lock_guard<std::mutex> held(lazy_lock_);
+        shared = shared_[device_index].lock();
+        if (shared && shared->bytes() != spec.shared_bytes) {
+            // Two kernels wanting different sizes of the same thing on one
+            // device. Nothing here can serve both -- the buffer is the one the
+            // live kernels are bound to -- and resizing it under them is worse
+            // than refusing.
+            applog(LOG_ERR, "Vulkan: '%s' wants %llu MiB of shared state on a "
+                            "device already holding %llu MiB of it", spec.name,
+                   static_cast<unsigned long long>(spec.shared_bytes >> 20),
+                   static_cast<unsigned long long>(shared->bytes() >> 20));
+            return nullptr;
+        }
+        if (!shared) {
+            shared = SharedState::create(*dev, spec, cache);
+            if (!shared)
+                return nullptr;
+            shared_[device_index] = shared;
+        }
+    }
+
     // Outside the lock: the driver synchronises the cache itself for
     // vkCreateComputePipelines, and building a pipeline is the slow part of
     // starting a worker.
-    return make_vulkan_kernel(*dev, cache, spec);
+    return make_vulkan_kernel(*dev, cache, spec, std::move(shared));
+}
+
+uint64_t VulkanBackend::shared_state_bytes(int device_index)
+{
+    if (device_index < 0 || device_index >= static_cast<int>(shared_.size()))
+        return 0;
+
+    std::lock_guard<std::mutex> held(lazy_lock_);
+    const std::shared_ptr<SharedState> state = shared_[device_index].lock();
+    return state ? state->bytes() : 0;
 }
 
 bool VulkanBackend::create_instance()
@@ -263,15 +302,23 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
     VkPhysicalDeviceDriverProperties driver{};
     driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
 
+    // The one limit that is not in VkPhysicalDeviceLimits. It is core in 1.1,
+    // which is this project's floor, so it needs no guard -- unlike the driver
+    // properties below it.
+    VkPhysicalDeviceMaintenance3Properties maintenance3{};
+    maintenance3.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+
     VkPhysicalDeviceProperties2 props{};
     props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     props.pNext = &subgroup;
+    subgroup.pNext = &maintenance3;
 
     const bool have_driver_props =
         base.apiVersion >= VK_API_VERSION_1_2
         || has_extension(exts, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
     if (have_driver_props)
-        subgroup.pNext = &driver;
+        maintenance3.pNext = &driver;
 
     vkGetPhysicalDeviceProperties2(handle, &props);
 
@@ -350,11 +397,18 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
         out->subgroup_size = subgroup.subgroupSize;
         out->subgroup_ballot =
             (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0;
+        out->subgroup_shuffle =
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
     }
 
     out->max_invocations = base.limits.maxComputeWorkGroupInvocations;
     out->max_workgroup_size = base.limits.maxComputeWorkGroupSize[0];
     out->max_workgroup_count = base.limits.maxComputeWorkGroupCount[0];
+
+    out->max_allocation = maintenance3.maxMemoryAllocationSize;
+    out->max_binding_range = base.limits.maxStorageBufferRange;
+    out->max_storage_buffers = base.limits.maxPerStageDescriptorStorageBuffers;
+    out->max_shared_memory = base.limits.maxComputeSharedMemorySize;
 
     // --no-int64 lies here rather than where the answer is read, because the
     // device is created from this struct too: a 64-bit module chosen anyway

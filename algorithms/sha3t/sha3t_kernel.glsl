@@ -5,10 +5,10 @@
 // here is written in terms of KLANE and never says which type that is, so the
 // two modules are one text rather than two copies to keep in step.
 //
-// ⚠️ There is no midstate: an 80-byte header is one absorbed block, so the
+// There is no midstate: an 80-byte header is one absorbed block, so the
 // first permutation already depends on the nonce.
 //
-// ⚠️ The byte order is blake2s.comp's. SHA3 absorbs little-endian, so the host
+// The byte order is blake2s.comp's. SHA3 absorbs little-endian, so the host
 // sends every header word byte-reversed and the nonce is reversed here, where
 // it has to keep struct work's spelling. The digest needs no swap: SHA3
 // squeezes little-endian, which is already the order the target is compared in.

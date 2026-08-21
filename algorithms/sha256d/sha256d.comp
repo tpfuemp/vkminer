@@ -67,7 +67,7 @@ layout(push_constant) uniform Push {
     uint capacity;     // candidates the result buffer can hold
 } push;
 
-// One round of FIPS 180-4 §6.2.2, with the eight working variables passed in
+// One round of FIPS 180-4 sec. 6.2.2, with the eight working variables passed in
 // the order they hold at that round rather than shuffled at the end of it. Both
 // assignments write the slot the next round will read under a different name,
 // so the rotation costs nothing: it happens in the argument list.

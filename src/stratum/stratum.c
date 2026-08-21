@@ -336,6 +336,59 @@ static const char *get_stratum_session_id(json_t *val)
 	return NULL;
 }
 
+/* The ProgPoW subscribe reply: [null, "<extranonce1_hex>"], and that is all of
+ * it. There is no extranonce2 field and there is nothing for one to do -- the
+ * pool has already hashed the header, so there is no coinbase for the miner to
+ * change. What the hex string is, is the top of the 64-bit nonce: the pool's
+ * way of making sure two miners on the same job never test the same nonce.
+ *
+ * The width is checked rather than accepted. The algorithm has already said
+ * how many low bits it will walk, and every worker's range was going to be cut
+ * from that number; a pool that keeps some other number of bytes would have the
+ * miner submitting nonces outside its own prefix, which is a session's worth of
+ * rejects and no other symptom.                                              */
+static bool stratum_parse_nonce_prefix( struct stratum_ctx *sctx,
+                                        json_t *params, int pndx )
+{
+   const char *prefix = json_string_value( json_array_get( params, pndx ) );
+   size_t want = ( 64 - opt_nonce_bits ) / 8;
+
+   if ( !prefix )
+   {
+      applog( LOG_ERR, "Stratum subscribe: no nonce prefix in the reply" );
+      return false;
+   }
+   if ( strlen( prefix ) != want * 2 )
+   {
+      applog( LOG_ERR, "Stratum subscribe: pool assigned a %zu-byte nonce "
+                       "prefix, this algorithm leaves room for %zu",
+                       strlen( prefix ) / 2, want );
+      return false;
+   }
+
+   pthread_mutex_lock( &sctx->work_lock );
+   free( sctx->xnonce1 );
+   sctx->xnonce1_size = want;
+   sctx->xnonce1 = (uchar*) calloc( 1, want ? want : 1 );
+   if ( unlikely( !sctx->xnonce1 ) )
+   {
+      pthread_mutex_unlock( &sctx->work_lock );
+      applog( LOG_ERR, "Failed to alloc nonce prefix" );
+      return false;
+   }
+   hex2bin( sctx->xnonce1, prefix, want );
+   /* No coinbase, so no extranonce2. Zero here is what every other part of the
+      miner reads as "this pool gives the miner nothing to roll", which for this
+      dialect is the truth and not a problem.  */
+   sctx->xnonce2_size = 0;
+   pthread_mutex_unlock( &sctx->work_lock );
+
+   if ( !opt_quiet )
+      applog( LOG_INFO, "Stratum nonce prefix 0x%s, %u bits to mine in",
+                        prefix, opt_nonce_bits );
+   return true;
+}
+
 static bool stratum_parse_extranonce(struct stratum_ctx *sctx, json_t *params, int pndx)
 {
 	const char* xnonce1;
@@ -445,10 +498,19 @@ start:
 	pthread_mutex_unlock(&sctx->work_lock);
 
 	/* Standard Stratum subscribe result (3 elements):
-	 *   [ [[subs...]], "xnonce1", xn2_size ]
-	 * sid at index 0, extranonce params at indices 1 and 2.               */
-	if (!stratum_parse_extranonce(sctx, res_val, 1))
+	 *  [ [[subs...]], "xnonce1", xn2_size ]
+	 * sid at index 0, extranonce params at indices 1 and 2.
+	 *
+	 * ProgPoW's is two: [ null, "nonce_prefix" ]. Same index, different
+	 * meaning, and which one it is comes from the algorithm rather than from
+	 * counting the elements -- a pool that sends three of them is not thereby
+	 * speaking Bitcoin's.                                                 */
+	if (opt_stratum_dialect == STRATUM_PROGPOW) {
+		if (!stratum_parse_nonce_prefix(sctx, res_val, 1))
+			goto out;
+	} else if (!stratum_parse_extranonce(sctx, res_val, 1)) {
 		goto out;
+	}
 
 	ret = true;
 
@@ -610,7 +672,137 @@ static uint32_t getblocheight(struct stratum_ctx *sctx)
 	return height;
 }
 
-static bool stratum_notify(struct stratum_ctx *sctx, json_t *params)
+/* A 64-character big-endian hex string into work->target's layout: most
+ * significant word last, each word's own bytes in host order. False if it is
+ * not one, which is the whole of the validation -- a target is either 256 bits
+ * of hex or it is not a target.                                              */
+static bool parse_target_hex( const char *hex, uint32_t out[8] )
+{
+   uchar raw[32];
+
+   if ( !hex || strlen( hex ) != 64 || !hex2bin( raw, hex, 32 ) )
+      return false;
+
+   for ( int i = 0; i < 8; i++ )
+      out[7-i] = be32dec( raw + i * 4 );
+   return true;
+}
+
+/* A field that pools spell either way: 12345 or "00003039". Integers stay
+ * integers; a string is read as hex, because that is what every ProgPoW pool
+ * that sends one means by it.                                               */
+static bool parse_uint_field( json_t *val, uint64_t *out )
+{
+   if ( json_is_integer( val ) )
+   {
+      json_int_t n = json_integer_value( val );
+      if ( n < 0 )
+         return false;
+      *out = (uint64_t) n;
+      return true;
+   }
+   if ( json_is_string( val ) )
+   {
+      const char *s = json_string_value( val );
+      char *end = NULL;
+      unsigned long long n;
+
+      if ( !s || !*s )
+         return false;
+      if ( s[0] == '0' && ( s[1] == 'x' || s[1] == 'X' ) )
+         s += 2;
+      n = strtoull( s, &end, 16 );
+      if ( !end || *end )
+         return false;
+      *out = (uint64_t) n;
+      return true;
+   }
+   return false;
+}
+
+/* mining.notify, ProgPoW dialect. Seven parameters and not one of them is a
+ * coinbase:
+ *
+ *  [ job_id, header_hash, seed_hash, share_target, clean, height, nbits ]
+ *
+ * The pool has already done everything a merkle branch and an extranonce2 are
+ * for, and hands over the 32-byte result. What is left for the miner is the
+ * nonce -- which is why this dialect gives it 48 bits of one and nothing to
+ * roll.
+ *
+ * The height is not decoration. It is the only channel through which the
+ * epoch (the dataset) and the period (the program) reach the algorithm, so a
+ * job without one is refused rather than mined at epoch zero.               */
+static bool stratum_progpow_notify( struct stratum_ctx *sctx, json_t *params )
+{
+   const char *job_id, *header_hash, *seed_hash, *target_hex;
+   uint64_t height = 0, nbits = 0;
+   uint32_t target[8];
+   bool clean, have_target;
+   int p = 0;
+
+   job_id      = json_string_value( json_array_get( params, p++ ) );
+   header_hash = json_string_value( json_array_get( params, p++ ) );
+   seed_hash   = json_string_value( json_array_get( params, p++ ) );
+   target_hex  = json_string_value( json_array_get( params, p++ ) );
+   /* json_is_true is a macro that names its argument twice, so the index is
+      advanced separately here. Written the way the four lines above are, this
+      one reads parameter 4 and leaves p at 6, and every field after it is off
+      by one -- which costs the height, and with it the epoch.  */
+   clean       = json_is_true( json_array_get( params, p ) ); p++;
+
+   if ( !job_id || !header_hash || strlen( header_hash ) != 64
+        || !seed_hash || strlen( seed_hash ) != 64 )
+   {
+      applog( LOG_ERR, "Stratum notify: invalid ProgPoW parameters" );
+      return false;
+   }
+
+   if ( !parse_uint_field( json_array_get( params, p++ ), &height ) )
+   {
+      applog( LOG_ERR, "Stratum notify: no block height, so no epoch and no "
+                       "program to mine with" );
+      return false;
+   }
+   /* nbits is the network difficulty, which is reporting and not mining. A
+      pool that leaves it out costs a log line, not a job.  */
+   if ( !parse_uint_field( json_array_get( params, p++ ), &nbits ) )
+      nbits = 0;
+
+   /* The job's own target, when it states one. A pool that leaves this empty
+      is relying on the last mining.set_target, which is a legitimate way to
+      run and is why that is kept whole rather than converted.  */
+   have_target = parse_target_hex( target_hex, target );
+
+   pthread_mutex_lock( &sctx->work_lock );
+
+   free( sctx->job.job_id );
+   sctx->job.job_id = strdup( job_id );
+   hex2bin( sctx->job.header_hash, header_hash, 32 );
+   hex2bin( sctx->job.seed_hash, seed_hash, 32 );
+   be32enc( sctx->job.nbits, (uint32_t) nbits );
+   sctx->block_height = (int) height;
+   sctx->job.clean = clean;
+   sctx->job.diff = sctx->next_diff;
+
+   if ( have_target )
+      memcpy( sctx->job.target, target, sizeof target );
+   else if ( sctx->have_next_target )
+      memcpy( sctx->job.target, sctx->next_target, sizeof sctx->next_target );
+   sctx->job.have_target = have_target || sctx->have_next_target;
+
+   pthread_mutex_unlock( &sctx->work_lock );
+
+   if ( !sctx->job.have_target )
+   {
+      applog( LOG_ERR, "Stratum notify: job %s states no target and none has "
+                       "been set", job_id );
+      return false;
+   }
+   return true;
+}
+
+static bool stratum_bitcoin_notify(struct stratum_ctx *sctx, json_t *params)
 {
 	const char *job_id, *prevhash, *coinb1, *coinb2, *version, *nbits, *stime;
 	size_t coinb1_size, coinb2_size;
@@ -704,6 +896,22 @@ out:
 	return ret;
 }
 
+/* Which of the two a mining.notify is. The answer comes from the algorithm and
+ * was fixed before the socket opened; nothing about the packet in hand is
+ * consulted, and no other method can reach this decision.
+ *
+ * That is the whole point of the indirection. The sibling CUDA port took the
+ * arrival of a mining.set_target as evidence about which dialect the pool spoke
+ * and rewired this parser from inside the set_target handler -- a bug that
+ * needs a live pool, a rare method and the one dialect nobody tests with to
+ * show itself.                                                              */
+static bool stratum_notify(struct stratum_ctx *sctx, json_t *params)
+{
+	if (opt_stratum_dialect == STRATUM_PROGPOW)
+		return stratum_progpow_notify(sctx, params);
+	return stratum_bitcoin_notify(sctx, params);
+}
+
 static bool stratum_set_difficulty(struct stratum_ctx *sctx, json_t *params)
 {
 	double diff;
@@ -718,20 +926,20 @@ static bool stratum_set_difficulty(struct stratum_ctx *sctx, json_t *params)
 	return true;
 }
 
-/* mining.set_target — Equihash pools send a 256-bit target as a 64-char hex
+/* mining.set_target -- Equihash pools send a 256-bit target as a 64-char hex
  * string instead of a floating-point difficulty.
  *
  * Pool encoding (server-side):
  *   diff_to_target_equi: m = 0xFFFF0000/diff_reduced; target[k+1] = m>>8; target[k+2] = m>>40
- *   hexlify(target, 32) → LE memory order
- *   string_be(hex)      → byte-reversed → big-endian (MSB first) on wire
+ *  hexlify(target, 32) -> LE memory order
+ *  string_be(hex)      -> byte-reversed -> big-endian (MSB first) on wire
  *
  * Our decode:
- *   hex2bin(raw)        → MSB first in raw[]
- *   be32dec into tgt[]  → tgt[7] = MSW (same layout as work->target)
- *   hash_to_diff(tgt)   → diff_internal = 1/tgt[7]  (exact round-trip via diff_to_hash)
+ *  hex2bin(raw)        -> MSB first in raw[]
+ *  be32dec into tgt[]  -> tgt[7] = MSW (same layout as work->target)
+ *  hash_to_diff(tgt)   -> diff_internal = 1/tgt[7]  (exact round-trip via diff_to_hash)
  *   next_diff           = diff_internal  (for correct target reconstruction)
- *   display             = diff_internal × EQH_DIFF_SCALE  (matches pool's number)
+ *  display             = diff_internal x EQH_DIFF_SCALE  (matches pool's number)
  */
 static bool stratum_set_target(struct stratum_ctx *sctx, json_t *params)
 {
@@ -741,28 +949,38 @@ static bool stratum_set_target(struct stratum_ctx *sctx, json_t *params)
 		return false;
 	}
 
-	/* Decode big-endian hex to raw bytes */
-	uchar raw[32];
-	if (!hex2bin(raw, target_hex, 32)) {
+	uint32_t tgt[8];
+	if (!parse_target_hex(target_hex, tgt)) {
 		applog(LOG_ERR, "mining.set_target: hex decode failed");
 		return false;
 	}
 
-	/* Convert to uint32_t[8] with MSW at index 7 (work->target layout).
-	 * raw[0] is the most significant byte → goes to tgt[7]'s MSB.          */
-	uint32_t tgt[8];
-	for (int i = 0; i < 8; i++) {
-		int b = i * 4;
-		tgt[7 - i] = ((uint32_t)raw[b+0] << 24) | ((uint32_t)raw[b+1] << 16)
-		           | ((uint32_t)raw[b+2] <<  8) |  (uint32_t)raw[b+3];
+	/* This handler sets a target and nothing else. It does not decide which
+	 * dialect the pool speaks, it does not touch how a notify is read, and the
+	 * miner will parse the next job exactly as it parsed the last one. See
+	 * stratum_notify.
+	 *
+	 * For ProgPoW the 32 bytes are kept as they arrived. Every job of that
+	 * dialect carries a target of its own, so this is the standing answer for
+	 * one that does not -- and keeping it whole is what stops the round trip
+	 * below from loosening it.                                             */
+	if (opt_stratum_dialect == STRATUM_PROGPOW) {
+		pthread_mutex_lock(&sctx->work_lock);
+		memcpy(sctx->next_target, tgt, sizeof tgt);
+		sctx->have_next_target = true;
+		pthread_mutex_unlock(&sctx->work_lock);
+
+		if (!opt_quiet)
+			applog(LOG_BLUE, "Pool set target %s", target_hex);
+		return true;
 	}
 
-	/* Convert to diff_pool — the difficulty value the pool operator sees.
+	/* Convert to diff_pool -- the difficulty value the pool operator sees.
 	 * diff_pool is stored in next_diff, exactly as set_difficulty does, and
 	 * stratum_gen_work divides by opt_target_factor to recover the internal
 	 * difficulty diff_to_hash wants.
 	 *
-	 * ⚠ The round trip is lossy: diff_to_hash reproduces only the top 128
+	 * The round trip is lossy: diff_to_hash reproduces only the top 128
 	 * bits of the target, so the reconstructed target can end up looser than
 	 * the one the pool sent, and a share that we think passes can be
 	 * rejected. cpuminer-opt keeps the raw 32 bytes alongside for the one
@@ -779,7 +997,7 @@ static bool stratum_set_target(struct stratum_ctx *sctx, json_t *params)
 	double diff_pool = diff_internal * tgt_scale;
 
 	pthread_mutex_lock(&sctx->work_lock);
-	sctx->next_diff = diff_pool;   /* pool scale — same unit as set_difficulty */
+	sctx->next_diff = diff_pool;   /* pool scale -- same unit as set_difficulty */
 	pthread_mutex_unlock(&sctx->work_lock);
 
 	if (!opt_quiet)
@@ -982,7 +1200,9 @@ bool stratum_handle_method(struct stratum_ctx *sctx, const char *s)
 		goto out;
 	}
 	if (!strcasecmp(method, "mining.set_extranonce")) {
-		ret = stratum_parse_extranonce(sctx, params, 0);
+		ret = opt_stratum_dialect == STRATUM_PROGPOW
+		    ? stratum_parse_nonce_prefix(sctx, params, 0)
+		    : stratum_parse_extranonce(sctx, params, 0);
 		goto out;
 	}
 	if (!strcasecmp(method, "client.reconnect")) {

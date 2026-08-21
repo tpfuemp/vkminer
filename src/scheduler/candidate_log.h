@@ -33,7 +33,7 @@ enum class CandidateFault {
 struct CapturedCandidate {
     CandidateFault fault = CandidateFault::BelowTarget;
     int      device = -1;
-    uint32_t nonce = 0;
+    uint64_t nonce = 0;
     uint32_t header[20] = {0};
     uint32_t target[8] = {0};
     uint32_t device_hash[8] = {0};

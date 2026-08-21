@@ -14,6 +14,13 @@ share accounting and logging come from cpuminer-opt, and through it from
 pooler's cpuminer and Jeff Garzik's original cpuminer. The GPU backend, the
 compute shaders and every hash implementation in this tree are new work.
 
+One exception, and it is not inherited but vendored: third_party/ethash is the
+Ethash/ProgPoW CPU reference from RavenCommunity's cpp-kawpow, itself a fork of
+Pawel Bylica's chfast/ethash, Copyright 2018-2019 Pawel Bylica and licensed
+under the Apache License 2.0 (third_party/ethash/LICENSE). It is the host half
+of this family's correctness story; the shaders that compute it on a device are
+this project's own. See third_party/VERSIONS for the pinned revision.
+
 The authors of that inherited code, as credited by cpuminer-opt:
 
   Jeff Garzik <jgarzik@pobox.com>

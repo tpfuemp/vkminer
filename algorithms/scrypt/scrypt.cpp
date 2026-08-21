@@ -7,7 +7,7 @@
 // it computes as it goes, which is the whole point of the function and the whole
 // difficulty of running it on a device.
 //
-// Structure, RFC 7914 §6: PBKDF2 the header into 128 bytes, run those through
+// Structure, RFC 7914 sec. 6: PBKDF2 the header into 128 bytes, run those through
 // ROMix, then PBKDF2 the result back down to 32. ROMix is where the memory goes
 // -- N passes filling the scratchpad, then N more reading it at an index derived
 // from the data, so nothing can be prefetched and nothing can be skipped.
@@ -149,7 +149,7 @@ void salsa20_8(uint32_t block[16])
         block[i] += x[i];
 }
 
-// scryptBlockMix, RFC 7914 §4. 2r blocks in, 2r blocks out, and the output is
+// scryptBlockMix, RFC 7914 sec. 4. 2r blocks in, 2r blocks out, and the output is
 // the even-indexed results followed by the odd-indexed ones -- a shuffle that is
 // the identity at r = 1 and is written out anyway, because r = 1 is this coin's
 // choice and not the function's.
@@ -168,7 +168,7 @@ void block_mix(const uint32_t *in, uint32_t *out, uint32_t r)
     }
 }
 
-// scryptROMix, RFC 7914 §5. The first loop fills the scratchpad; the second
+// scryptROMix, RFC 7914 sec. 5. The first loop fills the scratchpad; the second
 // reads it back at an index the data itself decides, which is what makes the
 // function sequentially memory-hard.
 void romix(uint32_t *b, uint32_t r, uint32_t n, uint32_t *v, uint32_t *tmp)
@@ -394,7 +394,8 @@ public:
             push.header[i] = dispatch.header[i];
 
         std::memcpy(push.target, dispatch.target, sizeof push.target);
-        push.nonce_start = dispatch.nonce_start;
+        // The low half: this kernel's nonce is one header word, as hash()'s is.
+        push.nonce_start = static_cast<uint32_t>(dispatch.nonce_start);
         push.count = dispatch.count;
         push.capacity = dispatch.capacity;
 
@@ -402,7 +403,7 @@ public:
         return sizeof push;
     }
 
-    void hash(const uint32_t *header, uint32_t nonce,
+    void hash(const uint32_t *header, uint64_t nonce,
               uint32_t out[8]) const override
     {
         // The same 80 bytes every algorithm here rebuilds, and then the header
@@ -411,7 +412,7 @@ public:
         unsigned char data[80];
         for (size_t i = 0; i < 19; i++)
             be32enc(data + i * 4, header[i]);
-        be32enc(data + 19 * 4, nonce);
+        be32enc(data + 19 * 4, static_cast<uint32_t>(nonce));
 
         unsigned char digest[32];
         scrypt(data, sizeof data, data, sizeof data, 1024, 1, 1, digest,

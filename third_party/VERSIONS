@@ -19,3 +19,12 @@ Vulkan-Headers
   tag     vulkan-sdk-1.4.357.0
   commit  e3b1eec08173d6b825cd3ac88c885a63b621504a
   license Apache-2.0 OR MIT (Vulkan-Headers/LICENSE.md)
+
+cpp-kawpow
+  https://github.com/RavenCommunity/cpp-kawpow
+  tag     1.2.0
+  commit  061d341011ca341e1f506c52b571f5fd64a0df71
+  license Apache-2.0 (ethash/LICENSE)
+  note    the KawPoW fork of chfast/ethash, whose version string it keeps
+          (0.5.1-alpha.1). lib/ethash/managed.cpp and the upstream build
+          files are not vendored; progpow.cpp loses one include, see above

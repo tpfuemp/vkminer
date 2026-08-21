@@ -102,7 +102,7 @@ uint32_t chunk_for(const vkminer::Kernel &kernel)
 // treats the nonce as signed, agrees with the reference at zero and nowhere
 // else. This start also crosses 0x80000000 partway through a hundred thousand
 // nonces, which is where a signed comparison would break.
-constexpr uint32_t kNonceBase = 0x7fff0000u;
+constexpr uint64_t kNonceBase = 0x7fff0000u;
 
 // How many candidates to ask for in one collect(). Larger than any backend's
 // per-dispatch capacity, so that a device which found more than it can report
@@ -113,7 +113,7 @@ constexpr int kMaxSolutions = 256;
 // The sweep's target: about one nonce in 2^10 meets it, which is what makes a
 // hundred thousand nonces produce a hundred candidates instead of none.
 //
-// ⚠️ It decides every comparison in the **top word**, and cannot do otherwise.
+// It decides every comparison in the **top word**, and cannot do otherwise.
 // A 256-bit compare only reaches a lower word when the top words are exactly
 // equal, which is a 2^-32 event -- so no sweep of any length this test could run
 // will reach one, and with the lower words all ones no digest that got there
@@ -129,7 +129,7 @@ const uint32_t kTarget[8] = {
 // so this dispatch is a partial workgroup too; small, because the range is here
 // to carry one nonce past the device rather than to search.
 //
-// ⚠️ Bounded by the result buffer, and it has to be. A target built to be met at
+// Bounded by the result buffer, and it has to be. A target built to be met at
 // the *top* word is a target most of the range meets -- the witness's digest
 // decides how loose, and that is a random 32-bit number -- so a span wider than
 // the buffer would overflow it for some witnesses and not others, and read as a
@@ -176,7 +176,7 @@ void print_hash(const char *label, const uint32_t hash[8])
 }
 
 struct Candidate {
-    uint32_t nonce;
+    uint64_t nonce;
     uint32_t hash[8];
 };
 
@@ -185,7 +185,7 @@ struct Candidate {
 // against it.
 void reference_candidates(const vkminer::Algorithm &algo,
                           const uint32_t *header, const uint32_t *target,
-                          uint32_t start, uint32_t count,
+                          uint64_t start, uint32_t count,
                           std::vector<Candidate> *out)
 {
     out->clear();
@@ -202,7 +202,7 @@ void reference_candidates(const vkminer::Algorithm &algo,
 // wrong about every dispatch after this one too, and printing a hundred
 // thousand lines of it helps nobody.
 bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
-                     const uint32_t *target, uint32_t start, uint32_t count,
+                     const uint32_t *target, uint64_t start, uint32_t count,
                      vkminer::Solution *got, int n, size_t *candidates)
 {
     std::vector<Candidate> want;
@@ -220,8 +220,9 @@ bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
     if (static_cast<size_t>(n) != want.size()) {
         // Sizes are printed as unsigned rather than with %zu: mingw's printf
         // does not accept it, and this test has to build for Windows.
-        fail("%u nonces from 0x%08x: the device reported %d candidate(s) and "
-             "the reference found %u", count, start, n,
+        fail("%u nonces from 0x%s: the device reported %d candidate(s) and "
+             "the reference found %u", count,
+             vkminer::nonce_hex(start).c_str(), n,
              static_cast<unsigned>(want.size()));
 
         // Which ones, because "one too many" and "one too few" are different
@@ -230,10 +231,12 @@ bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
         int j = 0;
         while (i < want.size() || j < n) {
             if (j >= n || (i < want.size() && want[i].nonce < got[j].nonce)) {
-                std::printf("  missing   nonce 0x%08x\n", want[i].nonce);
+                std::printf("  missing   nonce 0x%s\n",
+                            vkminer::nonce_hex(want[i].nonce).c_str());
                 i++;
             } else if (i >= want.size() || got[j].nonce < want[i].nonce) {
-                std::printf("  spurious  nonce 0x%08x\n", got[j].nonce);
+                std::printf("  spurious  nonce 0x%s\n",
+                            vkminer::nonce_hex(got[j].nonce).c_str());
                 j++;
             } else {
                 i++;
@@ -245,14 +248,17 @@ bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
 
     for (int i = 0; i < n; i++) {
         if (got[i].nonce != want[static_cast<size_t>(i)].nonce) {
-            fail("candidate %d of the dispatch at 0x%08x is nonce 0x%08x, and "
-                 "the reference says 0x%08x", i, start, got[i].nonce,
-                 want[static_cast<size_t>(i)].nonce);
+            fail("candidate %d of the dispatch at 0x%s is nonce 0x%s, and "
+                 "the reference says 0x%s", i,
+                 vkminer::nonce_hex(start).c_str(),
+                 vkminer::nonce_hex(got[i].nonce).c_str(),
+                 vkminer::nonce_hex(want[static_cast<size_t>(i)].nonce).c_str());
             return false;
         }
         if (std::memcmp(got[i].hash, want[static_cast<size_t>(i)].hash,
                         sizeof got[i].hash) != 0) {
-            fail("nonce 0x%08x hashed to different digests", got[i].nonce);
+            fail("nonce 0x%s hashed to different digests",
+                 vkminer::nonce_hex(got[i].nonce).c_str());
             print_hash("reference", want[static_cast<size_t>(i)].hash);
             print_hash("device", got[i].hash);
             return false;
@@ -266,18 +272,19 @@ bool compare_results(const vkminer::Algorithm &algo, const uint32_t *header,
 // One dispatch, submitted and waited for before the next is asked about.
 bool compare_chunk(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
                    const uint32_t *header, const uint32_t *target,
-                   uint32_t start, uint32_t count, size_t *candidates)
+                   uint64_t start, uint32_t count, size_t *candidates)
 {
     if (!kernel.dispatch(header, target, start, count)) {
-        fail("dispatch of %u nonces from 0x%08x was refused", count, start);
+        fail("dispatch of %u nonces from 0x%s was refused", count,
+             vkminer::nonce_hex(start).c_str());
         return false;
     }
 
     vkminer::Solution got[kMaxSolutions];
     const int n = kernel.collect(got, kMaxSolutions);
     if (n < 0) {
-        fail("the device failed while hashing %u nonces from 0x%08x",
-             count, start);
+        fail("the device failed while hashing %u nonces from 0x%s",
+             count, vkminer::nonce_hex(start).c_str());
         return false;
     }
 
@@ -302,7 +309,7 @@ bool compare_pipelined(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     // What was launched, in the order it was launched, because that is the
     // order the results come back in and the only thing tying one to a range.
     struct Launched {
-        uint32_t start;
+        uint64_t start;
         uint32_t count;
     };
     std::deque<Launched> inflight;
@@ -313,10 +320,11 @@ bool compare_pipelined(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     while (done < total || !inflight.empty()) {
         while (done < total && inflight.size() < depth) {
             const uint32_t count = std::min(chunk, total - done);
-            const uint32_t start = kNonceBase + done;
+            const uint64_t start = kNonceBase + done;
             if (!kernel.dispatch(header, kTarget, start, count)) {
-                fail("dispatch of %u nonces from 0x%08x was refused with %u "
-                     "already in flight", count, start,
+                fail("dispatch of %u nonces from 0x%s was refused with %u "
+                     "already in flight", count,
+                     vkminer::nonce_hex(start).c_str(),
                      static_cast<unsigned>(inflight.size()));
                 return false;
             }
@@ -330,8 +338,8 @@ bool compare_pipelined(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
         inflight.pop_front();
 
         if (n < 0) {
-            fail("the device failed while hashing %u nonces from 0x%08x",
-                 oldest.count, oldest.start);
+            fail("the device failed while hashing %u nonces from 0x%s",
+                 oldest.count, vkminer::nonce_hex(oldest.start).c_str());
             return false;
         }
         if (!compare_results(algo, header, kTarget, oldest.start, oldest.count,
@@ -380,7 +388,7 @@ bool compare_boundary(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     // not the other way round -- except that a digest word of 0x00000000 has no
     // target below it and one of 0xffffffff none above, so a word at either
     // extreme would quietly drop a case instead of testing it.
-    uint32_t witness = 0;
+    uint64_t witness = 0;
     uint32_t digest[8];
     bool usable = false;
     for (uint32_t i = 0; i < kWitnessSearch && !usable; i++) {
@@ -397,7 +405,7 @@ bool compare_boundary(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
         return false;
     }
 
-    const uint32_t start = witness - kBoundarySpan / 2;
+    const uint64_t start = witness - kBoundarySpan / 2;
 
     struct Case {
         uint32_t target[8];
@@ -435,9 +443,10 @@ bool compare_boundary(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
         uint32_t ignored[8];
         const bool got = algo.verify(header, witness, c.target, ignored);
         if (got != c.expect) {
-            fail("the reference says nonce 0x%08x %s a target built to be %s "
+            fail("the reference says nonce 0x%s %s a target built to be %s "
                  "at word %d -- the construction is wrong, so this case tests "
-                 "nothing", witness, got ? "meets" : "misses",
+                 "nothing", vkminer::nonce_hex(witness).c_str(),
+                 got ? "meets" : "misses",
                  c.expect ? "met" : "missed", c.word);
             print_hash("digest", digest);
             print_hash("target", c.target);
@@ -455,9 +464,9 @@ bool compare_boundary(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
             survivors++;
     }
 
-    std::printf("ok   %u boundary target(s) at nonce 0x%08x, %u of them decided "
+    std::printf("ok   %u boundary target(s) at nonce 0x%s, %u of them decided "
                 "below the top word\n", static_cast<unsigned>(cases.size()),
-                witness, survivors);
+                vkminer::nonce_hex(witness).c_str(), survivors);
     return true;
 }
 
@@ -603,8 +612,9 @@ int main(int argc, char *argv[])
         return 77;  // ctest's convention for a test that could not run
     }
 
-    std::printf("%s: %u nonces from 0x%08x per device%s\n", name, total,
-                kNonceBase, opt_no_int64 ? ", shaderInt64 disabled" : "");
+    std::printf("%s: %u nonces from 0x%s per device%s\n", name, total,
+                vkminer::nonce_hex(kNonceBase).c_str(),
+                opt_no_int64 ? ", shaderInt64 disabled" : "");
 
     for (const vkminer::DeviceInfo &info : backend->devices())
         run_device(*backend, info, *algo, total);

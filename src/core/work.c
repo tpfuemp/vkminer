@@ -584,6 +584,46 @@ void std_le_build_stratum_request( char *req, struct work *work )
    free( xnonce2str );
 }
 
+/* The ProgPoW submit. Five parameters like the one above and not one of them
+ * means the same thing:
+ *
+ *  [ worker, job_id, nonce, header_hash, mixhash ]
+ *
+ * There is no ntime and no extranonce2, because there is no coinbase and the
+ * miner never assembled a header. What it sends back instead is the header the
+ * pool sent it, the whole 64-bit nonce, and the mix -- with which the pool
+ * re-checks the share in one keccak instead of a gigabyte of dataset.
+ *
+ * The nonce is 16 hex digits big-endian and its first digits are the pool's
+ * own prefix. A pool checks that before it checks anything else, so a miner
+ * that walked outside the range it was given has every share rejected and no
+ * other symptom.
+ *
+ * All three are 0x-prefixed. That is what the sibling CUDA port had accepted
+ * against a live pool; the pools also take them bare, and matching what is
+ * known to work costs nothing.                                              */
+void progpow_build_stratum_request( char *req, struct work *work )
+{
+   unsigned char header[32];
+   char noncestr[19], headerstr[67], mixstr[67];
+
+   snprintf( noncestr, sizeof noncestr, "0x%016llx",
+             (unsigned long long)work->nonce );
+
+   /* Back to the byte string the pool sent, which is what it wants echoed --
+      see progpow_gen_work for the other half of this round trip.  */
+   for ( int i = 0; i < 8; i++ )
+      be32enc( header + i * 4, work->data[i] );
+
+   memcpy( headerstr, "0x", 2 );
+   bin2hex( headerstr + 2, (char*)header, 32 );
+   memcpy( mixstr, "0x", 2 );
+   bin2hex( mixstr + 2, (char*)work->mixhash, 32 );
+
+   snprintf( req, JSON_BUF_LEN, json_submit_req, rpc_user, work->job_id,
+             noncestr, headerstr, mixstr, work->submit_id );
+}
+
 /* cpuminer-opt also handles the solo paths here -- a getblocktemplate submit
  * with the full transaction set, and a bare getwork submit. Neither exists
  * yet; only Stratum does. */
@@ -600,7 +640,12 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
    }
 
    stratum.sharediff = work->sharediff;
-   std_le_build_stratum_request( req, work );
+
+   if ( opt_stratum_dialect == STRATUM_PROGPOW )
+      progpow_build_stratum_request( req, work );
+   else
+      std_le_build_stratum_request( req, work );
+
    if ( unlikely( !stratum_send_line( &stratum, req ) ) )
    {
       applog(LOG_ERR, "submit_upstream_work stratum_send_line failed");
@@ -758,6 +803,18 @@ static uint32_t claim_submit_id( void )
 bool submit_solution( struct work *work, const void *hash,
                       struct thr_info *thr )
 {
+   /* A ProgPoW share is the nonce and the mix together -- the pool cannot check
+      one without the other. Refused here rather than in the request builder,
+      because a builder that fails puts the submit thread into its retry loop
+      over something no retry will change.  */
+   if ( opt_stratum_dialect == STRATUM_PROGPOW && !work->have_mixhash )
+   {
+      applog( LOG_ERR, "Share for job %s has no mix hash and would be rejected "
+                       "as a wrong one; dropped",
+                       work->job_id ? work->job_id : "?" );
+      return false;
+   }
+
    work->sharediff = hash_to_diff( hash ) * opt_target_factor;
    work->submit_id = claim_submit_id();
    if ( likely( submit_work( thr, work ) ) )

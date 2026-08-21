@@ -19,7 +19,7 @@ const uint blake2s_iv[8] = uint[8](
 // Unkeyed BLAKE2s-256: digest length 32, key length 0, fanout 1, depth 1.
 const uint blake2s_param = 0x01010020u;
 
-// RFC 7693 §3.1.
+// RFC 7693 sec. 3.1.
 #define BLAKE2S_G(a, b, c, d, x, y)  \
     {                                \
         (a) += (b) + (x);            \

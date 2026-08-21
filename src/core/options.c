@@ -88,6 +88,13 @@ double opt_diff_factor = 1.0;
  * Algorithm that is -- there is nowhere yet for it to be set from. */
 double opt_target_factor = 1.0;
 
+/* The two other things the protocol client has to know before it can read a
+ * packet, and both are the algorithm's answers. main() sets them beside
+ * opt_target_factor, from the same object, before any thread starts; the
+ * defaults here are Bitcoin's, which is what every algorithm but one wants. */
+int      opt_stratum_dialect = STRATUM_BITCOIN;
+uint32_t opt_nonce_bits      = 32;
+
 char *rpc_url = NULL;
 char *rpc_userpass = NULL;
 char *rpc_user = NULL;

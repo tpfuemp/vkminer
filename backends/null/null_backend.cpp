@@ -27,7 +27,7 @@ constexpr uint32_t kBatch = 1u << 22;
 class NullKernel final : public Kernel {
 public:
     bool dispatch(const uint32_t *header, const uint32_t *target,
-                  uint32_t nonce_start, uint32_t count) override
+                  uint64_t nonce_start, uint32_t count) override
     {
         (void)header;
         (void)target;

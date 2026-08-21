@@ -27,7 +27,13 @@ constexpr uint64_t kMaxRecords = 64;
 // Line format, in the first field of every record so that a file written by an
 // older build is refused rather than misread. It changes when a field is added,
 // which is a thing a capture format does.
-constexpr int kFormat = 1;
+//
+// 2: the nonce is sixteen hex digits rather than eight. Every algorithm that
+// has ever written one of these has a 32-bit nonce, so the change is a widening
+// of the field and nothing else -- but a version-1 line read as this format
+// would take the digits of the header for the top of the nonce, which is the
+// exact misreading this field exists to prevent.
+constexpr int kFormat = 2;
 
 const char kFileName[] = "failed-candidates.log";
 
@@ -120,8 +126,10 @@ std::string capture_candidate(const CapturedCandidate &bad)
                         "# Re-run them with: vkminer -a ALGO --replay <this "
                         "file>\n");
 
-    std::fprintf(f, "%d %s %d %08x", kFormat, fault_name(bad.fault), bad.device,
-                 bad.nonce);
+    // The nonce at its full width whatever this algorithm's is, so that every
+    // line of every file has the same shape and the reader can say so.
+    std::fprintf(f, "%d %s %d %016llx", kFormat, fault_name(bad.fault),
+                 bad.device, static_cast<unsigned long long>(bad.nonce));
     write_words(f, bad.header, 20);
     write_words(f, bad.target, 8);
     write_words(f, bad.device_hash, 8);
@@ -171,20 +179,23 @@ bool read_captures(const std::string &path, std::vector<CapturedCandidate> *out)
 
         int format = 0, device = 0;
         char fault[16] = {0};
-        char nonce[16] = {0}, header[192] = {0}, target[80] = {0};
+        char nonce[24] = {0}, header[192] = {0}, target[80] = {0};
         char device_hash[80] = {0}, host_hash[80] = {0};
 
         // Widths on every string so that a corrupt line cannot write past the
         // buffers above -- this file is read after something already went
         // wrong, which is not the moment to trust its contents.
-        const int fields = std::sscanf(line, "%d %15s %d %15s %191s %79s %79s %79s",
+        const int fields = std::sscanf(line, "%d %15s %d %23s %191s %79s %79s %79s",
                                        &format, fault, &device, nonce, header,
                                        target, device_hash, host_hash);
+
+        // High word first, which is how a 64-bit number is written down.
+        uint32_t nonce_words[2] = {0, 0};
 
         CapturedCandidate bad;
         if (fields != 8 || format != kFormat
             || !fault_from_name(fault, &bad.fault)
-            || !read_words(nonce, &bad.nonce, 1)
+            || !read_words(nonce, nonce_words, 2)
             || !read_words(header, bad.header, 20)
             || !read_words(target, bad.target, 8)
             || !read_words(device_hash, bad.device_hash, 8)
@@ -196,6 +207,7 @@ bool read_captures(const std::string &path, std::vector<CapturedCandidate> *out)
         }
 
         bad.device = device;
+        bad.nonce = static_cast<uint64_t>(nonce_words[0]) << 32 | nonce_words[1];
         out->push_back(bad);
     }
 

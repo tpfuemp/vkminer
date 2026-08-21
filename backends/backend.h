@@ -11,6 +11,7 @@
 #define VKMINER_BACKENDS_BACKEND_H__
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,29 +49,68 @@ struct DeviceInfo {
     uint32_t max_workgroup_size  = 0;   // along x
     uint32_t max_workgroup_count = 0;   // along x
 
+    // What a kernel with persistent state has to fit inside, and not the same
+    // number as `memory`: a device with 12 GiB of it may still refuse a single
+    // 5 GiB buffer, or refuse to let a shader address more than 4 GiB-1 of one
+    // it accepted. A kernel whose state outgrows either splits it across
+    // bindings, which is a shader decision and so has to be knowable before the
+    // shader is chosen.
+    uint64_t max_allocation      = 0;   // one allocation, bytes
+    uint64_t max_binding_range   = 0;   // one storage buffer binding, bytes
+    uint32_t max_storage_buffers = 0;   // storage bindings in one pipeline
+    uint32_t max_shared_memory   = 0;   // workgroup-shared bytes
+
     bool int64 = false;           // 64-bit integers in a shader
     bool int16 = false;
     bool int8  = false;
     bool subgroup_ballot = false;
+    bool subgroup_shuffle = false;   // lanes can read each other's registers
 };
 
 // A nonce that met the target, and the hash the device says it produced. The
 // hash is advisory: the host re-computes it before submitting anything, so a
 // device that disagrees is reporting a bug rather than a share.
+//
+// The nonce is 64 bits whatever the algorithm's own width is. Nothing on this
+// axis reads the number, so the algorithms say how much of it they use.
 struct Solution {
-    uint32_t nonce;
+    uint64_t nonce;
     uint32_t hash[8];
 };
+
+// How a nonce is spelled in a log line or a test failure: eight hex digits
+// while it fits in 32 bits, sixteen when it does not. So a 32-bit nonce reads
+// as it always did, and a wider one is never printed with the top missing.
+inline std::string nonce_hex(uint64_t nonce)
+{
+    char text[17];
+    if (nonce > 0xffffffffull)
+        std::snprintf(text, sizeof text, "%016llx",
+                      static_cast<unsigned long long>(nonce));
+    else
+        std::snprintf(text, sizeof text, "%08llx",
+                      static_cast<unsigned long long>(nonce));
+    return text;
+}
 
 // Candidates a single dispatch can hand back. Here rather than inside a backend
 // because a caller of collect() has to size its array by it: a smaller host
 // array drops solutions the device stored and had room for, and nothing reports
-// it -- the device only warns about what did not fit in *its* buffer.
-//
-// Far more than a dispatch should ever produce. A batch that fills it is sized
-// for a difficulty nobody is mining at, and the host says so rather than
-// quietly returning the first few.
+// it. Far more than a dispatch should ever produce, so a batch that fills it is
+// sized for a difficulty nobody is mining at and the host says so.
 constexpr uint32_t kMaxCandidates = 32;
+
+// Bindings a shader may split its shared table across. A shader-side limit --
+// each chunk is a block declared in the GLSL and a compare in the chain that
+// selects one -- so every kernel with chunks declares exactly this many,
+// whatever a given device turns out to need. The unused compares fold away when
+// the count is specialized in.
+constexpr uint32_t kMaxSharedChunks = 16;
+
+// Constants a kernel's module may declare for the program it runs. A limit
+// rather than a size: nothing allocates this, it is what stops a mistake on the
+// algorithm axis from asking the compiler for a million of them.
+constexpr uint32_t kMaxProgramConstants = 256;
 
 class Algorithm;
 
@@ -88,22 +128,110 @@ struct KernelSpec {
     const char *variant = "";
 
     // The GPU half. Null SPIR-V is not an error -- it means this algorithm has
-    // no shader for this device, which is exactly the state an algorithm is in
-    // while its CPU reference is being written.
+    // no shader for this device, which is the state an algorithm is in while
+    // its CPU reference is being written.
     const uint32_t *spirv = nullptr;
     size_t   spirv_words         = 0;
     uint32_t storage_buffers     = 0;
     uint32_t push_constant_bytes = 0;
     uint32_t local_size_x        = 0;  // 0 lets the backend choose
 
+    // Invocations that cooperate on one nonce. One -- and zero, which means the
+    // same -- is every kernel where an invocation is a hash. More is a kernel
+    // whose state is too wide for one invocation to hold, sixteen lanes each
+    // keeping a slice of the mix and exchanging it every round.
+    //
+    // The backend launches `count * lanes` invocations for a dispatch of
+    // `count` nonces and everything it counts stays in nonces. All it enforces
+    // is that a workgroup holds a whole number of nonces, because a nonce split
+    // across two of them could not exchange anything.
+    uint32_t lanes = 0;
+
+    // Whether the workgroup has to be a whole number of subgroups. Set by a
+    // kernel that exchanges through subgroup operations rather than shared
+    // memory: a workgroup ending in a half-full subgroup would leave such a
+    // shader with lanes it cannot reach. The backend rounds down, and a device
+    // that will not report a subgroup size has nothing to round to -- so a
+    // kernel that sets this is one the algorithm already cleared for the device.
+    bool full_subgroups = false;
+
     // Device-local bytes each invocation needs to itself, bound after the
     // result buffer. Zero for a kernel whose whole state fits in registers.
-    //
-    // An algorithm states its appetite and gets no say in what follows: how
-    // much memory is free, and how much is spoken for by dispatches in flight,
-    // is not something the algorithm axis can see. The backend decides how many
-    // invocations it can afford and caps the batch there.
+    // The algorithm states its appetite; how much memory is free, and how much
+    // is spoken for by dispatches in flight, is the backend's to know, and it
+    // caps the batch there.
     uint64_t scratch_bytes = 0;
+
+    // Device-local bytes this kernel reads and never writes, the same for every
+    // invocation and every dispatch: a table too large to recompute per hash
+    // and too large to send with one. Bound after the scratchpad, or straight
+    // after the result buffer where there is none.
+    //
+    // Neither multiplied by the batch nor divided by concurrent_kernels, which
+    // is what makes it different from scratch: it is one allocation on the
+    // device however many kernels read it, because the tuner races several at
+    // once and a table measured in gigabytes cannot be raced any other way.
+    // Filled by Algorithm::shared_state, keyed by a number the backend never
+    // interprets -- see Kernel::prepare_state.
+    uint64_t shared_bytes = 0;
+
+    // Bindings the shader has for that table, where a device will not let it be
+    // one: maxStorageBufferRange is 4 GiB-1 on a desktop GPU and 128 MiB on
+    // lavapipe, so how many bindings a table needs is a property of the device
+    // rather than of the algorithm. The shader declares the most it can address
+    // and the backend uses as few as the device allows, telling it how big one
+    // is; the shader selects with a chain of compares, because dynamically
+    // indexing an array of storage buffers needs descriptor indexing and this
+    // project builds against Vulkan 1.1.
+    //
+    // 0 and 1 both mean one binding. More than kMaxSharedChunks is refused.
+    uint32_t shared_chunks = 0;
+
+    // Bytes per chunk, where the device's own limit is not the number to use.
+    // Zero -- the only value a miner should set -- takes the largest the device
+    // will address. A test sets it small so the chunk path runs on hardware
+    // whose limits would never reach for it. Rounded down to a power of two, so
+    // the shader divides by a shift.
+    uint64_t shared_chunk_bytes = 0;
+
+    // How those bytes get made, where the host cannot make them fast enough: a
+    // table whose every 64 bytes is a hundred hashes is a day's work for a CPU
+    // and seconds for the device about to read it.
+    //
+    // A second SPIR-V module, run over the shared buffer before the first
+    // mining dispatch, bound to the shared state it writes at 0 and a
+    // host-filled seed at 1, dispatched in slices of `items` invocations, each
+    // slice carrying push constants the algorithm writes. The backend chooses
+    // the slice size, which is a question about this device's watchdog.
+    //
+    // Null SPIR-V means there is no such pass and the host fills the buffer.
+    struct SetupPass {
+        const uint32_t *spirv = nullptr;
+        size_t   spirv_words         = 0;
+        uint32_t push_constant_bytes = 0;
+        uint32_t local_size_x        = 0;  // 0 lets the backend choose
+
+        // Device-local bytes of input, filled by Algorithm::setup_seed and
+        // bound at binding 1. Freed once the pass is over: nothing dispatched
+        // afterwards reads it.
+        uint64_t seed_bytes = 0;
+
+        // Invocations to run, one per item of whatever the shared buffer holds.
+        // The backend never learns what an item is; it hands out ranges of them
+        // and the algorithm turns a range into push constants.
+        uint64_t items = 0;
+    } setup;
+
+    // Specialization constants this module declares for the program it runs,
+    // filled by Algorithm::program_values and handed to the compiler from a
+    // fixed constant ID upwards. Zero is a module that computes the same thing
+    // whatever the job, and is built once.
+    //
+    // More than zero makes the pipeline the compile: the module is a skeleton,
+    // the program is the constants, and a new program means a new pipeline. The
+    // backend keys them by Algorithm::program_key and builds the next one ahead
+    // of being asked -- see Kernel::prepare_program.
+    uint32_t program_constants = 0;
 
     // Dispatches this kernel may hold at once; 0 lets the backend choose. Not
     // an algorithm's business -- it is here so a caller sweeping both axes can
@@ -112,31 +240,26 @@ struct KernelSpec {
 
     // Kernels the caller will hold alive on this device at once, itself
     // included; the backend divides its scratch budget by this. Zero and one
-    // both mean alone. Only the caller can know it -- the others are
-    // allocations that have not happened yet.
-    //
-    // Each gets an equal share rather than whatever is left when it is built,
-    // so that a tuner racing several can compare them and not their build
-    // order. Nothing but the batch size changes.
+    // both mean alone. Each gets an equal share rather than whatever is left
+    // when it is built, so a tuner racing several compares them and not their
+    // build order. Nothing but the batch size changes.
     uint32_t concurrent_kernels = 1;
 
-    // The CPU half: the scalar reference every algorithm must supply. A
-    // backend with no way to run SPIR-V runs this instead, and the differential
-    // test measures the shader against it. Borrowed, not owned -- the kernel
-    // must not outlive the Algorithm that produced the spec.
+    // The CPU half: the scalar reference every algorithm must supply. A backend
+    // with no way to run SPIR-V runs this instead, and the differential test
+    // measures the shader against it. Borrowed, not owned -- the kernel must
+    // not outlive the Algorithm that produced the spec.
     const Algorithm *algorithm = nullptr;
 };
 
 // What one dispatch is, in the only terms a backend has: a job, a slice of the
 // nonce space, and the room there is for answers. The backend fills this in and
-// hands it to the algorithm, which turns it into the bytes its shader declared
-// -- a midstate, a rearranged target, whatever that kernel wants. Neither side
-// has to know what the other made of it.
+// hands it to the algorithm, which turns it into the bytes its shader declared.
 struct Dispatch {
     const uint32_t *header = nullptr;  // struct work's words, as the pool sent them
     const uint32_t *target = nullptr;  // 8 words, as fulltest() compares them
-    uint32_t nonce_start = 0;
-    uint32_t count = 0;
+    uint64_t nonce_start = 0;
+    uint32_t count = 0;             // nonces from there, and a dispatch is small
     uint32_t capacity = 0;             // candidates the result buffer holds
 };
 
@@ -154,7 +277,37 @@ public:
     // once it is done. `collect` is what waits. Returns false, having logged,
     // if the kernel already has `queue_depth` dispatches outstanding.
     virtual bool dispatch(const uint32_t *header, const uint32_t *target,
-                          uint32_t nonce_start, uint32_t count) = 0;
+                          uint64_t nonce_start, uint32_t count) = 0;
+
+    // Make the kernel's shared device state be the state `key` names, building
+    // it if it is not there already, and say whether it is. Called before the
+    // first dispatch and again whenever the key changes, which for an algorithm
+    // with an epoch is a few times a day and costs seconds each time.
+    //
+    // The backend never learns what a key means: only that two dispatches under
+    // one key want the same bytes and that the algorithm can produce them.
+    // True by default, whatever the key, so callers ask unconditionally.
+    virtual bool prepare_state(uint64_t key) { (void)key; return true; }
+
+    // Make the kernel run the program `key` names, and say whether it does. The
+    // sibling of prepare_state, asked in the same place and once per dispatch:
+    // almost always a comparison, and a pipeline build when it is not. Having
+    // been told what the next key will be, the backend compiles that pipeline
+    // on a background thread while this one is still mining.
+    //
+    // True by default and for a module that declares no program: there is one
+    // pipeline, built when the kernel was, and every job runs it.
+    virtual bool prepare_program(uint64_t key) { (void)key; return true; }
+
+    // What that cost. `builds` counts pipelines compiled and `ahead` those
+    // already being built when they were asked for -- the only observable
+    // difference between a program prepared in advance and one compiled on the
+    // boundary, since both produce the right digest.
+    struct ProgramStats {
+        uint64_t builds = 0;
+        uint64_t ahead = 0;
+    };
+    virtual ProgramStats program_stats() const { return ProgramStats{}; }
 
     // Wait for the *oldest* outstanding dispatch and write any solutions it
     // found into `out`, at most `max` of them. Returns the count, 0 if nothing
@@ -170,11 +323,8 @@ public:
     // The largest dispatch this kernel will accept at all: preferred_batch is
     // an answer about time, this one is about memory. A caller sizing a
     // dispatch from anything else, as the tests do, has to ask -- more than
-    // this is refused.
-    //
-    // Unbounded by default, because a kernel holding its state in registers has
-    // no such limit and answering with the tuner's opening guess would make a
-    // test measure the tuner.
+    // this is refused. Unbounded by default, because a kernel holding its state
+    // in registers has no such limit.
     virtual uint32_t max_batch() const { return 0xffffffffu; }
 
     // The width this kernel was built at, which need not be the one asked for:
@@ -190,25 +340,20 @@ public:
     virtual uint32_t queue_depth() const { return 1; }
 
     // What the best-digest probe has seen: the one thing a caller can observe
-    // about the nonces that did *not* come back. Candidates prove the kernel
-    // finds what it reports; nothing else says whether it is missing valid
-    // nonces, because a kernel that misses them reports nothing at all -- no
-    // rejects, no failed re-verify, just worse luck than it should have had.
+    // about the nonces that did *not* come back. A kernel that misses valid
+    // nonces reports nothing at all -- no rejects, no failed re-verify, just
+    // worse luck than it should have had.
     //
-    // `samples` counts the dispatches that reported a reading; `ratio_sum` adds
-    // up, for each, the smallest most significant digest word it saw times the
-    // nonces it covered, over 2^32. Digest words are uniform, so the smallest
-    // of n of them sits near 2^32/n and each term has an expected value of one
-    // whatever n was: `ratio_sum / samples` reads 1.00 for a kernel that
-    // searches every nonce handed to it, 2.00 for one searching half.
+    // `samples` counts the dispatches that reported a reading; `ratio_sum`
+    // adds up, for each, the smallest most significant digest word it saw times
+    // the nonces it covered, over 2^32. Digest words are uniform, so each term
+    // has an expected value of one whatever the batch was: `ratio_sum /
+    // samples` reads 1.00 for a kernel that searches every nonce handed to it
+    // and 2.00 for one searching half.
     //
     // Not a running minimum, which saturates to zero within seconds on a fast
-    // card and then reads the same as a probe that was never wired up. And the
-    // terms are weighted by n rather than averaged raw, because the batch size
-    // moves during a run -- an unweighted mean would describe the tuner.
-    //
-    // `samples` of zero means no observation -- the probe was not asked for, or
-    // this backend does not offer one -- and is not a measurement.
+    // card and then reads like a probe that was never wired up. `samples` of
+    // zero means no observation, not a measurement of zero.
     struct BestDigest {
         double ratio_sum = 0.;
         uint64_t samples = 0;

@@ -155,28 +155,40 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
                "vkCreateShaderModule"))
         return nullptr;
 
-    // Both constants in one block, laid out by this struct rather than by the
+    // The constants in one block, laid out by this struct rather than by the
     // desc: `probe_best` is a C++ bool and the Vulkan side of a boolean
     // specialization constant is a four-byte VkBool32, so it cannot be pointed
     // at where it lives.
-    struct Constants {
-        uint32_t local_size_x;
-        VkBool32 probe_best;
-    } constants{desc.local_size_x, desc.probe_best ? VK_TRUE : VK_FALSE};
+    //
+    // All of them are offered to every module. A constant ID the shader does
+    // not declare is ignored, which is what lets one block serve a shader with
+    // a shared table in pieces and one with no table at all.
+    // ...and the program's constants after them, one word each, from
+    // kProgramConstantId upwards in the order the algorithm wrote them. Every
+    // one is a uint32 here, whatever the shader declares it as: a specialization
+    // constant is matched by ID and size, and a shader wanting something else
+    // would be a shader whose author picked the type on this side too.
+    std::vector<uint32_t> constants;
+    constants.reserve(4 + desc.program_count);
+    constants.push_back(desc.local_size_x);
+    constants.push_back(desc.probe_best ? VK_TRUE : VK_FALSE);
+    constants.push_back(desc.shared_chunks);
+    constants.push_back(desc.shared_chunk_words);
+    for (uint32_t i = 0; i < desc.program_count; i++)
+        constants.push_back(desc.program ? desc.program[i] : 0);
 
-    VkSpecializationMapEntry entries[2]{};
-    entries[0].constantID = 0;
-    entries[0].offset = offsetof(Constants, local_size_x);
-    entries[0].size = sizeof constants.local_size_x;
-    entries[1].constantID = 1;
-    entries[1].offset = offsetof(Constants, probe_best);
-    entries[1].size = sizeof constants.probe_best;
+    std::vector<VkSpecializationMapEntry> entries(constants.size());
+    for (uint32_t i = 0; i < entries.size(); i++) {
+        entries[i].constantID = i < 4 ? i : kProgramConstantId + (i - 4);
+        entries[i].offset = i * sizeof(uint32_t);
+        entries[i].size = sizeof(uint32_t);
+    }
 
     VkSpecializationInfo spec{};
-    spec.mapEntryCount = 2;
-    spec.pMapEntries = entries;
-    spec.dataSize = sizeof constants;
-    spec.pData = &constants;
+    spec.mapEntryCount = static_cast<uint32_t>(entries.size());
+    spec.pMapEntries = entries.data();
+    spec.dataSize = constants.size() * sizeof(uint32_t);
+    spec.pData = constants.data();
 
     VkComputePipelineCreateInfo create{};
     create.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;

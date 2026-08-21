@@ -14,16 +14,19 @@
 // The buffer also carries one word that is not a result: the best digest any
 // invocation saw. It answers what a candidate count cannot -- whether the
 // kernel is missing valid nonces, which produces no reject and no failed check,
-// only worse luck than it should have had. See Kernel::BestDigest in
-// backends/backend.h for what the host makes of it.
+// only worse luck than it should have had.
 
 #ifndef VKMINER_SHADERS_COMMON_CANDIDATES_GLSL_INCLUDED
 #define VKMINER_SHADERS_COMMON_CANDIDATES_GLSL_INCLUDED
 
-// Words per candidate: the nonce, then the eight digest words in the order the
-// host compares them. The host has the same number; they are two halves of one
-// contract, and a change to either is a change to both.
-const uint kCandidateWords = 9u;
+// Words per candidate: the nonce as two words, low first, then the eight digest
+// words in the order the host compares them. The host has the same number; they
+// are two halves of one contract, and a change to either is a change to both.
+//
+// Two words because the host carries 64 bits of nonce. Most kernels here fit
+// in the low word and write a zero to the high one, on a path taken once in
+// billions of invocations; KawPoW's calls the two-word emit below.
+const uint kCandidateWords = 10u;
 
 layout(std430, set = 0, binding = 0) buffer Candidates {
     uint found;   // total candidates this dispatch produced, capacity or not
@@ -32,10 +35,9 @@ layout(std430, set = 0, binding = 0) buffer Candidates {
 } candidates;
 
 // Whether to keep `best` up to date. Off in every pipeline the miner builds to
-// mine with, and folded away entirely when it is: one atomic to one address
-// from every invocation on the device is contention on a scale nothing else
-// here has, so this is a diagnostic to switch on for a run and not a counter to
-// leave running. The host asks for it with --vk-probe-best.
+// mine with, and folded away when it is: one atomic to one address from every
+// invocation is contention on a scale nothing else here has. A diagnostic for a
+// run, asked for with --vk-probe-best, not a counter to leave on.
 layout(constant_id = 1) const bool kProbeBest = false;
 
 // The best digest word this invocation computed, offered to the running
@@ -50,16 +52,23 @@ void probe_best(uint top)
 
 // `hash` is the digest as the host reads it: eight little-endian words, most
 // significant last, which is the order the target comparison is made in.
-void emit_candidate(uint capacity, uint nonce, uint hash[8])
+void emit_candidate64(uint capacity, uint nonce_lo, uint nonce_hi, uint hash[8])
 {
     uint slot = atomicAdd(candidates.found, 1u);
     if (slot >= capacity)
         return;
 
     uint base = slot * kCandidateWords;
-    candidates.word[base] = nonce;
+    candidates.word[base] = nonce_lo;
+    candidates.word[base + 1u] = nonce_hi;
     for (uint i = 0u; i < 8u; i++)
-        candidates.word[base + 1u + i] = hash[i];
+        candidates.word[base + 2u + i] = hash[i];
+}
+
+// The same, for the kernels whose nonce is 32 bits wide.
+void emit_candidate(uint capacity, uint nonce, uint hash[8])
+{
+    emit_candidate64(capacity, nonce, 0u, hash);
 }
 
 #endif  // VKMINER_SHADERS_COMMON_CANDIDATES_GLSL_INCLUDED

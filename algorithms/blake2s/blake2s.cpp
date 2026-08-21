@@ -4,10 +4,10 @@
 // BLAKE2s-256 over an 80-byte block header, unkeyed. Verge mines one of its
 // five algorithms this way.
 //
-// ⚠️ The byte order is the mirror image of SHA-256d's. struct work carries each
+// The byte order is the mirror image of SHA-256d's. struct work carries each
 // header word as a big-endian read of the wire, and SHA-256 reads its message
 // big-endian, so sha256d hands those words to the compression unchanged.
-// BLAKE2s reads its message little-endian (RFC 7693 §2.6), so every message word
+// BLAKE2s reads its message little-endian (RFC 7693 sec. 2.6), so every message word
 // is the byte reversal of the header word it comes from. This file writes the
 // header out big-endian -- the same 80 wire bytes sha256d hashes -- and reads it
 // back little-endian, rather than swapping words in place: the wire bytes are
@@ -65,7 +65,7 @@ const uint32_t kIV[8] = {
     0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
 };
 
-// RFC 7693 §2.7. A table here, so that it can be diffed against the document;
+// RFC 7693 sec. 2.7. A table here, so that it can be diffed against the document;
 // the kernel applies the same permutation at compile time instead.
 const unsigned char kSigma[10][16] = {
     {  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15 },
@@ -168,7 +168,7 @@ void blake2s_80(uint32_t out[8], const unsigned char header[80])
 // version field -- `nVersion & (15 << 11)` is `4 << 11` for BLAKE2s, and 0x2004
 // is that value.
 //
-// ⚠️ These are anchored on the difficulty bits, not on a published digest.
+// These are anchored on the difficulty bits, not on a published digest.
 // Verge's explorers show the *scrypt* hash of a header whatever mined it, so a
 // BLAKE2s block's BLAKE2s digest is on display nowhere. What is on display is
 // the header, and each digest below clears the nbits its own header carries --
@@ -295,7 +295,8 @@ public:
             push.block[i] = le32dec(header + 64 + i * 4);
 
         std::memcpy(push.target, dispatch.target, sizeof push.target);
-        push.nonce_start = dispatch.nonce_start;
+        // The low half: this kernel's nonce is one header word, as hash()'s is.
+        push.nonce_start = static_cast<uint32_t>(dispatch.nonce_start);
         push.count = dispatch.count;
         push.capacity = dispatch.capacity;
 
@@ -303,7 +304,7 @@ public:
         return sizeof push;
     }
 
-    void hash(const uint32_t *header, uint32_t nonce,
+    void hash(const uint32_t *header, uint64_t nonce,
               uint32_t out[8]) const override
     {
         // Byte for byte the buffer sha256d builds: the two algorithms differ in
@@ -311,7 +312,7 @@ public:
         unsigned char data[80];
         for (size_t i = 0; i < 19; i++)
             be32enc(data + i * 4, header[i]);
-        be32enc(data + 19 * 4, nonce);
+        be32enc(data + 19 * 4, static_cast<uint32_t>(nonce));
 
         blake2s_80(out, data);
     }

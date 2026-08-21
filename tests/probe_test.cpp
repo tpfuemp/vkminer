@@ -84,7 +84,7 @@ void fail(const char *fmt, ...)
 // expected minimum over them is around two thousand, which is far enough from
 // zero that an equality means something.
 //
-// ⚠️ It is also a single dispatch, and a memory-bound kernel cannot take one
+// It is also a single dispatch, and a memory-bound kernel cannot take one
 // that large. The check runs at whichever of the two is smaller, which weakens
 // it -- a shorter range has a larger expected minimum -- but does not empty it:
 // an equality between two independently computed minima is still an equality
@@ -487,6 +487,18 @@ int main(int argc, char *argv[])
     std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(name);
     if (!algo) {
         std::printf("FAIL no algorithm called '%s'\n", name);
+        return 1;
+    }
+
+    // The header below is one particular block of one particular chain, and
+    // eighty bytes of it. An algorithm whose header is some other length would
+    // be handed the first n bytes of it and asked about the digests -- a
+    // question with an answer, and not the one this file claims to be asking.
+    if (algo->header_bytes() != sizeof kHeader) {
+        std::printf("FAIL '%s' reads a %u-byte header, and this test has an "
+                    "80-byte block to give it\n",
+                    algo->name(),
+                    static_cast<unsigned>(algo->header_bytes()));
         return 1;
     }
 

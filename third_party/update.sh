@@ -16,10 +16,12 @@ set -euo pipefail
 VOLK_TAG="vulkan-sdk-1.4.357.0"
 VMA_TAG="v3.4.0"
 HEADERS_TAG="vulkan-sdk-1.4.357.0"
+ETHASH_TAG="1.2.0"
 
 VOLK_URL="https://github.com/zeux/volk"
 VMA_URL="https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator"
 HEADERS_URL="https://github.com/KhronosGroup/Vulkan-Headers"
+ETHASH_URL="https://github.com/RavenCommunity/cpp-kawpow"
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 work=$(mktemp -d)
@@ -57,6 +59,46 @@ cp "$work/headers/include/vulkan"/*.h   "$here/Vulkan-Headers/include/vulkan/"
 cp "$work/headers/include/vk_video"/*.h "$here/Vulkan-Headers/include/vk_video/"
 cp "$work/headers/LICENSE.md"           "$here/Vulkan-Headers/"
 
+# --------------------------------------------------------------- ethash
+# The CPU reference for the Ethash/ProgPoW family: light cache, dataset item,
+# keccak-f800 and the ProgPoW hash itself. Taken from RavenCommunity's fork
+# rather than from chfast/ethash upstream, because KawPoW *is* the fork: the
+# epoch is 7500 blocks instead of 30000 and the final keccak absorbs a
+# Ravencoin constant, so the two produce different digests for the same header
+# and only this one agrees with the network. Its own version string still says
+# ethash 0.5.1-alpha.1, which is where it forked from.
+#
+# Nothing device-side comes from here. This is the host half of the differential
+# test and the re-verification behind every submitted share.
+echo "  cpp-kawpow      $ETHASH_TAG"
+ethash_sha=$(fetch ethash "$ETHASH_URL" "$ETHASH_TAG")
+rm -rf "$here/ethash"
+mkdir -p "$here/ethash/include/ethash" "$here/ethash/lib/ethash" \
+         "$here/ethash/lib/keccak" "$here/ethash/lib/support"
+cp "$work/ethash/include/ethash"/*.h "$work/ethash/include/ethash"/*.hpp \
+   "$here/ethash/include/ethash/"
+# managed.cpp is left behind: it is a process-global epoch-context cache behind
+# a mutex, and this miner owns that lifetime itself -- one DAG per device, built
+# when the epoch changes. Everything else in lib/ethash is needed.
+for f in bit_manipulation.h builtins.h endianness.hpp ethash-internal.hpp \
+         ethash.cpp kiss99.hpp primes.c primes.h progpow.cpp; do
+    cp "$work/ethash/lib/ethash/$f" "$here/ethash/lib/ethash/"
+done
+cp "$work/ethash/lib/keccak"/*.c        "$here/ethash/lib/keccak/"
+cp "$work/ethash/lib/support/attributes.h" "$here/ethash/lib/support/"
+cp "$work/ethash/LICENSE"               "$here/ethash/"
+
+# The one patch, and it is upstream's bug: progpow.cpp includes a header from
+# the unit tests, for the sake of a to_hex() call that is commented out. Copying
+# a test header into a library to satisfy an include nothing uses is worse than
+# deleting the line, and a build that dropped test/ would fail without this.
+sed -i '\|#include "../../test/unittests/helpers.hpp"|d' \
+    "$here/ethash/lib/ethash/progpow.cpp"
+if grep -q 'unittests/helpers.hpp' "$here/ethash/lib/ethash/progpow.cpp"; then
+    echo "the helpers.hpp patch no longer applies" >&2
+    exit 1
+fi
+
 # ------------------------------------------------------------- manifest
 cat > "$here/VERSIONS" <<EOF
 Vendored third-party sources. Regenerate with third_party/update.sh; do not
@@ -80,6 +122,15 @@ Vulkan-Headers
   tag     $HEADERS_TAG
   commit  $hdr_sha
   license Apache-2.0 OR MIT (Vulkan-Headers/LICENSE.md)
+
+cpp-kawpow
+  $ETHASH_URL
+  tag     $ETHASH_TAG
+  commit  $ethash_sha
+  license Apache-2.0 (ethash/LICENSE)
+  note    the KawPoW fork of chfast/ethash, whose version string it keeps
+          (0.5.1-alpha.1). lib/ethash/managed.cpp and the upstream build
+          files are not vendored; progpow.cpp loses one include, see above
 EOF
 
 echo "done:"

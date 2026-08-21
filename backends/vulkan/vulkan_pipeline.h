@@ -26,6 +26,12 @@ namespace vkminer {
 // it aligned as such, which is why this returns words and not bytes.
 bool read_spirv(const std::string &path, std::vector<uint32_t> *out);
 
+// Where a kernel's own constants start. Zero to three are this backend's --
+// the workgroup width, the probe, and the two the shared table is addressed
+// with -- and four to seven are left for the next one of those, so that adding
+// one does not renumber every program constant in every shader that has any.
+constexpr uint32_t kProgramConstantId = 8;
+
 struct ComputePipelineDesc {
     const uint32_t *spirv       = nullptr;
     size_t          spirv_words = 0;
@@ -40,6 +46,29 @@ struct ComputePipelineDesc {
     // debug probe on the path every invocation takes. Compare the two binary
     // sizes under --vk-pipeline-stats to check that it really went.
     bool probe_best = false;
+
+    // Specialization constants 2 and 3: how many pieces the shared table is in
+    // on this device, and how many 32-bit words are in one of them. A shader
+    // that reads a table too large for one binding turns an index into it into
+    // a piece and an offset with these, and both are constants so that the
+    // whole selection folds away where there is one piece -- which is every
+    // device that can address the table in one go, and every algorithm that
+    // has no table at all.
+    //
+    // Ignored by a module that does not declare them, which is every shader
+    // written before KawPoW.
+    uint32_t shared_chunks      = 0;
+    uint32_t shared_chunk_words = 0;
+
+    // The program this pipeline is the compile of: `program_count` constants
+    // from kProgramConstantId upwards, in the order the algorithm wrote them.
+    // Null for a module that declares none, which is every shader that computes
+    // the same thing whatever the job.
+    //
+    // Pointed at, not copied. The values must outlive the create() call and
+    // nothing else -- the driver has taken what it wants by the time it returns.
+    const uint32_t *program = nullptr;
+    uint32_t program_count  = 0;
 
     // Interchangeable descriptor sets to allocate, all of the same layout. One
     // per dispatch that may be in flight: a set may not be rewritten while a

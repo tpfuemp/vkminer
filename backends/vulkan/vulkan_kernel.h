@@ -11,6 +11,7 @@
 #define VKMINER_BACKENDS_VULKAN_KERNEL_H__
 
 #include "backends/backend.h"
+#include "backends/vulkan/shared_state.h"
 #include "backends/vulkan/vulkan_device.h"
 
 #include <memory>
@@ -18,10 +19,13 @@
 namespace vkminer {
 
 // Returns null, having logged why, if the pipeline or its buffers could not be
-// created. `cache` may be VK_NULL_HANDLE.
+// created. `cache` may be VK_NULL_HANDLE. `shared` is the device's one table
+// for kernels that asked for one and null for the rest; the kernel holds a
+// reference to it, which is what keeps it alive while a dispatch reads it.
 std::unique_ptr<Kernel> make_vulkan_kernel(VulkanDevice &device,
                                            VkPipelineCache cache,
-                                           const KernelSpec &spec);
+                                           const KernelSpec &spec,
+                                           std::shared_ptr<SharedState> shared);
 
 }  // namespace vkminer
 

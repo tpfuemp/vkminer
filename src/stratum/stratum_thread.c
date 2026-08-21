@@ -130,6 +130,41 @@ bool stratum_set_extranonce2( struct work *work, struct stratum_ctx *sctx,
    return ok;
 }
 
+/* A ProgPoW job, which is a header the pool already hashed. Nothing is built:
+ * the 32 bytes are the header, the height is glued on after them because it is
+ * the only place the epoch and the period can come from, and the target arrives
+ * whole rather than as a difficulty to reconstruct one from.
+ *
+ * The words are the wire's bytes big-endian-decoded, which is how struct
+ * work carries every other algorithm's header too. The algorithm swaps them
+ * back before absorbing them; what is checkable against a pool or an explorer
+ * is the byte string in the middle, and that is the point of the round trip.  */
+void progpow_gen_work( struct stratum_ctx *sctx, struct work *g_work )
+{
+   memset( g_work->data, 0, sizeof g_work->data );
+   for ( int i = 0; i < 8; i++ )
+      g_work->data[i] = be32dec( sctx->job.header_hash + i * 4 );
+   g_work->data[8] = (uint32_t) sctx->block_height;
+
+   /* Copied, not derived. See struct stratum_job: a target that came back from
+      a difficulty is a target with its low 128 bits invented.  */
+   memcpy( g_work->target, sctx->job.target, sizeof g_work->target );
+   g_work->targetdiff = hash_to_diff( g_work->target );
+
+   /* The pool's prefix, sitting where it belongs: at the top of the 64-bit
+      nonce, with the rest of it for the workers to divide.  */
+   g_work->nonce_base = 0;
+   for ( size_t i = 0; i < sctx->xnonce1_size && i < 8; i++ )
+      g_work->nonce_base |= (uint64_t)sctx->xnonce1[i] << ( 56 - i * 8 );
+
+   /* There is no coinbase, so there is nothing to roll and nothing to send
+      back up. Every reader of this pair treats zero as "the pool gave the
+      miner none", which here is a fact about the dialect.  */
+   g_work->xnonce2_len = 0;
+
+   net_diff = nbits_to_diff( le32dec( sctx->job.nbits ) ) * opt_target_factor;
+}
+
 /* ------------------------------------------------------------ new work */
 
 static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
@@ -146,20 +181,26 @@ static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
    free( g_work->job_id );
    g_work->job_id = strdup( sctx->job.job_id );
    g_work->height = sctx->block_height;
-   g_work->targetdiff = sctx->job.diff
-                           / ( opt_target_factor * opt_diff_factor );
 
-   g_work->xnonce2_len = sctx->xnonce2_size;
-   g_work->xnonce2 = (uchar*) realloc( g_work->xnonce2, sctx->xnonce2_size );
-   memcpy( g_work->xnonce2, sctx->job.xnonce2, sctx->xnonce2_size );
-   std_build_extraheader( g_work, sctx );
-   /* nbits_to_diff uses the Bitcoin difficulty-1 base; opt_target_factor then
-    * converts to the pool's scale. It wants the exponent in the compact
-    * word's low byte, which is where the standard header carries it. */
-   net_diff = nbits_to_diff( g_work->data[ STD_NBITS_INDEX ] )
-            * opt_target_factor;
+   if ( opt_stratum_dialect == STRATUM_PROGPOW )
+      progpow_gen_work( sctx, g_work );
+   else
+   {
+      g_work->targetdiff = sctx->job.diff
+                              / ( opt_target_factor * opt_diff_factor );
 
-   diff_to_hash( g_work->target, g_work->targetdiff );
+      g_work->xnonce2_len = sctx->xnonce2_size;
+      g_work->xnonce2 = (uchar*) realloc( g_work->xnonce2, sctx->xnonce2_size );
+      memcpy( g_work->xnonce2, sctx->job.xnonce2, sctx->xnonce2_size );
+      std_build_extraheader( g_work, sctx );
+      /* nbits_to_diff uses the Bitcoin difficulty-1 base; opt_target_factor
+       * then converts to the pool's scale. It wants the exponent in the compact
+       * word's low byte, which is where the standard header carries it. */
+      net_diff = nbits_to_diff( g_work->data[ STD_NBITS_INDEX ] )
+               * opt_target_factor;
+
+      diff_to_hash( g_work->target, g_work->targetdiff );
+   }
 
    /* A dispatch already in flight cannot be recalled, so results are matched
     * against the epoch they were launched under rather than prevented. */

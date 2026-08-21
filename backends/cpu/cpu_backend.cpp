@@ -38,7 +38,7 @@ public:
     explicit CpuKernel(const Algorithm *algorithm) : algorithm_(algorithm) {}
 
     bool dispatch(const uint32_t *header, const uint32_t *target,
-                  uint32_t nonce_start, uint32_t count) override
+                  uint64_t nonce_start, uint32_t count) override
     {
         // 32 words is what struct work carries; copying rather than borrowing
         // means the caller may reuse its buffer while this "runs", which is
@@ -59,7 +59,7 @@ public:
         uint32_t hash[8];
 
         for (uint32_t i = 0; i < count_ && found < max; i++) {
-            const uint32_t nonce = nonce_start_ + i;
+            const uint64_t nonce = nonce_start_ + i;
             if (!algorithm_->verify(header_, nonce, target_, hash))
                 continue;
 
@@ -77,7 +77,7 @@ private:
     const Algorithm *algorithm_;
     uint32_t header_[32] = {0};
     uint32_t target_[8]  = {0};
-    uint32_t nonce_start_ = 0;
+    uint64_t nonce_start_ = 0;
     uint32_t count_ = 0;
 };
 

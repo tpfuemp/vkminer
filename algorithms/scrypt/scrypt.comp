@@ -9,7 +9,7 @@
 // caps the batch at what the device's memory can hold rather than at what keeps
 // it busy -- see KernelSpec::scratch_bytes.
 //
-// ⚠️ Every invocation owns kScratchWords of `scratch`, starting at its global
+// Every invocation owns kScratchWords of `scratch`, starting at its global
 // index, and the host allocates for exactly the batch it dispatches. An index
 // past that writes over a neighbour rather than failing, so the batch cap is a
 // correctness mechanism and not a tuning one.
@@ -129,7 +129,7 @@ void hmac_outer(uint opad[8], uint inner[8], out uint mac[8])
     sha256_compress(mac, w);
 }
 
-// PBKDF2-HMAC-SHA256(header, header, c = 1, dkLen = 128), RFC 7914 §6 step 1 --
+// PBKDF2-HMAC-SHA256(header, header, c = 1, dkLen = 128), RFC 7914 sec. 6 step 1 --
 // scrypt's parameters as Litecoin fixed them, password and salt both the header.
 // One iteration, so each output block is a single HMAC, and the inner hash's
 // first block is the header's first 64 bytes for all four of them: that
@@ -171,7 +171,7 @@ void pbkdf2_expand(uint nonce, uint ipad[8], uint opad[8], out uint b[32])
     }
 }
 
-// PBKDF2-HMAC-SHA256(header, B, c = 1, dkLen = 32), RFC 7914 §6 step 3. One
+// PBKDF2-HMAC-SHA256(header, B, c = 1, dkLen = 32), RFC 7914 sec. 6 step 3. One
 // output block, and it is the digest.
 void pbkdf2_finish(uint ipad[8], uint opad[8], uint b[32], out uint digest[8])
 {
@@ -203,7 +203,7 @@ void pbkdf2_finish(uint ipad[8], uint opad[8], uint b[32], out uint digest[8])
         digest[i] = bswap32(mac[i]);
 }
 
-// scryptROMix, RFC 7914 §5. The first loop fills this invocation's scratchpad
+// scryptROMix, RFC 7914 sec. 5. The first loop fills this invocation's scratchpad
 // with the 1,024 states the block passes through; the second reads it back at an
 // index the block itself decides, which is what makes the function sequentially
 // memory-hard and what makes the whole kernel a memory benchmark.

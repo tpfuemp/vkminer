@@ -1,0 +1,13 @@
+// KawPoW specialized, with the lanes meeting in workgroup memory.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The kernel is kawpow_spec_body.glsl, the same text kawpow_spec_sub.comp
+// compiles; this file is the two lines that decide how the sixteen lanes
+// exchange a word. Here they do it the way every Vulkan 1.1 device can, which
+// is why this one is offered unconditionally and the other is not.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "algorithms/kawpow/kawpow_spec_body.glsl"

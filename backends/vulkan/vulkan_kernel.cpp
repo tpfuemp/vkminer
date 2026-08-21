@@ -7,8 +7,12 @@
 #include "backends/vulkan/command_ring.h"
 #include "backends/vulkan/vulkan_pipeline.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
+#include <numeric>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace vkminer {
@@ -16,7 +20,7 @@ namespace {
 
 // Words per candidate, and how many of them fit. Both halves of a contract with
 // shaders/common/candidates.glsl; see the constant of the same name there.
-constexpr uint32_t kCandidateWords = 9;
+constexpr uint32_t kCandidateWords = 10;
 
 // kMaxCandidates is in backends/backend.h, because every caller of collect()
 // has to size its array by the same number.
@@ -78,11 +82,19 @@ public:
 
     ~VulkanKernel() override
     {
-        // The ring first: its destructor waits for the device, which is what
+        // Before anything else: a thread building the next program is holding
+        // this device and this kernel's descriptor layout, and it has to be
+        // finished with both before either goes.
+        if (ahead_.joinable())
+            ahead_.join();
+
+        // The ring next: its destructor waits for the device, which is what
         // makes freeing the buffers underneath it safe. With several dispatches
         // possibly still queued that is not a formality.
         ring_.reset();
         pipeline_.reset();
+        retiring_.reset();
+        ahead_pipeline_.reset();
         if (device_)
             for (Slot &slot : slot_) {
                 device_->destroy_buffer(&slot.results);
@@ -92,12 +104,23 @@ public:
     }
 
     bool init(VulkanDevice &device, VkPipelineCache cache,
-              const KernelSpec &spec)
+              const KernelSpec &spec, std::shared_ptr<SharedState> shared)
     {
         device_ = &device;
         algorithm_ = spec.algorithm;
         name_ = spec.name;
         push_bytes_ = spec.push_constant_bytes;
+        shared_ = std::move(shared);
+
+        // The spec asked for state and the backend did not hand any over, which
+        // is a wiring error rather than a device that ran out: dispatching
+        // would read whatever the unbound descriptor points at.
+        if (spec.shared_bytes && !shared_) {
+            applog(LOG_ERR, "Vulkan: '%s' wants %llu MiB of shared state and "
+                            "was given none", name_,
+                   static_cast<unsigned long long>(spec.shared_bytes >> 20));
+            return false;
+        }
 
         if (push_bytes_ > sizeof push_) {
             applog(LOG_ERR, "Vulkan: '%s' wants %u bytes of push constants, "
@@ -124,26 +147,106 @@ public:
         desc.spirv = spec.spirv;
         desc.spirv_words = spec.spirv_words;
         desc.storage_buffers = spec.storage_buffers ? spec.storage_buffers : 1;
+
+        // Results, then the scratchpad, then the shared table -- the order the
+        // shaders declare their bindings in and the order they are written
+        // below. A descriptor nobody wrote reads as whatever the driver left
+        // there rather than as an error.
+        //
+        // The table takes as many bindings as the shader split itself into,
+        // whatever this device needs: the count is compiled into the module.
+        shared_chunks_ = spec.shared_bytes
+                       ? (spec.shared_chunks ? spec.shared_chunks : 1u) : 0u;
+        if (shared_chunks_ > kMaxSharedChunks) {
+            applog(LOG_ERR, "Vulkan: '%s' declares %u bindings for its shared "
+                            "state and a shader may have %u", name_,
+                   shared_chunks_, kMaxSharedChunks);
+            return false;
+        }
+        const uint32_t needed = 1 + (spec.scratch_bytes ? 1u : 0u)
+                                  + shared_chunks_;
+        if (desc.storage_buffers < needed) {
+            applog(LOG_ERR, "Vulkan: '%s' declares %u storage buffers and has "
+                            "%u to bind", name_, desc.storage_buffers, needed);
+            return false;
+        }
         desc.push_constant_bytes = push_bytes_;
         // The width by the same rule as the depth: the spec, then the option,
         // then this device's default.
         desc.local_size_x = spec.local_size_x  ? spec.local_size_x
                           : opt_workgroup > 0  ? static_cast<uint32_t>(opt_workgroup)
                                                : choose_local_size(info);
+
+        // A workgroup holds whole nonces or the lanes of the last one have
+        // nobody to exchange with. Rounded down rather than refused: the width
+        // is swept by the tuner and asked for on the command line, and this is
+        // the nearest number of invocations that arranges into whole hashes.
+        lanes_ = spec.lanes ? spec.lanes : 1;
+        if (info.max_invocations && lanes_ > info.max_invocations) {
+            applog(LOG_ERR, "Vulkan: '%s' wants %u invocations per hash and %s "
+                            "runs %u in a workgroup", name_, lanes_,
+                   info.name.c_str(), info.max_invocations);
+            return false;
+        }
+        if (lanes_ > 1) {
+            const uint32_t whole = desc.local_size_x
+                                 - desc.local_size_x % lanes_;
+            desc.local_size_x = whole ? whole : lanes_;
+        }
+
+        // And whole subgroups, for a kernel whose lanes exchange through them:
+        // a width that is a multiple of both is a multiple of their least
+        // common multiple, rounded down by the same argument as above.
+        //
+        // A device that will not say what its subgroup is cannot be asked for
+        // whole ones. The algorithm reads the same zero from DeviceInfo and
+        // does not offer such a kernel there, so a zero here is its bug.
+        if (spec.full_subgroups) {
+            const uint32_t step = std::lcm(lanes_, info.subgroup_size);
+            if (!step || (info.max_invocations && step > info.max_invocations)) {
+                applog(LOG_ERR, "Vulkan: '%s' wants whole subgroups and %s "
+                                "reports a subgroup of %u against %u "
+                                "invocations", name_, info.name.c_str(),
+                       info.subgroup_size, info.max_invocations);
+                return false;
+            }
+            const uint32_t whole = desc.local_size_x - desc.local_size_x % step;
+            desc.local_size_x = whole ? whole : step;
+        }
         probe_best_ = opt_vk_probe_best;
         desc.probe_best = probe_best_;
         desc.sets = depth_;
 
-        pipeline_ = ComputePipeline::create(device, desc, cache);
-        if (!pipeline_)
-            return false;
-        local_ = pipeline_->local_size_x();
+        // What the table came out as on this device, which the shader needs to
+        // find a word in it and cannot work out for itself.
+        if (shared_) {
+            desc.shared_chunks =
+                static_cast<uint32_t>(shared_->chunks().size());
+            desc.shared_chunk_words =
+                static_cast<uint32_t>(shared_->chunk_bytes()
+                                      / sizeof(uint32_t));
+        }
 
-        // Here rather than at the call site: this is the only place that knows
-        // both the pipeline and which algorithm it belongs to, and the tuner
-        // builds one of these per candidate workgroup size -- which is exactly
-        // the sweep worth seeing the register cost of. A no-op unless asked.
-        pipeline_->report_statistics(name_);
+        // How many constants the program is, where this module is built per
+        // program. The pipeline cannot exist yet -- nothing here knows which
+        // program, and the module's own defaults are nobody's -- so the first
+        // prepare_program builds it, and reports a width this device rejects.
+        program_constants_ = spec.program_constants;
+        if (program_constants_ > kMaxProgramConstants) {
+            applog(LOG_ERR, "Vulkan: '%s' wants %u program constants and this "
+                            "backend passes %u", name_, program_constants_,
+                   kMaxProgramConstants);
+            return false;
+        }
+        desc_ = desc;
+        cache_ = cache;
+
+        local_ = desc.local_size_x;
+        // Nonces per workgroup, which is the unit a dispatch is counted in and
+        // the width only where an invocation is a hash.
+        per_group_ = local_ / lanes_;
+        if (!per_group_)
+            per_group_ = 1;
 
         // One result buffer per in-flight dispatch, not one shared: the host
         // reads a dispatch's results long after the next has started writing,
@@ -193,11 +296,43 @@ public:
                 }
             }
 
-            // Once, here, and never again: a set may not be updated while a
-            // command buffer using it is in flight, and once the pipeline is
-            // full there is no instant at which none of them is.
-            const Buffer bound[2] = { slot_[i].results, slot_[i].scratch };
-            pipeline_->bind(i, bound, scratch_bytes_ ? 2 : 1);
+            // What set `i` points at, written once and never rewritten: a set
+            // may not be updated while a command buffer using it is in flight,
+            // and once the pipeline is full there is no instant at which none
+            // of them is. Kept rather than dropped, because a kernel built per
+            // program builds another pipeline, with its own sets, per program.
+            //
+            // The table's descriptor is written here too and never rewritten,
+            // which is why a rebuild refills that buffer rather than
+            // allocating another.
+            std::vector<Buffer> bound;
+            bound.reserve(2 + kMaxSharedChunks);
+            bound.push_back(slot_[i].results);
+            if (scratch_bytes_)
+                bound.push_back(slot_[i].scratch);
+
+            // Every binding the shader declared for the table, needed here or
+            // not: the spare ones repeat the last real piece, since a
+            // descriptor nothing wrote points into whatever the driver left
+            // there. The chain that selects between them never reaches the
+            // repeats, so they only have to name a real buffer.
+            if (shared_) {
+                const std::vector<Buffer> &pieces = shared_->chunks();
+                for (uint32_t c = 0; c < shared_chunks_; c++)
+                    bound.push_back(c < pieces.size() ? pieces[c]
+                                                      : pieces.back());
+            }
+            bound_.push_back(std::move(bound));
+        }
+
+        // The one pipeline, where the module is the whole program. A kernel
+        // built per program has none until it is told which, and dispatch
+        // refuses until then for the same reason it refuses without its shared
+        // state: the alternative is hashing fluently against the wrong thing.
+        if (!program_constants_) {
+            pipeline_ = build_pipeline(nullptr);
+            if (!pipeline_)
+                return false;
         }
 
         ring_ = CommandRing::create(device, depth_);
@@ -214,19 +349,122 @@ public:
         // comparing one against another is the point of the option existing.
         // The variant is there for the same reason, where the algorithm has
         // more than one kernel and the tuner may have preferred either.
-        applog(LOG_INFO, "Vulkan: '%s' on %s, workgroup %u, %u dispatch%s in "
-                         "flight%s%s", name_, info.name.c_str(), local_, depth_,
-               depth_ == 1 ? "" : "es",
+        char lanes[48] = "";
+        if (lanes_ > 1)
+            std::snprintf(lanes, sizeof lanes, ", %u lanes to a hash", lanes_);
+        applog(LOG_INFO, "Vulkan: '%s' on %s, workgroup %u%s, %u dispatch%s in "
+                         "flight%s%s", name_, info.name.c_str(), local_, lanes,
+               depth_, depth_ == 1 ? "" : "es",
                spec.variant && spec.variant[0] ? ", kernel " : "",
                spec.variant ? spec.variant : "");
         return true;
     }
 
+    bool prepare_state(uint64_t key) override
+    {
+        if (!shared_)
+            return true;
+        if (!algorithm_) {
+            applog(LOG_ERR, "Vulkan: '%s' has shared state and no algorithm to "
+                            "fill it", name_);
+            return false;
+        }
+
+        // Under the state's own lock, so two workers on one device asking for
+        // the same epoch at the same moment build it once. The one that loses
+        // the race waits for the winner and finds it ready, which is the same
+        // wait it would have had if it had asked first.
+        if (!shared_->ensure(key, *algorithm_))
+            return false;
+
+        state_key_ = key;
+        state_ready_ = true;
+        return true;
+    }
+
+    bool prepare_program(uint64_t key) override
+    {
+        if (!program_constants_)
+            return true;
+        // The common case by a very long way: a comparison, once per dispatch,
+        // against a program that lasts minutes.
+        if (program_ready_ && key == program_key_)
+            return true;
+
+        // Whatever the background thread was building is collected here first,
+        // whether or not it is wanted: it holds a pipeline, and nothing may
+        // touch that while the thread that is creating it runs.
+        std::unique_ptr<ComputePipeline> next;
+        if (ahead_.joinable()) {
+            ahead_.join();
+            if (ahead_key_ == key && ahead_pipeline_) {
+                next = std::move(ahead_pipeline_);
+                ahead_used_++;
+            }
+            ahead_pipeline_.reset();
+        }
+
+        // Not prepared, or prepared for a program the chain did not go on to
+        // use. Either way this is the compile the whole mechanism exists to
+        // keep off this thread, and it is on it.
+        if (!next) {
+            next = build_program(key);
+            if (!next)
+                return false;
+        }
+
+        retire(std::move(pipeline_));
+        pipeline_ = std::move(next);
+        program_key_ = key;
+        program_ready_ = true;
+
+        // And the next one, now, while this one mines. The algorithm may not
+        // know what follows -- a pool that changes coins does not tell anyone
+        // in advance -- and then the miner simply pays the compile at the
+        // boundary, which is what it would have paid anyway.
+        start_ahead(algorithm_ ? algorithm_->next_program_key(key) : 0);
+        return true;
+    }
+
+    ProgramStats program_stats() const override
+    {
+        ProgramStats stats;
+        stats.builds = builds_.load(std::memory_order_relaxed);
+        stats.ahead = ahead_used_;
+        return stats;
+    }
+
     bool dispatch(const uint32_t *header, const uint32_t *target,
-                  uint32_t nonce_start, uint32_t count) override
+                  uint64_t nonce_start, uint32_t count) override
     {
         if (!count)
             return false;
+
+        // A kernel with a table nobody built would hash against whatever the
+        // allocation happened to contain and return candidates that fail
+        // verification -- slowly, and looking like a hardware fault. It is a
+        // caller that forgot prepare_state, so say that.
+        if (shared_) {
+            if (!state_ready_) {
+                applog(LOG_ERR, "Vulkan: '%s' was dispatched before its shared "
+                                "state was built", name_);
+                return false;
+            }
+            // Almost always a comparison and nothing else. It is not nothing
+            // when somebody else on this device has swapped the contents since
+            // the last dispatch, and this is where that is put right.
+            if (!shared_->ensure(state_key_, *algorithm_))
+                return false;
+        }
+
+        // The same for the program, and the same reason: a pipeline built from
+        // the module's defaults would hash every nonce against instructions no
+        // chain ever ran.
+        if (program_constants_ && !program_ready_) {
+            applog(LOG_ERR, "Vulkan: '%s' was dispatched before its program "
+                            "was built", name_);
+            return false;
+        }
 
         // Scratch is indexed by invocation and only max_batch_ of them were
         // allocated. Past that the device writes wherever the arithmetic lands:
@@ -279,15 +517,14 @@ public:
 
         const VolkDeviceTable &fn = device_->fn();
 
-        // The counter has to start at zero, and the whole buffer is small
-        // enough that clearing all of it costs nothing and leaves no stale
-        // candidate from the last dispatch anywhere the host could read one.
+        // The counter starts at zero, and the buffer is small enough that
+        // clearing all of it costs nothing and leaves no stale candidate the
+        // host could read.
         //
         // Three fills rather than one because the probe's word starts at the
-        // opposite end of the range: a running minimum initialized to zero
-        // stays zero. They cover disjoint bytes, which is what lets them go in
-        // without a barrier between them -- two transfer writes to the same
-        // word would have no defined order.
+        // other end of the range: a running minimum initialized to zero stays
+        // zero. They cover disjoint bytes, which is what lets them go in
+        // without a barrier between them.
         fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
                            kFoundWord * sizeof(uint32_t), sizeof(uint32_t), 0);
         fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
@@ -305,7 +542,7 @@ public:
                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1,
                                 &cleared, 0, nullptr, 0, nullptr);
 
-        const uint32_t groups = (count + local_ - 1) / local_;
+        const uint32_t groups = (count + per_group_ - 1) / per_group_;
         pipeline_->record(slot->cmd, index, groups, push_, push_bytes_);
 
         VkMemoryBarrier written{};
@@ -345,6 +582,11 @@ public:
         const bool was_full = inflight_ == depth_;
         inflight_--;
 
+        // With nothing outstanding, nothing on the device can still be reading
+        // the pipeline a program change replaced.
+        if (!inflight_)
+            retiring_.reset();
+
         if (!ring_->wait(ring_->slot(entry.slot), kTimeoutNs)) {
             applog(LOG_ERR, "Vulkan: '%s' did not finish within %u seconds",
                    name_, static_cast<unsigned>(kTimeoutNs / 1000000000ull));
@@ -353,9 +595,8 @@ public:
 
         // From one completion to the next, not from submit to complete: a
         // dispatch queued behind two others waits for both, so submit-to-
-        // complete reads as depth times the truth and would divide every batch
-        // by it forever. Completions are the rate the device retires work at,
-        // which is what kTargetSeconds is about.
+        // complete reads as depth times the truth. Completions are the rate the
+        // device retires work at, which is what kTargetSeconds is about.
         //
         // Only while the queue stayed full across the interval -- a completion
         // with nothing queued behind it measures how late the host was.
@@ -401,8 +642,10 @@ public:
         for (uint32_t i = 0; i < found; i++) {
             const uint32_t *candidate =
                 result + kHeaderWords + i * kCandidateWords;
-            out[i].nonce = candidate[0];
-            std::memcpy(out[i].hash, candidate + 1, sizeof out[i].hash);
+            // Low word first, as the shader wrote it.
+            out[i].nonce = static_cast<uint64_t>(candidate[0])
+                         | static_cast<uint64_t>(candidate[1]) << 32;
+            std::memcpy(out[i].hash, candidate + 2, sizeof out[i].hash);
         }
 
         return static_cast<int>(found);
@@ -422,6 +665,89 @@ public:
     }
 
 private:
+    // One pipeline for this kernel's module, its descriptor sets pointed at the
+    // buffers allocated above, built from `program` where the module has one.
+    // Everything about it is fixed except that: two pipelines from here differ
+    // in nothing but which instructions they contain.
+    std::unique_ptr<ComputePipeline> build_pipeline(const uint32_t *program)
+    {
+        ComputePipelineDesc desc = desc_;
+        desc.program = program;
+        desc.program_count = program ? program_constants_ : 0;
+
+        std::unique_ptr<ComputePipeline> built =
+            ComputePipeline::create(*device_, desc, cache_);
+        if (!built)
+            return nullptr;
+
+        for (uint32_t i = 0; i < bound_.size(); i++)
+            built->bind(i, bound_[i].data(),
+                        static_cast<uint32_t>(bound_[i].size()));
+
+        builds_.fetch_add(1, std::memory_order_relaxed);
+
+        // A no-op unless asked, and worth asking for here rather than only at
+        // startup: whether the driver folds a program's constants into straight
+        // line code, or leaves a switch per operation, is the whole question a
+        // kernel built per program is betting on.
+        built->report_statistics(name_);
+        return built;
+    }
+
+    // The program `key` names, from the algorithm, as a pipeline. Runs on this
+    // thread or on the one below it, which is why it takes nothing from the
+    // kernel that the other could be changing.
+    std::unique_ptr<ComputePipeline> build_program(uint64_t key)
+    {
+        uint32_t values[kMaxProgramConstants];
+        const size_t wrote =
+            algorithm_ ? algorithm_->program_values(key, values,
+                                                    program_constants_) : 0;
+        if (wrote != program_constants_) {
+            applog(LOG_ERR, "Vulkan: '%s' is built from %u program constants "
+                            "and the algorithm wrote %zu", name_,
+                   program_constants_, wrote);
+            return nullptr;
+        }
+        return build_pipeline(values);
+    }
+
+    // Build `key`'s pipeline while the current one mines. One at a time and
+    // never for the program already loaded: the point is the boundary that is
+    // coming, and a second thread would only be racing this one to the same
+    // compile.
+    void start_ahead(uint64_t key)
+    {
+        if (!key || ahead_.joinable())
+            return;
+        if (program_ready_ && key == program_key_)
+            return;
+
+        ahead_key_ = key;
+        ahead_pipeline_.reset();
+        ahead_ = std::thread([this, key] { ahead_pipeline_ = build_program(key); });
+    }
+
+    // Keep the pipeline a program change replaced alive until the dispatches
+    // recorded against it have finished: destroying one under an executing
+    // command buffer shows up as a device lost on somebody else's hardware.
+    //
+    // One is kept. A second retirement with the first still pending would mean
+    // the program changed twice inside a queue's worth of dispatches, which no
+    // chain does, and waiting the device out there costs a fraction of a
+    // second in a place that has just paid for a compile.
+    void retire(std::unique_ptr<ComputePipeline> old)
+    {
+        if (!old)
+            return;
+        if (retiring_) {
+            device_->wait_idle();
+            retiring_.reset();
+        }
+        if (inflight_)
+            retiring_ = std::move(old);
+    }
+
     // Aim the next dispatch at kTargetSeconds, from the interval the device is
     // retiring them at. The caller decides when a measurement is worth
     // believing; this decides what to do about one.
@@ -469,21 +795,34 @@ private:
             return false;
         }
 
-        // Not the whole heap. The driver, the command buffers, the result
+        // Not the whole heap: the driver, the command buffers, the result
         // buffers and -- on a device also driving a display -- a framebuffer
-        // this cannot see all live there too. VK_EXT_memory_budget would give a
+        // this cannot see all live there. VK_EXT_memory_budget would give a
         // real answer; this is the honest guess without it.
         //
-        // A software rasterizer gets far less, and not out of politeness: its
-        // "device memory" is the host's RAM, so three quarters of it is a
-        // swapping machine. It is there to say whether the kernel is correct,
-        // which takes a few thousand invocations and not a few million.
+        // A software rasterizer gets far less, because its "device memory" is
+        // the host's RAM and three quarters of that is a swapping machine. It
+        // is there to say whether the kernel is correct, which takes a few
+        // thousand invocations.
         const bool soft = info.kind == DeviceKind::Cpu;
         const uint64_t usable =
             soft ? static_cast<uint64_t>(static_cast<double>(info.memory) * 0.15)
                  : static_cast<uint64_t>(static_cast<double>(info.memory) * 0.75);
         const uint64_t ceiling = soft ? (256ull << 20) : ~0ull;
         uint64_t budget = usable < ceiling ? usable : ceiling;
+
+        // The shared table is already on the device and is not scratch: taken
+        // off the top, before the split, because there is one of it however
+        // many kernels are about to divide what is left.
+        const uint64_t shared = shared_ ? shared_->bytes() : 0;
+        if (shared >= budget) {
+            applog(LOG_ERR, "Vulkan: '%s' has %llu MiB of shared state on %s "
+                            "and no room left for scratch", name_,
+                   static_cast<unsigned long long>(shared >> 20),
+                   info.name.c_str());
+            return false;
+        }
+        budget -= shared;
 
         // Split with whoever else the caller is about to build. Nothing here
         // can see them, and a driver that over-commits lets them all succeed
@@ -492,34 +831,37 @@ private:
         budget /= concurrent_;
 
         // Every dispatch in flight owns a full set of scratchpads, so the depth
-        // is a multiplier on the memory and not just on the latency.
+        // is a multiplier on the memory and not just on the latency. And where
+        // several invocations share a nonce they each want their own, so a
+        // nonce costs the scratch of all of its lanes.
         const uint64_t per_invocation = scratch_bytes_ * depth_;
-        uint64_t fits = budget / (per_invocation ? per_invocation : 1);
+        const uint64_t per_nonce = per_invocation * lanes_;
+        uint64_t fits = budget / (per_nonce ? per_nonce : 1);
 
         if (fits > kMaxBatch)
             fits = kMaxBatch;
 
         // Below a workgroup there is nothing to dispatch: the device saying it
         // cannot run this algorithm, which is a real answer.
-        if (fits < local_) {
+        if (fits < per_group_) {
             applog(LOG_ERR, "Vulkan: '%s' needs %llu KiB per hash, and %s has "
                             "room for %llu at a time -- fewer than the %u in a "
                             "workgroup", name_,
                    static_cast<unsigned long long>(scratch_bytes_ >> 10),
                    info.name.c_str(), static_cast<unsigned long long>(fits),
-                   local_);
+                   per_group_);
             return false;
         }
 
         // Whole workgroups, so that the last one is not a partial dispatch that
         // indexes scratch nobody allocated.
-        max_batch_ = static_cast<uint32_t>(fits / local_) * local_;
+        max_batch_ = static_cast<uint32_t>(fits / per_group_) * per_group_;
 
         applog(LOG_INFO, "Vulkan: '%s' takes %llu MiB of scratch on %s -- "
                          "%u hashes in flight, %llu KiB each%s",
                name_,
                static_cast<unsigned long long>(
-                   (static_cast<uint64_t>(max_batch_) * per_invocation) >> 20),
+                   (static_cast<uint64_t>(max_batch_) * per_nonce) >> 20),
                info.name.c_str(), max_batch_,
                static_cast<unsigned long long>(scratch_bytes_ >> 10),
                concurrent_ > 1 ? ", sharing the device" : "");
@@ -543,7 +885,7 @@ private:
         // driver, and not on every driver.
         if (info.max_workgroup_count) {
             const uint64_t most =
-                static_cast<uint64_t>(info.max_workgroup_count) * local_;
+                static_cast<uint64_t>(info.max_workgroup_count) * per_group_;
             if (static_cast<uint64_t>(batch_) > most)
                 batch_ = static_cast<uint32_t>(most);
         }
@@ -555,6 +897,56 @@ private:
 
     std::unique_ptr<ComputePipeline> pipeline_;
     std::unique_ptr<CommandRing> ring_;
+
+    // What another pipeline for this kernel would be built from: everything
+    // that was decided at init, and the buffers each descriptor set points at.
+    // Unused by a kernel with one pipeline, which is every one whose module is
+    // its whole program.
+    ComputePipelineDesc desc_{};
+    VkPipelineCache cache_ = VK_NULL_HANDLE;
+    std::vector<std::vector<Buffer>> bound_;
+
+    // Constants the module declares for its program, and which program is
+    // loaded. Zero constants is a kernel that has one pipeline and never comes
+    // near any of this.
+    uint32_t program_constants_ = 0;
+    uint64_t program_key_ = 0;
+    bool program_ready_ = false;
+
+    // The pipeline the last program change replaced, held until the dispatches
+    // that were recorded against it have retired.
+    std::unique_ptr<ComputePipeline> retiring_;
+
+    // The next program, being compiled while this one mines. Only the thread
+    // that calls prepare_program touches any of these, and only with `ahead_`
+    // joined -- which is the whole of the synchronization here.
+    std::thread ahead_;
+    uint64_t ahead_key_ = 0;
+    std::unique_ptr<ComputePipeline> ahead_pipeline_;
+
+    // Pipelines compiled, and how many of them were already being built when
+    // they were asked for. `builds_` is written by both threads; `ahead_used_`
+    // only by the one that joins.
+    std::atomic<uint64_t> builds_{0};
+    uint64_t ahead_used_ = 0;
+
+    // The device's shared table, or null for a kernel that wanted none. Shared
+    // rather than owned: the tuner's four candidates and both workers on a card
+    // hold the same one, and it goes when the last of them does.
+    //
+    // `state_key_` is what this kernel was last told to hash against and
+    // `state_ready_` says it has been told. Kept because this kernel is not the
+    // only one that can change the buffer: two workers on one card, on two
+    // chains, would otherwise dispatch against each other's table. Checked
+    // again at dispatch, one uncontended lock per fiftieth of a second.
+    std::shared_ptr<SharedState> shared_;
+    uint64_t state_key_ = 0;
+    bool state_ready_ = false;
+
+    // Bindings this shader has for that state, which is what the module was
+    // compiled with and not what the device turned out to want. Zero for a
+    // kernel with no shared state at all.
+    uint32_t shared_chunks_ = 0;
 
     // What one in-flight dispatch writes into. Paired with the ring's slot of
     // the same index, and untouchable between submit and fence.
@@ -606,6 +998,11 @@ private:
     uint32_t local_ = 0;
     uint32_t batch_ = kMinBatch;
 
+    // Invocations per nonce, and the nonces a workgroup of them holds. One and
+    // the width for every kernel where an invocation is a hash.
+    uint32_t lanes_ = 1;
+    uint32_t per_group_ = 1;
+
     // Device-local bytes per invocation, the batch that many of them fit in,
     // and how many kernels the spec says share this device. Zero and kMaxBatch
     // for a kernel wanting no scratch, which leaves every compute-bound
@@ -626,10 +1023,11 @@ private:
 
 std::unique_ptr<Kernel> make_vulkan_kernel(VulkanDevice &device,
                                            VkPipelineCache cache,
-                                           const KernelSpec &spec)
+                                           const KernelSpec &spec,
+                                           std::shared_ptr<SharedState> shared)
 {
     std::unique_ptr<VulkanKernel> kernel(new VulkanKernel());
-    if (!kernel->init(device, cache, spec))
+    if (!kernel->init(device, cache, spec, std::move(shared)))
         return nullptr;
     return kernel;
 }

@@ -225,11 +225,19 @@ add_library(vkminer_algorithms STATIC
     algorithms/sha256d/sha256d.cpp
     algorithms/blake2s/blake2s.cpp
     algorithms/scrypt/scrypt.cpp
-    algorithms/sha3t/sha3t.cpp)
+    algorithms/sha3t/sha3t.cpp
+    algorithms/kawpow/kawpow.cpp
+    algorithms/kawpow/kawpow_dag.cpp
+    algorithms/kawpow/kawpow_hash.cpp
+    algorithms/kawpow/kawpow_program.cpp)
 
 target_include_directories(vkminer_algorithms PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer_algorithms PUBLIC vkminer_inherited)
-target_link_libraries(vkminer_algorithms PRIVATE vkminer_sha256 vkminer_warnings)
+# ethash for the KawPoW DAG, and privately: what it computes is the reference a
+# kernel is judged against, and nothing outside algorithms/kawpow/ has any
+# business including it.
+target_link_libraries(vkminer_algorithms PRIVATE
+    vkminer_sha256 vkminer_warnings ethash)
 
 # ------------------------------------------------------------------ shaders
 if(VKMINER_BUILD_SHADERS)
@@ -248,6 +256,10 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/scrypt/scrypt.comp
                               algorithms/sha3t/sha3t.comp
                               algorithms/sha3t/sha3t32.comp
+                              algorithms/kawpow/kawpow.comp
+                              algorithms/kawpow/kawpow_spec.comp
+                              algorithms/kawpow/kawpow_spec_sub.comp
+                              algorithms/kawpow/dag.comp
                       INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
                       EMBED "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_spirv.cpp")
 
@@ -270,6 +282,22 @@ if(VKMINER_BUILD_SHADERS)
         add_spirv_shaders(vkminer_shader_vk_smoke
                           SOURCES shaders/vk-smoke.comp)
         set(VKMINER_VK_SMOKE_SPV "${CMAKE_CURRENT_BINARY_DIR}/spv/vk-smoke.spv")
+
+        # The include dir is the candidate buffer's: this one goes through the
+        # backend's own kernel path, so it reports what it read the way every
+        # real kernel does.
+        add_spirv_shaders(vkminer_shader_shared_state
+                          SOURCES shaders/shared-state.comp
+                          INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}")
+        set(VKMINER_SHARED_STATE_SPV
+            "${CMAKE_CURRENT_BINARY_DIR}/spv/shared-state.spv")
+
+        # The DAG generation kernel is embedded with the rest, the KawPoW
+        # algorithm having become the thing that dispatches it. It is still
+        # written out as a loose .spv, which is what dag_test reads: that test
+        # drives the setup pass through an algorithm of its own and never loads
+        # the miner's shader table.
+        set(VKMINER_DAG_SPV "${CMAKE_CURRENT_BINARY_DIR}/spv/dag.spv")
     endif()
 endif()
 
@@ -292,6 +320,7 @@ add_library(vkminer_backends STATIC
     backends/null/null_backend.cpp
     backends/vulkan/command_ring.cpp
     backends/vulkan/pipeline_cache.cpp
+    backends/vulkan/shared_state.cpp
     backends/vulkan/vulkan_backend.cpp
     backends/vulkan/vulkan_common.cpp
     backends/vulkan/vulkan_device.cpp

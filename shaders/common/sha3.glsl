@@ -5,10 +5,10 @@
 // how many times it is squeezed are the algorithm's business, and sha3d, sha3t
 // and keccak differ in exactly those and in nothing here.
 //
-// ⚠️ A lane is KLANE, not uint64_t, because shaderInt64 is optional and Mali and
+// A lane is KLANE, not uint64_t, because shaderInt64 is optional and Mali and
 // Adreno often lack it. This text compiles into two modules -- 64-bit lanes, or
 // pairs of 32-bit words -- and the algorithm picks one off DeviceInfo::int64.
-// ⚠️ A specialization constant cannot make that choice: Int64 is an
+// A specialization constant cannot make that choice: Int64 is an
 // OpCapability, declared for the whole module, and a device without the feature
 // rejects the module whatever the constant leaves reachable.
 
@@ -63,7 +63,7 @@ KLANE krotl(KLANE x, uint n)
 
 #endif  // VKMINER_SHA3_INT64
 
-// FIPS 202 §3.2.2, as (low half, high half) so that the table reads the same
+// FIPS 202 sec. 3.2.2, as (low half, high half) so that the table reads the same
 // whichever lane type it is compiled for. Only lane 0 takes one, once a round.
 const uvec2 sha3_rc[24] = uvec2[24](
     uvec2(0x00000001u, 0x00000000u), uvec2(0x00008082u, 0x00000000u),
@@ -79,7 +79,7 @@ const uvec2 sha3_rc[24] = uvec2[24](
     uvec2(0x80008081u, 0x80000000u), uvec2(0x00008080u, 0x80000000u),
     uvec2(0x80000001u, 0x00000000u), uvec2(0x80008008u, 0x80000000u));
 
-// The rotation offsets of rho (FIPS 202 §3.2.2), indexed x + 5y as the state
+// The rotation offsets of rho (FIPS 202 sec. 3.2.2), indexed x + 5y as the state
 // is. Written out rather than computed from the triangular recurrence, so it
 // can be read against the table in the standard.
 const uint sha3_rho[25] = uint[25](

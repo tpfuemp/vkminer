@@ -94,7 +94,7 @@ constexpr int kMaxSolutions = 256;
 
 // Where the range starts. Not zero, and it crosses 0x80000000 partway through a
 // large batch, which is where a kernel treating the nonce as signed breaks.
-constexpr uint32_t kNonceBase = 0x7fff0000u;
+constexpr uint64_t kNonceBase = 0x7fff0000u;
 
 // Block 125552's header, as it went over the wire. A real header rather than a
 // pattern, so the words the shader schedules are the shape of the thing it will
@@ -128,7 +128,7 @@ void target_for(uint32_t batch, uint32_t out[8])
 }
 
 struct Candidate {
-    uint32_t nonce;
+    uint64_t nonce;
     uint32_t hash[8];
 };
 
@@ -165,21 +165,23 @@ bool all_real(const vkminer::Algorithm &algo, const uint32_t *header,
         // the only evidence of a kernel reaching past the end of its dispatch
         // is a candidate count that looks a little generous.
         if (c.nonce - kNonceBase >= batch) {
-            fail("repetition %d returned nonce 0x%08x, which is outside the "
-                 "%u nonces from 0x%08x it was given", repetition, c.nonce,
-                 batch, kNonceBase);
+            fail("repetition %d returned nonce 0x%s, which is outside the "
+                 "%u nonces from 0x%s it was given", repetition,
+                 vkminer::nonce_hex(c.nonce).c_str(), batch,
+                 vkminer::nonce_hex(kNonceBase).c_str());
             return false;
         }
 
         uint32_t hash[8];
         if (!algo.verify(header, c.nonce, target, hash)) {
-            fail("repetition %d returned nonce 0x%08x, which does not meet the "
-                 "target", repetition, c.nonce);
+            fail("repetition %d returned nonce 0x%s, which does not meet the "
+                 "target", repetition, vkminer::nonce_hex(c.nonce).c_str());
             return false;
         }
         if (std::memcmp(hash, c.hash, sizeof hash) != 0) {
-            fail("repetition %d returned a digest for nonce 0x%08x that the "
-                 "host does not compute", repetition, c.nonce);
+            fail("repetition %d returned a digest for nonce 0x%s that the "
+                 "host does not compute", repetition,
+                 vkminer::nonce_hex(c.nonce).c_str());
             return false;
         }
     }
@@ -201,10 +203,12 @@ bool same_results(const std::vector<Candidate> &first,
         while (i < first.size() || j < got.size()) {
             if (j >= got.size() || (i < first.size()
                                     && first[i].nonce < got[j].nonce)) {
-                std::printf("  lost      nonce 0x%08x\n", first[i].nonce);
+                std::printf("  lost      nonce 0x%s\n",
+                            vkminer::nonce_hex(first[i].nonce).c_str());
                 i++;
             } else if (i >= first.size() || got[j].nonce < first[i].nonce) {
-                std::printf("  appeared  nonce 0x%08x\n", got[j].nonce);
+                std::printf("  appeared  nonce 0x%s\n",
+                            vkminer::nonce_hex(got[j].nonce).c_str());
                 j++;
             } else {
                 i++;
@@ -216,14 +220,16 @@ bool same_results(const std::vector<Candidate> &first,
 
     for (size_t i = 0; i < got.size(); i++) {
         if (got[i].nonce != first[i].nonce) {
-            fail("repetition %d returned nonce 0x%08x where the first returned "
-                 "0x%08x -- that is a race", repetition, got[i].nonce,
-                 first[i].nonce);
+            fail("repetition %d returned nonce 0x%s where the first returned "
+                 "0x%s -- that is a race", repetition,
+                 vkminer::nonce_hex(got[i].nonce).c_str(),
+                 vkminer::nonce_hex(first[i].nonce).c_str());
             return false;
         }
         if (std::memcmp(got[i].hash, first[i].hash, sizeof got[i].hash) != 0) {
-            fail("repetition %d hashed nonce 0x%08x differently from the first "
-                 "-- that is a race", repetition, got[i].nonce);
+            fail("repetition %d hashed nonce 0x%s differently from the first "
+                 "-- that is a race", repetition,
+                 vkminer::nonce_hex(got[i].nonce).c_str());
             return false;
         }
     }
@@ -306,9 +312,9 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     uint32_t target[8];
     target_for(batch, target);
 
-    std::printf("     %u nonces from 0x%08x, target %08x, %d repetition(s), "
-                "%u in flight\n", batch, kNonceBase, target[7], repetitions,
-                depth);
+    std::printf("     %u nonces from 0x%s, target %08x, %d repetition(s), "
+                "%u in flight\n", batch, vkminer::nonce_hex(kNonceBase).c_str(),
+                target[7], repetitions, depth);
 
     // Identical dispatches, as many outstanding at once as the device will
     // take. Several copies of one dispatch in flight together is the state the

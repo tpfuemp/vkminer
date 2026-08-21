@@ -99,6 +99,27 @@ enum {
 #define STD_NBITS_INDEX      18
 #define STD_NONCE_INDEX      19
 
+/* Which Stratum a pool speaks. Set once from the algorithm before the first
+ * connection and never touched again -- see StratumDialect in
+ * algorithms/algorithm.h for why this is stated rather than sniffed off the
+ * methods that arrive.
+ *
+ * Every branch on this belongs in the protocol client. Nothing downstream of
+ * stratum_gen_work should have to ask: what comes out of it is a struct work
+ * either way.  */
+enum stratum_dialect
+{
+   STRATUM_BITCOIN = 0,   /* notify builds a header from a coinbase          */
+   STRATUM_PROGPOW = 1,   /* notify carries the header hash, already made    */
+};
+
+extern int      opt_stratum_dialect;
+
+/* How many low bits of the nonce the miner may walk, which is the algorithm's
+ * answer and is what the pool's nonce prefix is checked against. 32 for a nonce
+ * that is one header word.  */
+extern uint32_t opt_nonce_bits;
+
 extern bool is_power_of_2( int n );
 
 static inline bool is_windows(void)
@@ -228,6 +249,21 @@ struct work
     * ties the pool's reply back to it. Assigned before the share is queued,
     * so the request builder and the pending-stats entry agree on it. */
    uint32_t submit_id;
+
+   /* ---- STRATUM_PROGPOW only; zero on a Bitcoin job ------------------- */
+
+   /* The pool's share of the nonce, already sitting at the top of the 64-bit
+    * field, and the whole nonce a share was found at. A ProgPoW nonce is not a
+    * header word, so it has nowhere in data[] to live: the header the pool
+    * sends is a hash and nothing may be written into it.  */
+   uint64_t nonce_base;
+   uint64_t nonce;
+
+   /* The mix hash that goes up with the share, and whether one was computed.
+    * It is what lets the pool re-check the share with a single keccak instead
+    * of a gigabyte of dataset.  */
+   unsigned char mixhash[32];
+   bool have_mixhash;
 } __attribute__ ((aligned (WORK_ALIGNMENT)));
 
 struct stratum_job
@@ -245,6 +281,30 @@ struct stratum_job
    unsigned char ntime[4];
    double diff;
    bool clean;
+
+   /* ---- STRATUM_PROGPOW only ------------------------------------------ */
+
+   /* The header hash the pool already computed, which is the whole of what
+    * this dialect gives the miner to hash: there is no coinbase to build and
+    * no merkle branch to fold, so prevhash, coinbase and merkle above stay
+    * empty for the life of a ProgPoW session.  */
+   unsigned char header_hash[32];
+
+   /* The epoch's seed hash, kept only to be checked. The height already says
+    * which epoch this is; the seed is the pool saying it independently, and
+    * the two disagreeing means one of us has the wrong dataset -- which is
+    * otherwise invisible until every share is rejected.  */
+   unsigned char seed_hash[32];
+
+   /* The share target as the pool stated it, all 256 bits, in the order
+    * fulltest() compares: most significant word last.
+    *
+    * Carried whole rather than as a difficulty. The round trip through
+    * hash_to_diff and back reproduces only the top 128 bits, and a target that
+    * comes back looser than the pool's is a share the miner thinks passes and
+    * the pool rejects.  */
+   uint32_t target[8];
+   bool have_target;
 } __attribute__ ((aligned (64)));
 
 struct stratum_ctx {
@@ -260,6 +320,13 @@ struct stratum_ctx {
 
    double next_diff;
    double sharediff;
+
+   /* The last mining.set_target, kept whole, for the dialect whose target is
+    * 256 bits rather than a difficulty. Applies to the next job that does not
+    * state one of its own -- a target is a property of a job, and this is the
+    * pool's standing answer for the jobs it has not stated one on.  */
+   uint32_t next_target[8];
+   bool have_next_target;
 
    char *session_id;
    size_t xnonce1_size;
@@ -582,6 +649,12 @@ void   std_build_block_header( struct work *g_work, uint32_t version,
                                uint32_t ntime, uint32_t nbits );
 void   std_build_extraheader( struct work *g_work, struct stratum_ctx *sctx );
 
+/* The other dialect's answer to the same question. There is no header to
+ * assemble -- the pool sent the hash of one -- so what this does is unpack the
+ * job into the words the algorithm reads, and put the pool's nonce prefix where
+ * the workers will find it.  */
+void   progpow_gen_work( struct stratum_ctx *sctx, struct work *g_work );
+
 /* Rebuild `work` on the same job with a different extranonce2, which is a
  * different coinbase and so a fresh nonce range. False means the job has
  * changed and the caller should take the new one. See the definition for what
@@ -589,6 +662,10 @@ void   std_build_extraheader( struct work *g_work, struct stratum_ctx *sctx );
 bool   stratum_set_extranonce2( struct work *work, struct stratum_ctx *sctx,
                                 uint64_t counter );
 void   std_le_build_stratum_request( char *req, struct work *work );
+
+/* The other dialect's submit: nonce, header hash and mix, and no ntime or
+ * extranonce2 because there was never a coinbase.  */
+void   progpow_build_stratum_request( char *req, struct work *work );
 
 void  *workio_thread( void *userdata );
 void  *stratum_thread( void *userdata );

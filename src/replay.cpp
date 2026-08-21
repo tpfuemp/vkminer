@@ -38,6 +38,25 @@ void replay_one(Kernel &kernel, const Algorithm &algo,
     const bool host_says = algo.verify(bad.header, bad.nonce, bad.target,
                                        host_hash);
 
+    // A capture is a header from some past job, and for an algorithm with
+    // shared state that header names the state it was hashed under. Replaying
+    // it against whatever the device is holding now would answer a different
+    // question from the one the file was written to ask.
+    if (!kernel.prepare_state(algo.state_key(bad.header))) {
+        applog(LOG_ERR, "Device %d could not prepare the state nonce %s was "
+                        "captured under", device, nonce_hex(bad.nonce).c_str());
+        return;
+    }
+
+    // The same for the program that header ran, which for KawPoW changes every
+    // three blocks: a capture from an hour ago replayed under this period's
+    // program would disagree with the host for a reason that is not a bug.
+    if (!kernel.prepare_program(algo.program_key(bad.header))) {
+        applog(LOG_ERR, "Device %d could not build the kernel nonce %s was "
+                        "captured under", device, nonce_hex(bad.nonce).c_str());
+        return;
+    }
+
     if (!kernel.dispatch(bad.header, bad.target, bad.nonce, 1)) {
         applog(LOG_ERR, "Device %d refused a dispatch of one nonce", device);
         return;
@@ -46,8 +65,8 @@ void replay_one(Kernel &kernel, const Algorithm &algo,
     Solution got[4];
     const int n = kernel.collect(got, 4);
     if (n < 0) {
-        applog(LOG_ERR, "Device %d failed while replaying nonce %08x", device,
-               bad.nonce);
+        applog(LOG_ERR, "Device %d failed while replaying nonce %s", device,
+               nonce_hex(bad.nonce).c_str());
         return;
     }
 
@@ -56,18 +75,19 @@ void replay_one(Kernel &kernel, const Algorithm &algo,
     // The device reporting a nonce the host rejects is the fault that was
     // captured; the device reporting it again is the fault reproducing.
     if (device_says != host_says) {
-        applog(LOG_ERR, "Device %d, nonce %08x: the device %s it meets the "
+        applog(LOG_ERR, "Device %d, nonce %s: the device %s it meets the "
                         "target and the host %s -- the fault reproduces",
-               device, bad.nonce, device_says ? "says" : "does not say",
+               device, nonce_hex(bad.nonce).c_str(),
+               device_says ? "says" : "does not say",
                host_says ? "agrees" : "does not");
         (*reproduced)++;
         return;
     }
 
     if (device_says && std::memcmp(got[0].hash, host_hash, sizeof host_hash)) {
-        applog(LOG_ERR, "Device %d, nonce %08x: both agree it is a share and "
+        applog(LOG_ERR, "Device %d, nonce %s: both agree it is a share and "
                         "they compute different digests -- the fault reproduces",
-               device, bad.nonce);
+               device, nonce_hex(bad.nonce).c_str());
         log_hash("device", got[0].hash);
         log_hash("host", host_hash);
         (*reproduced)++;
@@ -77,8 +97,8 @@ void replay_one(Kernel &kernel, const Algorithm &algo,
     // Not a pass for the kernel, only for this input on this device today. Said
     // that way round on purpose: the capture was taken under a full dispatch and
     // this is one invocation, so a race does not have to show here.
-    applog(LOG_INFO, "Device %d, nonce %08x: device and host agree now", device,
-           bad.nonce);
+    applog(LOG_INFO, "Device %d, nonce %s: device and host agree now", device,
+           nonce_hex(bad.nonce).c_str());
     if (std::memcmp(bad.device_hash, bad.host_hash, sizeof bad.host_hash))
         log_hash("captured", bad.device_hash);
     (*agreed)++;

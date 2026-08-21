@@ -133,12 +133,24 @@ void print_device_list(const std::vector<vkminer::DeviceInfo> &devices)
             std::printf("      memory     %.1f GiB device-local\n",
                         d.memory / 1073741824.0);
         if (d.subgroup_size)
-            std::printf("      subgroup   %u invocations%s\n", d.subgroup_size,
-                        d.subgroup_ballot ? ", ballot" : "");
+            std::printf("      subgroup   %u invocations%s%s\n", d.subgroup_size,
+                        d.subgroup_ballot ? ", ballot" : "",
+                        d.subgroup_shuffle ? ", shuffle" : "");
         if (d.max_invocations)
             std::printf("      workgroup  %u invocations, %u wide, %u groups\n",
                         d.max_invocations, d.max_workgroup_size,
                         d.max_workgroup_count);
+        // Exact bytes, not GiB: the interesting value of these two is 4 GiB
+        // minus one, and rounding it is what would let someone ask for 4 GiB.
+        if (d.max_binding_range)
+            std::printf("      buffers    %u per stage, %llu B per binding, "
+                        "%llu B per allocation\n",
+                        d.max_storage_buffers,
+                        (unsigned long long) d.max_binding_range,
+                        (unsigned long long) d.max_allocation);
+        if (d.max_shared_memory)
+            std::printf("      shared     %u B per workgroup\n",
+                        d.max_shared_memory);
         if (d.api_version)
             std::printf("      integers   %s\n",
                         (!d.int64 && !d.int16 && !d.int8) ? "32-bit only"
@@ -303,19 +315,33 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Difficulty is printed in the scale the pool quotes and compared in the
-    // scale the algorithm defines. Set once, before anything can read it: the
-    // algorithm cannot change for the life of the process, and a factor applied
-    // to some difficulties and not others is worse than a wrong one applied to
-    // all of them.
+    // Everything the protocol client needs to know that only the algorithm can
+    // answer. Set once, before anything can read it: the algorithm cannot
+    // change for the life of the process, and a rule applied to some packets
+    // and not others is worse than a wrong one applied to all of them.
     {
         const std::unique_ptr<vkminer::Algorithm> algo =
             vkminer::create_algorithm(opt_algo);
+
+        // Difficulty is printed in the scale the pool quotes and compared in
+        // the scale the algorithm defines.
         opt_target_factor = algo->target_factor();
         if (opt_target_factor != 1.)
             applog(LOG_INFO, "'%s' quotes difficulty %g times the Bitcoin "
                              "scale, so a stratum difficulty here is not one "
                              "of sha256d's", opt_algo, opt_target_factor);
+
+        // And which Stratum the pool will be speaking, which is decided here
+        // and nowhere else -- see StratumDialect. A method arriving later
+        // cannot revise it.
+        opt_nonce_bits = algo->nonce_bits();
+        if (algo->stratum_dialect() == vkminer::StratumDialect::kProgPow) {
+            opt_stratum_dialect = STRATUM_PROGPOW;
+            applog(LOG_INFO, "'%s' speaks the ProgPoW stratum: the pool sends "
+                             "a header hash rather than a coinbase, and keeps "
+                             "the top %u bits of the nonce",
+                   opt_algo, 64 - opt_nonce_bits);
+        }
     }
 
     // A typo here would otherwise mean "use the built-in shaders after all",

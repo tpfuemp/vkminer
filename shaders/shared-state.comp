@@ -1,0 +1,49 @@
+// Round-trip check for shared device state. Not used by the miner.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Hashes nothing. Every invocation reads eight words out of the shared table
+// and reports them as though they were a digest, so that the host -- which
+// knows what it asked for those bytes to be -- can say whether the table the
+// device read is the table the host built.
+//
+// It is the smallest thing that exercises the property the state exists for:
+// the bytes are written once, outside any dispatch, and every dispatch after
+// that reads them without their being sent again -- and, since the table may be
+// more than one binding, that a word is found in the piece it is actually in.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "shaders/common/candidates.glsl"
+
+// After the candidate buffer, which is binding 0.
+#define SHARED_TABLE_BINDING 1
+#include "shaders/common/shared_table.glsl"
+
+layout(local_size_x_id = 0) in;
+
+layout(push_constant) uniform Push {
+    uint count;     // invocations with work to do; the rest are the padding of
+                    // the last workgroup and must not write
+    uint capacity;  // candidates the result buffer holds
+    uint nonce;     // the first nonce of this dispatch, low word
+} push;
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.count || i >= push.capacity)
+        return;
+
+    // The nonce is the index of the eight-word group to read, which is what
+    // makes a dispatch of n nonces a check of n groups spread across the table
+    // rather than the same one n times.
+    uint group = push.nonce + i;
+
+    uint digest[8];
+    for (uint j = 0u; j < 8u; j++)
+        digest[j] = shared_word(group * 8u + j);
+
+    emit_candidate(push.capacity, push.nonce + i, digest);
+}

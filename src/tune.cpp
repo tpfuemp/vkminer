@@ -74,7 +74,7 @@ void header_words(const Algorithm &algo, const KnownAnswer &answer,
 // device failed. The queue is filled before the clock starts and kept full
 // throughout: a device with nothing queued behind what it is finishing measures
 // how quickly this thread noticed.
-double burst(Kernel &kernel, const uint32_t *header, uint32_t *nonce,
+double burst(Kernel &kernel, const uint32_t *header, uint64_t *nonce,
              double seconds)
 {
     const uint32_t depth = kernel.queue_depth();
@@ -218,6 +218,28 @@ std::unique_ptr<Kernel> build(ComputeBackend &backend, int device_index,
             return nullptr;
         }
 
+    // The vectors may each have named a different shared state, and the one
+    // left loaded is the last vector's. The race that follows hashes the first
+    // vector's header, so the kernel is pointed back at that one -- otherwise
+    // every candidate would spend its first dispatch rebuilding.
+    if (answer_count) {
+        std::vector<uint32_t> header;
+        header_words(algo, answers[0], &header);
+        if (!kernel->prepare_state(algo.state_key(header.data()))) {
+            applog(LOG_ERR, "Tuning: %s could not prepare the state its "
+                            "measurement needs", label);
+            return nullptr;
+        }
+
+        // Likewise the program: the race times dispatches, and a kernel that
+        // had not been built yet would refuse every one of them.
+        if (!kernel->prepare_program(algo.program_key(header.data()))) {
+            applog(LOG_ERR, "Tuning: %s could not build the kernel its "
+                            "measurement needs", label);
+            return nullptr;
+        }
+    }
+
     return kernel;
 }
 
@@ -228,7 +250,7 @@ std::unique_ptr<Kernel> build(ComputeBackend &backend, int device_index,
 // was tried first. That is bias, not noise -- more samples do not remove it and
 // only ordering does.
 int race(int device_index, std::vector<Candidate> &candidates,
-         const uint32_t *header, uint32_t *nonce)
+         const uint32_t *header, uint64_t *nonce)
 {
     for (Candidate &c : candidates)
         if (burst(*c.kernel, header, nonce, kWarmupSeconds) < 0.)
@@ -299,8 +321,8 @@ std::vector<uint32_t> local_sizes(const DeviceInfo &info)
 }
 
 // Kept short: the whole range is a fifth of a second of latency at a job
-// change, and pipelining's gain turned out to be under one percent -- inside
-// kMargin, so this pass mostly confirms the default.
+// change, and deeper queues buy less than kMargin, so this pass mostly
+// confirms the default.
 std::vector<uint32_t> queue_depths()
 {
     return {1, 2, 3, 4};
@@ -314,7 +336,7 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
 
     std::vector<uint32_t> header;
     header_words(algo, answers[0], &header);
-    uint32_t nonce = 0;
+    uint64_t nonce = 0;
 
     const auto started = std::chrono::steady_clock::now();
 

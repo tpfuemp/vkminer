@@ -14,7 +14,14 @@
 # miner is already proven to assemble into the right eighty bytes. Any parse
 # failure here is therefore the server's fault, not the miner's.
 #
-#   python3 stratum_server.py --port 3333 --drop-after 8 --drops 2
+#  python3 stratum_server.py --port 3333 --drop-after 8 --drops 2
+#
+# It speaks either dialect. --dialect progpow serves the job from
+# stratum_kawpow_kat.cpp instead: a header the pool has already hashed, a block
+# height, a 256-bit target pushed with mining.set_target, and a five-field
+# submit with a mix hash in it. That job is served the way the dialect's own
+# trap is set -- the target arrives before the first notify, which is the order
+# that made a sibling port read its jobs as some other dialect's.
 #
 # Every event goes to stdout as `SERVER <event> <detail>` so a driver can assert
 # on the sequence rather than on timing. Shares are sampled, with a total per
@@ -50,6 +57,27 @@ VERSION = "00000000"
 NBITS = "1a008a57"
 NTIME = "6a725843"
 
+# ---------------------------------------------------------- the other dialect
+#
+# ProgPoW 0.9.4's published block 99, which is the job stratum_kawpow_kat.cpp
+# proves this miner assembles and hashes correctly. Serving a vector rather than
+# an invented job means a miner that mines it can be checked against a number
+# somebody else computed, here and in that test.
+#
+# The prefix is two bytes because a KawPoW nonce is 64 bits of which the miner
+# walks 48. A pool that keeps a different number of them is refused by the
+# miner, which is a case worth having and not the default one.
+PROGPOW_PREFIX = "8007"
+PROGPOW_HEADER = \
+    "de37e1824c86d35d154cf65a88de6d9286aec4f7f10c3fc9f0fa1bcc2687188d"
+PROGPOW_SEED = "00" * 32       # epoch 0, which is what height 99 is in
+PROGPOW_HEIGHT = 99
+PROGPOW_NBITS = "1d00ffff"
+
+# Loose enough that a GPU submits within a few seconds of starting; vardiff
+# tightens it from there, the same way it does with a difficulty.
+PROGPOW_TARGET = "0000ffff" + "0" * 56
+
 
 def log(event, detail=""):
     print(f"SERVER {event} {detail}".rstrip(), flush=True)
@@ -67,6 +95,15 @@ class Client:
         self.shares = 0
         self.authorized = False
         self.diff = opts.diff
+        self.progpow = opts.dialect == "progpow"
+        # The 256-bit target this dialect states outright, as a number so that
+        # vardiff can move it. There is no difficulty in it to move instead.
+        self.target = int(opts.target, 16)
+        # Which job ids were actually sent. A share for a job the pool never
+        # issued is a miner mining something it made up, and looks like nothing
+        # else in the log.
+        self.job_ids = set()
+        self.bad = 0
         # The window the share rate is measured over, restarted at every
         # retarget so that a difficulty already raised is not re-raised on the
         # strength of the shares that provoked it.
@@ -90,6 +127,16 @@ class Client:
         self.send({"id": None, "method": "mining.set_difficulty",
                    "params": [diff]})
         log("difficulty", f"{diff:g}")
+
+    def set_target(self, target):
+        """The other dialect's way of saying the same thing, and the method this
+        whole file exists to send at an awkward moment: all 256 bits of the
+        share target, in one string, with no difficulty anywhere near it."""
+        self.target = max(target, 1)
+        self.settle_until = time.time() + self.SETTLE
+        self.send({"id": None, "method": "mining.set_target",
+                   "params": [f"{self.target:064x}"]})
+        log("target", f"{self.target:064x}")
 
     def retarget(self):
         """Vardiff, for the reason real pools have it. A difficulty that gives a
@@ -122,7 +169,12 @@ class Client:
         # so an overshoot costs one step rather than a slow climb behind a card
         # that is already flooding.
         step = 2. ** math.ceil(math.log2(rate / self.opts.share_target))
-        self.set_difficulty(self.diff * step)
+        if self.progpow:
+            # Harder means smaller here, because what is being moved is the
+            # target itself rather than a difficulty to divide one out of.
+            self.set_target(int(self.target / step))
+        else:
+            self.set_difficulty(self.diff * step)
         # The miner picks up a difficulty at the next job, so one goes out now.
         # Without it the new value sits unused until the job interval elapses,
         # which at these rates is thousands more shares.
@@ -132,14 +184,78 @@ class Client:
         """A fresh job. Only ntime moves, which is enough to make it a new job
         and keeps every other field the captured, known-good one."""
         self.jobs += 1
+        job_id = f"job{self.jobs:04x}"
+        self.job_ids.add(job_id)
+
+        if self.progpow:
+            # Seven parameters, none of them a coinbase, and the height among
+            # them: it is the only thing in the job that says which epoch and
+            # which program to mine it with.
+            #
+            # The target field is left empty unless asked for, so that the job
+            # is mined at whatever the last mining.set_target said. That is the
+            # arrangement the dialect gets wrong most easily and the one a pool
+            # which pushes a target actually runs.
+            height = PROGPOW_HEIGHT + (self.jobs - 1) * self.opts.height_step
+            target = f"{self.target:064x}" if self.opts.target_in_job else ""
+            self.send({
+                "id": None,
+                "method": "mining.notify",
+                "params": [job_id, PROGPOW_HEADER, PROGPOW_SEED, target, clean,
+                           height, PROGPOW_NBITS],
+            })
+            log("notify", f"{job_id} height={height}")
+            return
+
         ntime = format(int(NTIME, 16) + self.jobs, "08x")
         self.send({
             "id": None,
             "method": "mining.notify",
-            "params": [f"job{self.jobs:04x}", PREVHASH, COINB1, COINB2,
+            "params": [job_id, PREVHASH, COINB1, COINB2,
                        MERKLE_BRANCH, VERSION, NBITS, ntime, clean],
         })
-        log("notify", f"job{self.jobs:04x}")
+        log("notify", job_id)
+
+    def bad_share(self, params):
+        """Why this submission is not a share, or None if it is one.
+
+        Only the ProgPoW dialect is checked this closely, because only it has
+        fields a pool would silently reject: a nonce whose top bytes are not the
+        ones this pool handed out, a header hash belonging to no job it sent, or
+        a mix hash left at zero. Each of those is a session of rejects with a
+        perfectly correct kernel underneath, and each is invisible from the
+        miner's own log."""
+        if not self.progpow:
+            return None
+
+        if len(params) != 5:
+            return f"{len(params)} parameters, and a ProgPoW share has five"
+
+        _, job_id, nonce, header, mix = params
+        for name, field, digits in (("nonce", nonce, 16),
+                                    ("header hash", header, 64),
+                                    ("mix hash", mix, 64)):
+            if not isinstance(field, str) or not field.startswith("0x"):
+                return f"the {name} is not an 0x-prefixed string: {field!r}"
+            body = field[2:]
+            if len(body) != digits:
+                return (f"the {name} is {len(body)} hex digits, "
+                        f"and it is {digits}")
+            try:
+                int(body, 16)
+            except ValueError:
+                return f"the {name} is not hex: {field!r}"
+
+        if job_id not in self.job_ids:
+            return f"job {job_id!r}, which this pool never sent"
+        if nonce[2:6] != PROGPOW_PREFIX:
+            return (f"nonce {nonce} is outside the prefix "
+                    f"0x{PROGPOW_PREFIX} this pool assigned")
+        if header[2:] != PROGPOW_HEADER:
+            return f"header hash {header} belongs to no job this pool sent"
+        if int(mix[2:], 16) == 0:
+            return "the mix hash is zero, so the pool cannot re-check the share"
+        return None
 
     def handle(self, msg):
         method = msg.get("method")
@@ -147,6 +263,13 @@ class Client:
 
         if method == "mining.subscribe":
             log("subscribe")
+            if self.progpow:
+                # Two elements, and the second is the whole of what the miner
+                # gets: the top of the nonce. No extranonce2 size, because there
+                # is no coinbase for one to roll.
+                self.send({"id": mid, "error": None,
+                           "result": [None, PROGPOW_PREFIX]})
+                return
             self.send({"id": mid, "error": None, "result": [
                 [["mining.set_difficulty", "1"], ["mining.notify", "1"]],
                 EXTRANONCE1, EXTRANONCE2_SIZE]})
@@ -155,13 +278,25 @@ class Client:
             self.authorized = True
             self.send({"id": mid, "error": None, "result": True})
         elif method == "mining.submit":
+            params = msg.get("params", [])
+            reason = self.bad_share(params)
+            if reason:
+                # Refused and counted, not tolerated. A pool that accepts a
+                # malformed share is how a miner ships one for a whole session
+                # without anybody noticing.
+                self.bad += 1
+                log("badshare", reason)
+                self.send({"id": mid, "error": [23, reason, None],
+                           "result": False})
+                return
+
             self.shares += 1
             # Not one line per share. A fast device submits thousands in a
             # twenty-second case, and a driver that collects this output has to
             # read all of it or block the server inside this very print.
             if self.shares == 1 or self.shares % 100 == 0:
-                log("share",
-                    f"#{self.shares} nonce={msg.get('params', ['']*5)[4]}")
+                nonce = params[2] if self.progpow else params[4]
+                log("share", f"#{self.shares} nonce={nonce}")
             self.send({"id": mid, "error": None, "result": True})
             self.retarget()
         elif method in ("mining.extranonce.subscribe",
@@ -219,8 +354,10 @@ def serve_one(conn, addr, opts, session):
     try:
         serve_session(c, opts, session)
     finally:
-        log("session", f"#{session} took {c.shares} share(s) at difficulty "
-                       f"{c.diff:g}")
+        at = (f"target {c.target:064x}" if c.progpow
+              else f"difficulty {c.diff:g}")
+        log("session", f"#{session} took {c.shares} share(s) at {at}, "
+                       f"{c.bad} refused")
 
 
 def serve_session(c, opts, session):
@@ -232,7 +369,23 @@ def serve_session(c, opts, session):
     if not c.authorized:
         log("gone", "never authorized")
         return
-    c.set_difficulty(opts.diff)
+    # The target goes out before the first job, on purpose. This is the
+    # order that broke a sibling port: it read the arrival of mining.set_target
+    # as evidence about which dialect the pool spoke and rewired its notify
+    # parser, so every job after one of these was parsed as something else.
+    # Serving it this way round means a miner with that bug fails here rather
+    # than against the first pool that pushes targets.
+    if opts.dialect == "progpow":
+        c.set_target(c.target)
+    elif opts.set_target_first:
+        # The same trap sprung on the dialect that has no use for the method:
+        # a Bitcoin job following a set_target must still be read as a Bitcoin
+        # job. The difficulty that follows is what the miner actually mines at.
+        c.send({"id": None, "method": "mining.set_target",
+                "params": [f"{int(opts.target, 16):064x}"]})
+        log("target", opts.target)
+    if opts.dialect != "progpow":
+        c.set_difficulty(opts.diff)
     c.notify()
     # The rate window starts at the first job, not at accept: handshake seconds
     # produced no shares and would drag the first measured rate below target.
@@ -277,6 +430,22 @@ def serve_session(c, opts, session):
 def main():
     p = argparse.ArgumentParser(description="a Stratum server that misbehaves")
     p.add_argument("--port", type=int, default=3333)
+    p.add_argument("--dialect", default="bitcoin",
+                   choices=["bitcoin", "progpow"],
+                   help="which job this pool serves: a coinbase to build a "
+                        "header from, or a header it has already hashed")
+    p.add_argument("--target", default=PROGPOW_TARGET,
+                   help="the 256-bit share target for the ProgPoW dialect, as "
+                        "64 hex digits; also what --set-target-first pushes")
+    p.add_argument("--target-in-job", action="store_true",
+                   help="state the target in every notify rather than leaving "
+                        "the job to be mined at the standing one")
+    p.add_argument("--height-step", type=int, default=0,
+                   help="how far the block height moves per job; 3 crosses a "
+                        "ProgPoW period, which is a new program to compile")
+    p.add_argument("--set-target-first", action="store_true",
+                   help="push a mining.set_target before the first Bitcoin "
+                        "job, which must not change how that job is read")
     p.add_argument("--diff", type=float, default=0.01,
                    help="starting stratum difficulty; low so shares arrive "
                         "quickly on a slow device")

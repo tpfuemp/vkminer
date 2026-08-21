@@ -16,7 +16,7 @@
 // the value the reference says it should. The first catches a kernel that does
 // not read the word at all; the second catches one that reads it wrongly.
 //
-// ⚠️ Perturbation is the only way to cover some of those words, which is what
+// Perturbation is the only way to cover some of those words, which is what
 // motivated the file. A valid block hash has leading zeros, and in wire order
 // those land at the *end* of the previous-block field: header word 8 is
 // 0x00000000 in both KAT vectors and in every mainnet header that will ever be
@@ -105,7 +105,7 @@ void print_hash(const char *label, const uint32_t *hash)
 // answer the question -- a failed dispatch, or a candidate count that says the
 // kernel is not doing what this test assumes -- and it has already been logged.
 bool device_digest(vkminer::Kernel &kernel, const uint32_t *header,
-                   uint32_t nonce, uint32_t out[8])
+                   uint64_t nonce, uint32_t out[8])
 {
     if (!kernel.dispatch(header, kOpenTarget, nonce, 1)) {
         fail("the kernel refused a dispatch of one nonce");
@@ -125,8 +125,9 @@ bool device_digest(vkminer::Kernel &kernel, const uint32_t *header,
         return false;
     }
     if (found[0].nonce != nonce) {
-        fail("asked for nonce %08x and the device answered about %08x", nonce,
-             found[0].nonce);
+        fail("asked for nonce %s and the device answered about %s",
+             vkminer::nonce_hex(nonce).c_str(),
+             vkminer::nonce_hex(found[0].nonce).c_str());
         return false;
     }
 

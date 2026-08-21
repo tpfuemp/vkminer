@@ -5,7 +5,7 @@
 // compresses it once per dispatch and sends the chaining value; what is left
 // here is a single compression per nonce.
 //
-// ⚠️ The byte order is the mirror image of sha256d.comp's. SHA-256 reads its
+// The byte order is the mirror image of sha256d.comp's. SHA-256 reads its
 // message big-endian and struct work's words already are a big-endian read of
 // the wire, so that kernel swaps nothing in. BLAKE2s reads its message
 // little-endian, so every message word is the byte reversal of the header word
@@ -55,7 +55,7 @@ void main()
     uint v[16];
     BLAKE2S_INIT(v, push.midstate, 80u, true);
 
-    // Ten rounds, each line one round's sigma permutation (RFC 7693 §2.7)
+    // Ten rounds, each line one round's sigma permutation (RFC 7693 sec. 2.7)
     // applied to the four words above. Generated from the table, not typed.
     BLAKE2S_ROUND(v, m0, m1, m2, m3,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z);
     BLAKE2S_ROUND(v,  Z,  Z,  Z,  Z,  Z,  Z,  Z,  Z, m1,  Z, m0, m2,  Z,  Z,  Z, m3);

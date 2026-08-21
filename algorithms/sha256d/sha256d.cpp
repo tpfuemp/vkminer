@@ -38,7 +38,7 @@ namespace {
 //
 // 124 bytes against a guaranteed minimum of 128, so this still fits on every
 // device Vulkan allows to exist, but it no longer fits with room to spare.
-// ⚠️ Anything added here from now on has to displace something, or move out of
+// Anything added here from now on has to displace something, or move out of
 // push constants entirely. The asserts below are not ceremony: the GLSL and
 // this struct are one definition written in two languages, and nothing else
 // would notice a word inserted in one of them.
@@ -202,7 +202,10 @@ public:
                                    push.midstate, tail);
 
         std::memcpy(push.target, dispatch.target, sizeof push.target);
-        push.nonce_start = dispatch.nonce_start;
+        // The low half, because this kernel's nonce is one header word and the
+        // range it is a base for is 64 bits wide -- the same halving hash()
+        // makes, and the reason the two agree about which nonces those are.
+        push.nonce_start = static_cast<uint32_t>(dispatch.nonce_start);
         push.count = dispatch.count;
         push.capacity = dispatch.capacity;
 
@@ -210,14 +213,16 @@ public:
         return sizeof push;
     }
 
-    void hash(const uint32_t *header, uint32_t nonce,
+    void hash(const uint32_t *header, uint64_t nonce,
               uint32_t out[8]) const override
     {
-        // 80 bytes: 19 header words as the pool sent them, then the nonce.
+        // 80 bytes: 19 header words as the pool sent them, then the nonce --
+        // which is one of those words, so this algorithm's share of the 64-bit
+        // nonce the two axes carry is its low half.
         unsigned char data[80];
         for (size_t i = 0; i < 19; i++)
             be32enc(data + i * 4, header[i]);
-        be32enc(data + 19 * 4, nonce);
+        be32enc(data + 19 * 4, static_cast<uint32_t>(nonce));
 
         sha256d(out, data, sizeof data);
     }

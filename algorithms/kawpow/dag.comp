@@ -1,0 +1,113 @@
+// The Ethash/KawPoW DAG, generated on the device.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// One invocation makes one 64-byte item: read the light cache item it starts
+// from, keccak it, mix in 512 more cache items chosen by the mix itself, and
+// keccak the result. That is a hundred-odd hashes per item and a few gigabytes
+// of items, which is why this is not done on the host -- a CPU takes minutes
+// per epoch and the card that is about to read the table takes seconds.
+//
+// It writes the shared buffer and is never dispatched again once the buffer is
+// full; the mining kernel only ever reads what this left behind.
+//
+// Nothing here is a nonce and nothing here is a candidate. The push block
+// says which items to make and where to put them, and an invocation past the
+// end of the slice writes nothing -- a workgroup is padded to its width and the
+// items beyond `count` belong to the next slice or to nobody.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+// 2x32 lanes, deliberately: this must run on every device that can mine, and
+// shaderInt64 is optional. The pass costs seconds a day and is not worth a
+// second module -- see the warning in sha3.glsl.
+#include "shaders/common/sha3.glsl"
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, set = 0, binding = 0) writeonly buffer Dag {
+    uint word[];
+} dag;
+
+layout(std430, set = 0, binding = 1) readonly buffer Cache {
+    uint word[];
+} cache;
+
+layout(push_constant) uniform Push {
+    uint count;        // items this dispatch writes; the padding must not
+    uint first;        // DAG index of the first of them
+    uint slot;         // item index in the buffer bound here where they land
+    uint cache_items;  // 64-byte items in the light cache
+} push;
+
+// Words in a 64-byte item, which is both a cache item and a DAG item.
+const uint kItemWords = 16u;
+
+// Cache items mixed into each DAG item. The number is the algorithm's, not a
+// tuning knob: 512 is what the network computes and 511 is a different DAG.
+const uint kParents = 512u;
+
+uint fnv1(uint u, uint v)
+{
+    return (u * 0x01000193u) ^ v;
+}
+
+// Keccak-512 of exactly 64 bytes, in place over 16 little-endian words.
+//
+// The rate is 72 bytes, so the whole input fits in one block with room to
+// spare: lanes 0..7 are the message, and the padding is the 0x01 that follows
+// it at byte 64 and the 0x80 in the last byte of the rate at byte 71 -- which
+// land in the low and high halves of lane 8 and nowhere else.
+void keccak512(inout uint m[16])
+{
+    KLANE a[25];
+    for (int i = 0; i < 8; i++)
+        a[i] = klane(m[2 * i], m[2 * i + 1]);
+    a[8] = klane(0x00000001u, 0x80000000u);
+    for (int i = 9; i < 25; i++)
+        a[i] = klane(0u, 0u);
+
+    sha3_keccakf(a);
+
+    // 512 bits of output is eight lanes, which is well inside the rate: no
+    // second squeeze, no second permutation.
+    for (int i = 0; i < 8; i++) {
+        m[2 * i]     = klo(a[i]);
+        m[2 * i + 1] = khi(a[i]);
+    }
+}
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= push.count)
+        return;
+
+    uint index = push.first + i;
+
+    // The item this one grows out of, with its own index folded into the first
+    // word so that two items from the same cache entry do not start alike.
+    uint mix[16];
+    uint base = (index % push.cache_items) * kItemWords;
+    for (uint j = 0u; j < kItemWords; j++)
+        mix[j] = cache.word[base + j];
+    mix[0] ^= index;
+    keccak512(mix);
+
+    // Each round picks a parent from the mix's own state, so the reads are
+    // data-dependent and cannot be prefetched -- which is the property the
+    // whole construction exists for.
+    for (uint r = 0u; r < kParents; r++) {
+        uint t = fnv1(index ^ r, mix[r % kItemWords]);
+        uint parent = (t % push.cache_items) * kItemWords;
+        for (uint j = 0u; j < kItemWords; j++)
+            mix[j] = fnv1(mix[j], cache.word[parent + j]);
+    }
+
+    keccak512(mix);
+
+    uint out_base = (push.slot + i) * kItemWords;
+    for (uint j = 0u; j < kItemWords; j++)
+        dag.word[out_base + j] = mix[j];
+}

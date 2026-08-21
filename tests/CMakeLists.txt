@@ -35,12 +35,46 @@ target_link_libraries(sha3t_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME sha3t_kat COMMAND sha3t_kat)
 
+# The ProgPoW host reference, which is not an algorithm here yet and is checked
+# anyway: it is the reference a future kernel would be judged against, the
+# vendored code is only worth what this test says it is, and none of it needs a
+# device. It builds five light caches -- three seconds on the dev host, more on
+# the aarch64 box, and much the most work of any test here that runs on the CPU
+# alone, which is what the timeout is sized for.
+add_executable(progpow_kat progpow_kat.cpp)
+target_link_libraries(progpow_kat PRIVATE ethash vkminer_warnings)
+add_test(NAME progpow_kat COMMAND progpow_kat)
+set_tests_properties(progpow_kat PROPERTIES TIMEOUT 300)
+
+# The same thirteen vectors again, from the other side: KawPoW's inner loop
+# rewritten as a program that is generated once per period and then interpreted,
+# which is the only form sixteen invocations in lockstep can run. The test above
+# says the vendored reference is right; this one says the restructuring the
+# kernel needs does not change the answer -- on the host, where a disagreement
+# has one new implementation in it rather than two. Same five light caches, so
+# the same timeout.
+add_executable(kawpow_program_kat kawpow_program_kat.cpp)
+target_link_libraries(kawpow_program_kat PRIVATE
+    vkminer_algorithms ethash vkminer_warnings Threads::Threads)
+add_test(NAME kawpow_program_kat COMMAND kawpow_program_kat)
+set_tests_properties(kawpow_program_kat PROPERTIES TIMEOUT 300)
+
 # One level up again: not whether a header hashes correctly, but whether a
 # mining.notify turns into the right header in the first place.
 add_executable(stratum_header_kat stratum_header_kat.cpp)
 target_link_libraries(stratum_header_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME stratum_header_kat COMMAND stratum_header_kat)
+
+# The same level, for the dialect where there is no header to assemble: the
+# pool's own hash of one, a block height, a nonce prefix and a mix hash going
+# back. Needs no device -- everything a KawPoW pool can be misunderstood about
+# happens before the first dispatch.
+add_executable(stratum_kawpow_kat stratum_kawpow_kat.cpp)
+target_link_libraries(stratum_kawpow_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME stratum_kawpow_kat COMMAND stratum_kawpow_kat)
+set_tests_properties(stratum_kawpow_kat PROPERTIES TIMEOUT 300)
 
 # The tuning file: whether an entry comes back only for the device, driver,
 # algorithm and shader it was measured on. Needs no GPU, because what is being
@@ -78,6 +112,22 @@ if(Python3_Interpreter_FOUND)
         --miner "$<TARGET_FILE:vkminer>" --backend null)
     set_tests_properties(reconnect
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS slow)
+
+    # The other stratum, against the same pool taught to serve it. A KawPoW
+    # pool sends the hash of a header rather than a coinbase, pushes a 256-bit
+    # target with a method of its own, and reads a five-field submit -- and the
+    # arrival of that method must not change how a job is parsed, in either
+    # dialect. stratum_kawpow_kat proves the parsing without a socket; this
+    # proves the miner gets there with one.
+    #
+    # Runs on the null backend, so it needs no GPU and finds no shares; add
+    # --backend vulkan --require-shares by hand for the submit path. Kept out of
+    # the slow label because a dialect regression should show up in the fast
+    # suite, at the cost of half a minute.
+    add_test(NAME dialect COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/dialect_test.py"
+        --miner "$<TARGET_FILE:vkminer>" --backend null --seconds 10)
+    set_tests_properties(dialect PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # A job id is not unique. Pools that switch between coins re-send one, and
     # the miner has to come back to it with a coinbase it has not used before or
@@ -143,6 +193,56 @@ if(VKMINER_VK_SMOKE_SPV)
     set_tests_properties(vk_smoke PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
+# Shared device state, through the backend's real kernel path with an algorithm
+# written for the purpose. Same conditions as vk_smoke: a device, or a SKIP.
+if(VKMINER_SHARED_STATE_SPV)
+    add_executable(shared_state_test shared_state_test.cpp)
+    target_link_libraries(shared_state_test PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    target_compile_definitions(shared_state_test PRIVATE
+        SHARED_STATE_SPV="${VKMINER_SHARED_STATE_SPV}")
+    add_dependencies(shared_state_test vkminer_shader_shared_state)
+
+    add_custom_command(TARGET shared_state_test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${VKMINER_SHARED_STATE_SPV}"
+                "$<TARGET_FILE_DIR:shared_state_test>")
+
+    add_test(NAME shared_state COMMAND shared_state_test)
+    set_tests_properties(shared_state PROPERTIES SKIP_RETURN_CODE 77
+                                                 TIMEOUT 600)
+
+    # The DAG generation kernel against the host reference. Two shaders: the
+    # one under test, which writes the shared buffer before any dispatch, and
+    # the shared-state probe above, which is reused unchanged to read it back
+    # -- a window of DAG is a table of digest-shaped words like any other.
+    #
+    # Not labelled slow, though it builds a light cache on the host, generates
+    # eight thousand items on the device and recomputes every one of them on
+    # the CPU to compare: it is seconds on a software rasterizer, and it is the
+    # only thing that says the DAG kernel is right. The generous timeout is for
+    # the aarch64 box, where the light cache alone is most of it.
+    if(VKMINER_DAG_SPV)
+        add_executable(dag_test dag_test.cpp)
+        target_link_libraries(dag_test PRIVATE
+            vkminer_backends vkminer_warnings Threads::Threads)
+        target_compile_definitions(dag_test PRIVATE
+            DAG_SPV="${VKMINER_DAG_SPV}"
+            SHARED_STATE_SPV="${VKMINER_SHARED_STATE_SPV}")
+        add_dependencies(dag_test
+            vkminer_shader_kernels vkminer_shader_shared_state)
+
+        add_custom_command(TARGET dag_test POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${VKMINER_DAG_SPV}" "${VKMINER_SHARED_STATE_SPV}"
+                    "$<TARGET_FILE_DIR:dag_test>")
+
+        add_test(NAME dag_test COMMAND dag_test)
+        set_tests_properties(dag_test PROPERTIES SKIP_RETURN_CODE 77
+                                                 TIMEOUT 900)
+    endif()
+endif()
+
 # The shader against the scalar reference, over a nonce range. Needs the
 # embedded SPIR-V, so it exists only where the shaders were compiled; it finds
 # its own device and SKIPs when there is none. The generous timeout is for the
@@ -183,6 +283,38 @@ if(TARGET vkminer_shaders)
     # too, so a run that took the 64-bit module anyway fails validation.
     add_test(NAME diff_test_sha3t32 COMMAND diff_test sha3t 100000 --no-int64)
     set_tests_properties(diff_test_sha3t32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # The fifth algorithm, which does not go through diff_test: KawPoW hashes
+    # against a gigabyte of DAG, and a differential run that generated one would
+    # be measuring the setup pass as much as the kernel. This test uploads a
+    # small host-built table instead, so the only thing it can disagree about is
+    # the hash -- and it is the first test of a kernel where sixteen invocations
+    # cooperate on one nonce.
+    #
+    # Not labelled slow: the host's half is 256 DAG items per nonce recomputed
+    # from a light cache, which is a few minutes' worth only if the range is
+    # made much larger than the default. The timeout is for the aarch64 box,
+    # where building epoch 0's light cache is most of the run.
+    add_executable(kawpow_test kawpow_test.cpp)
+    target_link_libraries(kawpow_test PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    add_test(NAME kawpow_test COMMAND kawpow_test 256)
+    set_tests_properties(kawpow_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # And the other KawPoW kernel: the one whose program is compiled into the
+    # pipeline rather than read out of a buffer. It hashes the same nonces both
+    # ways and against the host, then crosses a period boundary -- which is the
+    # only place a kernel that is rebuilt per period can go wrong invisibly,
+    # because a stale pipeline keeps returning perfectly well-formed digests.
+    #
+    # A smaller range than kawpow_test's: every nonce is hashed on the host
+    # twice, once per period, and that is the slow half.
+    add_executable(kawpow_spec_test kawpow_spec_test.cpp)
+    target_link_libraries(kawpow_spec_test PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    add_test(NAME kawpow_spec_test COMMAND kawpow_spec_test 64)
+    set_tests_properties(kawpow_spec_test
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
     # The same range with the queue held to one dispatch -- the path

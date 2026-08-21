@@ -4,6 +4,7 @@
 #include "algorithms/registry.h"
 
 #include "algorithms/blake2s/blake2s.h"
+#include "algorithms/kawpow/kawpow.h"
 #include "algorithms/scrypt/scrypt.h"
 #include "algorithms/sha256d/sha256d.h"
 #include "algorithms/sha3t/sha3t.h"
@@ -23,11 +24,24 @@ struct Entry {
     std::unique_ptr<Algorithm> (*make)();
 };
 
+// KawPoW starts at epoch zero and moves to the job's on the first notify --
+// see kawpow.h. Nothing has been built from it at this point, so the starting
+// value costs nothing; what it must not be is a guess at the current chain,
+// which would be wrong within a week and silently.
+std::unique_ptr<Algorithm> make_kawpow_default()
+{
+    return make_kawpow(0);
+}
+
 const Entry kAlgorithms[] = {
-    { "sha256d", "", make_sha256d },
-    { "blake2s", "", make_blake2s },
-    { "scrypt",  "", make_scrypt  },
-    { "sha3t",   "", make_sha3t   },
+    { "sha256d", "",       make_sha256d        },
+    { "blake2s", "",       make_blake2s        },
+    { "scrypt",  "",       make_scrypt         },
+    { "sha3t",   "",       make_sha3t          },
+    // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
+    // every other miner calls it; "progpow" is the family and is not a
+    // synonym, so it is not an alias here.
+    { "kawpow",  "",       make_kawpow_default },
 };
 
 bool same_name(const char *a, const char *b)

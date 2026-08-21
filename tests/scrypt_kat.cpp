@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Known-answer test for scrypt. It has an anchor the other two algorithms did
-// not: RFC 7914 §12 publishes vectors for the function itself, so the reference
+// not: RFC 7914 sec. 12 publishes vectors for the function itself, so the reference
 // can be checked against a standards document rather than against a chain.
 //
 // That matters because the mining parameters are anchored no better than
@@ -68,7 +68,7 @@ void print_bytes(const char *label, const unsigned char *bytes, size_t len)
     std::printf("\n");
 }
 
-// ------------------------------------------------------------- RFC 7914 §12
+// ------------------------------------------------------------- RFC 7914 sec. 12
 
 struct RfcVector {
     const char *label;
