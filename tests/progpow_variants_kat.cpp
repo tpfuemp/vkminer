@@ -15,10 +15,10 @@
 // and check_telestai_arithmetic -- together with shares their pools accepted,
 // see check_share.
 
-#include "algorithms/kawpow/kawpow_dag.h"
-#include "algorithms/kawpow/kawpow_hash.h"
-#include "algorithms/kawpow/kawpow_params.h"
-#include "algorithms/kawpow/kawpow_program.h"
+#include "algorithms/progpow/progpow_dag.h"
+#include "algorithms/progpow/progpow_hash.h"
+#include "algorithms/progpow/progpow_params.h"
+#include "algorithms/progpow/progpow_program.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -27,7 +27,7 @@
 
 namespace {
 
-namespace kp = vkminer::kawpow;
+namespace pp = vkminer::progpow;
 
 int failures = 0;
 
@@ -77,57 +77,57 @@ void put_le32(uint8_t *p, uint32_t v)
 // Four of the setup pass's 64-byte items make one 256-byte line: the kernel
 // that generates the DAG counts in items, the kernel that hashes it counts in
 // lines, and this is where the two are reconciled.
-constexpr uint32_t kItemsPerLine = kp::kLineWords / kp::kItemWords;
+constexpr uint32_t kItemsPerLine = pp::kLineWords / pp::kItemWords;
 
 // The dataset computed from the light cache an item at a time, which is the
 // only way to have epoch 419's anywhere near a host. The miner's own
 // dataset_item, deliberately: it is where the seed epoch and the size the DAG
 // is taken modulo come apart, and those are two of the constants under test.
-class ReferenceLines final : public kp::DagLines {
+class ReferenceLines final : public pp::DagLines {
 public:
-    explicit ReferenceLines(const kp::Epochs &epochs) : epochs_(epochs) {}
+    explicit ReferenceLines(const pp::Epochs &epochs) : epochs_(epochs) {}
 
-    bool line(uint64_t index, uint32_t out[kp::kLineWords]) const override
+    bool line(uint64_t index, uint32_t out[pp::kLineWords]) const override
     {
         for (uint32_t i = 0; i < kItemsPerLine; i++)
-            if (!kp::dataset_item(epochs_, index * kItemsPerLine + i,
-                                  out + i * kp::kItemWords))
+            if (!pp::dataset_item(epochs_, index * kItemsPerLine + i,
+                                  out + i * pp::kItemWords))
                 return false;
         return true;
     }
 
 private:
-    kp::Epochs epochs_;
+    pp::Epochs epochs_;
 };
 
 // One block, start to finish, through the interpreter the miner uses. False
 // only if the dataset could not be produced, which is a small machine and not a
 // wrong answer.
-bool hash_block(const kp::Params &fork, uint64_t block,
+bool hash_block(const pp::Params &fork, uint64_t block,
                 const uint8_t header[32], uint64_t nonce, uint8_t mix_out[32],
                 uint8_t final_out[32])
 {
-    const kp::Epochs epochs = kp::epochs_of(fork, block);
+    const pp::Epochs epochs = pp::epochs_of(fork, block);
 
     // The 16 KiB the cache operations read is the first 16 KiB of the DAG, so
     // it is the first 256 items and not a separate table.
-    uint32_t l1[kp::kL1Words];
-    for (uint32_t i = 0; i < kp::kL1Words / kp::kItemWords; i++)
-        if (!kp::dataset_item(epochs, i, l1 + i * kp::kItemWords))
+    uint32_t l1[pp::kL1Words];
+    for (uint32_t i = 0; i < pp::kL1Words / pp::kItemWords; i++)
+        if (!pp::dataset_item(epochs, i, l1 + i * pp::kItemWords))
             return false;
 
     uint32_t words[8];
     for (uint32_t i = 0; i < 8; i++)
         words[i] = le32(header + i * 4);
 
-    kp::Program program;
-    kp::build_program(fork, kp::period_of(fork, block), &program);
+    pp::Program program;
+    pp::build_program(fork, pp::period_of(fork, block), &program);
 
     const ReferenceLines lines(epochs);
-    const uint64_t dag_lines = kp::dag_items(epochs.full) / kItemsPerLine;
+    const uint64_t dag_lines = pp::dag_items(epochs.full) / kItemsPerLine;
 
-    kp::Hash out;
-    if (!kp::hash(fork, program, l1, dag_lines, lines, words, nonce, &out))
+    pp::Hash out;
+    if (!pp::hash(fork, program, l1, dag_lines, lines, words, nonce, &out))
         return false;
 
     for (uint32_t i = 0; i < 8; i++) {
@@ -428,7 +428,7 @@ std::string to_hex(const uint8_t hash[32])
     return std::string(text, 64);
 }
 
-void check_vector(const kp::Params &fork, const Vector &vector)
+void check_vector(const pp::Params &fork, const Vector &vector)
 {
     uint8_t header[32];
     uint8_t unused[32];
@@ -493,28 +493,28 @@ void check_each_constant_matters()
 
     struct Tweak {
         const char *what;
-        kp::Params params;
+        pp::Params params;
     };
 
     Tweak tweaks[] = {
-        { "epoch_length",  kp::kFiropow },
-        { "period_length", kp::kFiropow },
-        { "dag_full_off",  kp::kFiropow },
-        { "regs",          kp::kFiropow },
-        { "cache_ops",     kp::kFiropow },
-        { "math_ops",      kp::kFiropow },
-        { "the seal",      kp::kFiropow },
+        { "epoch_length",  pp::kFiropow },
+        { "period_length", pp::kFiropow },
+        { "dag_full_off",  pp::kFiropow },
+        { "regs",          pp::kFiropow },
+        { "cache_ops",     pp::kFiropow },
+        { "math_ops",      pp::kFiropow },
+        { "the seal",      pp::kFiropow },
     };
 
-    tweaks[0].params.epoch_length  = kp::kKawpow.epoch_length;
-    tweaks[1].params.period_length = kp::kKawpow.period_length;
-    tweaks[2].params.dag_full_off  = kp::kKawpow.dag_full_off;
-    tweaks[3].params.regs          = kp::kMeowpow.regs;
-    tweaks[4].params.cache_ops     = kp::kMeowpow.cache_ops;
-    tweaks[5].params.math_ops      = kp::kMeowpow.math_ops;
-    std::memcpy(tweaks[6].params.seal_seed, kp::kKawpow.seal_seed,
+    tweaks[0].params.epoch_length  = pp::kKawpow.epoch_length;
+    tweaks[1].params.period_length = pp::kKawpow.period_length;
+    tweaks[2].params.dag_full_off  = pp::kKawpow.dag_full_off;
+    tweaks[3].params.regs          = pp::kMeowpow.regs;
+    tweaks[4].params.cache_ops     = pp::kMeowpow.cache_ops;
+    tweaks[5].params.math_ops      = pp::kMeowpow.math_ops;
+    std::memcpy(tweaks[6].params.seal_seed, pp::kKawpow.seal_seed,
                 sizeof tweaks[6].params.seal_seed);
-    std::memcpy(tweaks[6].params.seal_final, kp::kKawpow.seal_final,
+    std::memcpy(tweaks[6].params.seal_final, pp::kKawpow.seal_final,
                 sizeof tweaks[6].params.seal_final);
 
     for (const Tweak &tweak : tweaks) {
@@ -543,22 +543,22 @@ void check_evrmore_arithmetic()
     constexpr uint64_t kGiB = UINT64_C(1) << 30;
 
     // The epoch boundary, from both sides.
-    if (kp::epochs_of(kp::kEvrprogpow, 11999).seed != 0 ||
-        kp::epochs_of(kp::kEvrprogpow, 12000).seed != 1 ||
-        kp::epochs_of(kp::kEvrprogpow, 24000).seed != 2)
+    if (pp::epochs_of(pp::kEvrprogpow, 11999).seed != 0 ||
+        pp::epochs_of(pp::kEvrprogpow, 12000).seed != 1 ||
+        pp::epochs_of(pp::kEvrprogpow, 24000).seed != 2)
         fail("evrprogpow: an epoch is not 12000 blocks long");
 
     // And that the offset moved the dataset without moving the seed. A fork
     // that offset both would build a correctly sized table out of the wrong
     // epoch's bytes, which has no symptom short of a rejected share.
-    const kp::Epochs at12000 = kp::epochs_of(kp::kEvrprogpow, 12000);
+    const pp::Epochs at12000 = pp::epochs_of(pp::kEvrprogpow, 12000);
     if (at12000.light != 1 || at12000.full != 257)
         fail("evrprogpow: the dataset and the seed did not come apart by 256 "
              "epochs exactly");
 
     // Evrmore's full_dataset_init_size, from the outside: the largest prime
     // number of items that fits, so just under the round number and never over.
-    const uint64_t evr = kp::dag_bytes(kp::epochs_of(kp::kEvrprogpow, 0).full);
+    const uint64_t evr = pp::dag_bytes(pp::epochs_of(pp::kEvrprogpow, 0).full);
     if (evr > 3 * kGiB || evr < 3 * kGiB - (1 << 20))
         fail("evrprogpow: epoch 0's dataset is %llu bytes, which is not the "
              "three gigabytes Evrmore starts at",
@@ -566,7 +566,7 @@ void check_evrmore_arithmetic()
 
     // The same measurement on the fork that did not move it, so that the one
     // above is a statement about Evrmore rather than about this arithmetic.
-    const uint64_t rvn = kp::dag_bytes(kp::epochs_of(kp::kKawpow, 0).full);
+    const uint64_t rvn = pp::dag_bytes(pp::epochs_of(pp::kKawpow, 0).full);
     if (rvn > kGiB || rvn < kGiB - (1 << 20))
         fail("kawpow: epoch 0's dataset is %llu bytes, which is not the one "
              "gigabyte ProgPoW starts at",
@@ -594,8 +594,8 @@ void check_meowcoin_arithmetic()
 
     // The block where the multiplier turns on, from both sides -- which also
     // pins the epoch at 7500 blocks, since that is what puts it here.
-    const kp::Epochs before = kp::epochs_of(kp::kMeowpow, 110 * 7500 - 1);
-    const kp::Epochs after  = kp::epochs_of(kp::kMeowpow, 110 * 7500);
+    const pp::Epochs before = pp::epochs_of(pp::kMeowpow, 110 * 7500 - 1);
+    const pp::Epochs after  = pp::epochs_of(pp::kMeowpow, 110 * 7500);
     if (before.seed != 109 || before.light != 109 || before.full != 109)
         fail("meowpow: epoch 109 is not built at its own size");
     if (after.seed != 110 || after.light != 440 || after.full != 440)
@@ -604,20 +604,20 @@ void check_meowcoin_arithmetic()
 
     // The size that scaling is for, in the node's own words: past four
     // gigabytes, from a last unscaled epoch that is nowhere near it.
-    if (kp::dag_bytes(after.full) <= 4 * kGiB ||
-        kp::dag_bytes(before.full) >= 2 * kGiB)
+    if (pp::dag_bytes(after.full) <= 4 * kGiB ||
+        pp::dag_bytes(before.full) >= 2 * kGiB)
         fail("meowpow: the scaled dataset is %llu bytes and the one before it "
              "%llu, which is not the step over four gigabytes Meowcoin scales "
              "for",
-             static_cast<unsigned long long>(kp::dag_bytes(after.full)),
-             static_cast<unsigned long long>(kp::dag_bytes(before.full)));
+             static_cast<unsigned long long>(pp::dag_bytes(after.full)),
+             static_cast<unsigned long long>(pp::dag_bytes(before.full)));
 
     // And the half of it that has no symptom, as two caches of exactly the same
     // length: the one this fork builds, and the one a reading that let the
     // scaled epoch through to everything would build. They have to differ.
-    uint8_t mine[kp::kItemBytes];
-    uint8_t edge[kp::kItemBytes];
-    uint8_t naive[kp::kItemBytes];
+    uint8_t mine[pp::kItemBytes];
+    uint8_t edge[pp::kItemBytes];
+    uint8_t naive[pp::kItemBytes];
 
     // Both reads of the fork's own cache before the other one replaces it: one
     // cache is kept at a time and these are 71 MiB each to build.
@@ -626,18 +626,18 @@ void check_meowcoin_arithmetic()
     // scaled epoch's cache is there and one item past it is not. That is the
     // number the seeding failure would have kept while spoiling every byte
     // behind it, which is why both halves are checked and not just one.
-    const uint64_t bytes = kp::light_cache_bytes(after.light);
-    if (!kp::light_cache(after, 0, mine, sizeof mine)) {
+    const uint64_t bytes = pp::light_cache_bytes(after.light);
+    if (!pp::light_cache(after, 0, mine, sizeof mine)) {
         fail("meowpow: no light cache -- out of memory?");
         return;
     }
-    if (!kp::light_cache(after, bytes - kp::kItemBytes, edge, sizeof edge) ||
-        kp::light_cache(after, bytes, edge, sizeof edge))
+    if (!pp::light_cache(after, bytes - pp::kItemBytes, edge, sizeof edge) ||
+        pp::light_cache(after, bytes, edge, sizeof edge))
         fail("meowpow: the light cache does not hold exactly the scaled "
              "epoch's items");
 
-    const kp::Epochs all_scaled = {after.light, after.light, after.full};
-    if (!kp::light_cache(all_scaled, 0, naive, sizeof naive)) {
+    const pp::Epochs all_scaled = {after.light, after.light, after.full};
+    if (!pp::light_cache(all_scaled, 0, naive, sizeof naive)) {
         fail("meowpow: no light cache -- out of memory?");
         return;
     }
@@ -655,7 +655,7 @@ void check_meowcoin_arithmetic()
         "276c49b87b1e9bb22100a267913eb21aea33179b251004d15a468e328d7bbb76";
 
     uint8_t seed[32];
-    kp::epoch_seed(kp::epochs_of(kp::kMeowpow, 2047808).seed, seed);
+    pp::epoch_seed(pp::epochs_of(pp::kMeowpow, 2047808).seed, seed);
     if (to_hex(seed) != kJobSeedHash) {
         fail("meowpow: the seed for the epoch of block 2047808 is not the one a "
              "pool sent with that job");
@@ -678,15 +678,15 @@ void check_telestai_arithmetic()
 {
     // The boundary from both sides, and the height the shares below were found
     // at -- which is the one the seed hash is about.
-    if (kp::epochs_of(kp::kMeraki, 27499).seed != 0 ||
-        kp::epochs_of(kp::kMeraki, 27500).seed != 1 ||
-        kp::epochs_of(kp::kMeraki, 1075797).seed != 39)
+    if (pp::epochs_of(pp::kMeraki, 27499).seed != 0 ||
+        pp::epochs_of(pp::kMeraki, 27500).seed != 1 ||
+        pp::epochs_of(pp::kMeraki, 1075797).seed != 39)
         fail("meraki: an epoch is not 27500 blocks long");
 
     // And that all three of the epoch numbers are the one epoch. This fork's
     // row is the identity sizing, so a dataset built off anything but its own
     // epoch is this table having grown an offset it does not have.
-    const kp::Epochs at = kp::epochs_of(kp::kMeraki, 1075797);
+    const pp::Epochs at = pp::epochs_of(pp::kMeraki, 1075797);
     if (at.light != at.seed || at.full != at.seed)
         fail("meraki: the dataset and the seed do not share an epoch");
 
@@ -694,7 +694,7 @@ void check_telestai_arithmetic()
         "39238891c3ff3084a1264284ac4e2bb99f55430db15300f26f5c55eca8edd3c7";
 
     uint8_t seed[32];
-    kp::epoch_seed(at.seed, seed);
+    pp::epoch_seed(at.seed, seed);
     if (to_hex(seed) != kJobSeedHash) {
         fail("meraki: the seed for the epoch of block 1075797 is not the one a "
              "pool sent with that job");
@@ -772,7 +772,7 @@ const Share kMerakiShares[] = {
      "00000003fffc0000000000000000000000000000000000000000000000000000"},
 };
 
-void check_share(const kp::Params &fork, const Share &share)
+void check_share(const pp::Params &fork, const Share &share)
 {
     uint8_t header[32];
     uint8_t unused[32];
@@ -816,8 +816,8 @@ void check_share(const kp::Params &fork, const Share &share)
 // alphabetical: swapping an epoch length or a multiplier moves the hash onto
 // another epoch's light cache, which at these sizes is tens of seconds of
 // keccak, so the nearest disagreement is also the cheapest one.
-const kp::Params *const kDonors[] = {
-    &kp::kKawpow, &kp::kEvrprogpow, &kp::kFiropow, &kp::kMeowpow, &kp::kMeraki,
+const pp::Params *const kDonors[] = {
+    &pp::kKawpow, &pp::kEvrprogpow, &pp::kFiropow, &pp::kMeowpow, &pp::kMeraki,
 };
 
 // The first fork that disagrees with this one about `field`, or null if none
@@ -825,9 +825,9 @@ const kp::Params *const kDonors[] = {
 // so a donor picked by hand can lend back a number the fork already has, and
 // the tweak then hashes the same row twice and passes without testing anything.
 template <class T>
-const kp::Params *donor_of(const kp::Params &fork, T kp::Params::*field)
+const pp::Params *donor_of(const pp::Params &fork, T pp::Params::*field)
 {
-    for (const kp::Params *donor : kDonors)
+    for (const pp::Params *donor : kDonors)
         if (fork.*field != donor->*field)
             return donor;
     return nullptr;
@@ -835,10 +835,10 @@ const kp::Params *donor_of(const kp::Params &fork, T kp::Params::*field)
 
 // Whether two rows send a block to the same dataset -- all three epoch numbers,
 // because two of them can move without the third.
-bool same_dataset(const kp::Params &a, const kp::Params &b, uint64_t block)
+bool same_dataset(const pp::Params &a, const pp::Params &b, uint64_t block)
 {
-    const kp::Epochs x = kp::epochs_of(a, block);
-    const kp::Epochs y = kp::epochs_of(b, block);
+    const pp::Epochs x = pp::epochs_of(a, block);
+    const pp::Epochs y = pp::epochs_of(b, block);
     return x.seed == y.seed && x.light == y.light && x.full == y.full;
 }
 
@@ -847,7 +847,7 @@ bool same_dataset(const kp::Params &a, const kp::Params &b, uint64_t block)
 // A share that re-derives under KawPoW's constants would say nothing about the
 // fork it was found on -- which is the trap EvrProgPow sets, since it shares
 // every number with KawPoW except the two it moved.
-void check_share_constants_matter(const kp::Params &fork, const Share &share)
+void check_share_constants_matter(const pp::Params &fork, const Share &share)
 {
     uint8_t header[32];
     uint64_t nonce = 0;
@@ -864,10 +864,10 @@ void check_share_constants_matter(const kp::Params &fork, const Share &share)
     // passes while testing nothing. So the donor is chosen by what it does to
     // this block's dataset, and failing that its factor is asked from the epoch
     // the share is on -- still somebody's factor, put where it can be read.
-    const kp::Params *scaling = nullptr;
-    kp::Params scaled = fork;
-    for (const kp::Params *donor : kDonors) {
-        kp::Params trial = fork;
+    const pp::Params *scaling = nullptr;
+    pp::Params scaled = fork;
+    for (const pp::Params *donor : kDonors) {
+        pp::Params trial = fork;
         trial.dagchange_epoch = donor->dagchange_epoch;
         trial.dag_epoch_mul   = donor->dag_epoch_mul;
         if (!same_dataset(fork, trial, share.block)) {
@@ -876,13 +876,13 @@ void check_share_constants_matter(const kp::Params &fork, const Share &share)
             break;
         }
     }
-    for (const kp::Params *donor : kDonors) {
+    for (const pp::Params *donor : kDonors) {
         if (scaling)
             break;
         if (donor->dag_epoch_mul == fork.dag_epoch_mul)
             continue;
-        kp::Params trial = fork;
-        trial.dagchange_epoch = kp::epochs_of(fork, share.block).seed;
+        pp::Params trial = fork;
+        trial.dagchange_epoch = pp::epochs_of(fork, share.block).seed;
         trial.dag_epoch_mul   = donor->dag_epoch_mul;
         if (!same_dataset(fork, trial, share.block)) {
             scaling = donor;
@@ -890,8 +890,8 @@ void check_share_constants_matter(const kp::Params &fork, const Share &share)
         }
     }
 
-    const kp::Params *seal = nullptr;
-    for (const kp::Params *donor : kDonors)
+    const pp::Params *seal = nullptr;
+    for (const pp::Params *donor : kDonors)
         if (std::memcmp(donor->seal_seed, fork.seal_seed,
                         sizeof fork.seal_seed) != 0) {
             seal = donor;
@@ -900,22 +900,22 @@ void check_share_constants_matter(const kp::Params &fork, const Share &share)
 
     struct Tweak {
         const char *what;
-        const kp::Params *donor;
-        kp::Params params;
+        const pp::Params *donor;
+        pp::Params params;
     };
 
     // In this order because the last three are the expensive ones: everything
     // above them changes the round and hashes against the cache already in
     // hand, and each of those three sends the test to another epoch.
     Tweak tweaks[] = {
-        { "regs",          donor_of(fork, &kp::Params::regs),          fork },
-        { "rounds",        donor_of(fork, &kp::Params::rounds),        fork },
-        { "cache_ops",     donor_of(fork, &kp::Params::cache_ops),     fork },
-        { "math_ops",      donor_of(fork, &kp::Params::math_ops),      fork },
-        { "period_length", donor_of(fork, &kp::Params::period_length), fork },
+        { "regs",          donor_of(fork, &pp::Params::regs),          fork },
+        { "rounds",        donor_of(fork, &pp::Params::rounds),        fork },
+        { "cache_ops",     donor_of(fork, &pp::Params::cache_ops),     fork },
+        { "math_ops",      donor_of(fork, &pp::Params::math_ops),      fork },
+        { "period_length", donor_of(fork, &pp::Params::period_length), fork },
         { "the seal",      seal,                                       fork },
-        { "dag_full_off",  donor_of(fork, &kp::Params::dag_full_off),  fork },
-        { "epoch_length",  donor_of(fork, &kp::Params::epoch_length),  fork },
+        { "dag_full_off",  donor_of(fork, &pp::Params::dag_full_off),  fork },
+        { "epoch_length",  donor_of(fork, &pp::Params::epoch_length),  fork },
         { "the dataset multiplier", scaling,                           fork },
     };
 
@@ -958,16 +958,16 @@ void check_share_constants_matter(const kp::Params &fork, const Share &share)
 // printed at the end is a claim and not a number. A fork whose row is empty is
 // reported as such rather than silently skipped.
 struct Fork {
-    const kp::Params *params;
+    const pp::Params *params;
     const Vector *vectors;
     size_t count;
 };
 
 const Fork kForks[] = {
-    { &kp::kFiropow,    kFiropow, sizeof kFiropow / sizeof kFiropow[0] },
-    { &kp::kEvrprogpow, nullptr,  0 },
-    { &kp::kMeowpow,    nullptr,  0 },
-    { &kp::kMeraki,     nullptr,  0 },
+    { &pp::kFiropow,    kFiropow, sizeof kFiropow / sizeof kFiropow[0] },
+    { &pp::kEvrprogpow, nullptr,  0 },
+    { &pp::kMeowpow,    nullptr,  0 },
+    { &pp::kMeraki,     nullptr,  0 },
 };
 
 }  // namespace
@@ -995,23 +995,23 @@ int main()
     // one light cache is kept, and these two are on epochs a hundred apart.
     const size_t evr = sizeof kEvrprogpowShares / sizeof kEvrprogpowShares[0];
     for (size_t i = 0; i < evr; i++)
-        check_share(kp::kEvrprogpow, kEvrprogpowShares[i]);
+        check_share(pp::kEvrprogpow, kEvrprogpowShares[i]);
 
     // Once, not per share: each pair sits in one epoch under one program, so
     // what the second would add is the same eight hashes again.
-    check_share_constants_matter(kp::kEvrprogpow, kEvrprogpowShares[0]);
+    check_share_constants_matter(pp::kEvrprogpow, kEvrprogpowShares[0]);
 
     const size_t mewc = sizeof kMeowpowShares / sizeof kMeowpowShares[0];
     for (size_t i = 0; i < mewc; i++)
-        check_share(kp::kMeowpow, kMeowpowShares[i]);
+        check_share(pp::kMeowpow, kMeowpowShares[i]);
 
-    check_share_constants_matter(kp::kMeowpow, kMeowpowShares[0]);
+    check_share_constants_matter(pp::kMeowpow, kMeowpowShares[0]);
 
     const size_t tls = sizeof kMerakiShares / sizeof kMerakiShares[0];
     for (size_t i = 0; i < tls; i++)
-        check_share(kp::kMeraki, kMerakiShares[i]);
+        check_share(pp::kMeraki, kMerakiShares[i]);
 
-    check_share_constants_matter(kp::kMeraki, kMerakiShares[0]);
+    check_share_constants_matter(pp::kMeraki, kMerakiShares[0]);
 
     if (failures) {
         std::printf("%d failure(s)\n", failures);

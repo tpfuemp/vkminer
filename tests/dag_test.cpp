@@ -21,7 +21,7 @@
 // buffer holds after the setup pass, and that is what the probe reports.
 
 #include "algorithms/algorithm.h"
-#include "algorithms/kawpow/kawpow_dag.h"
+#include "algorithms/progpow/progpow_dag.h"
 #include "backends/vulkan/vulkan_backend.h"
 #include "backends/vulkan/vulkan_common.h"
 #include "backends/vulkan/vulkan_pipeline.h"   // read_spirv
@@ -49,7 +49,7 @@ int api_thr_id = -1;
 
 namespace {
 
-using vkminer::kawpow::kItemWords;
+using vkminer::progpow::kItemWords;
 
 // The epoch to generate. Zero, because its light cache is the smallest there
 // is and this test is about the arithmetic rather than about the size: a
@@ -140,9 +140,9 @@ public:
     // The three epochs that number stands for. KawPoW's are all the same one;
     // this goes through the table anyway, because what is under test is the
     // path a real algorithm takes.
-    static vkminer::kawpow::Epochs epochs_of(uint64_t key)
+    static vkminer::progpow::Epochs epochs_of(uint64_t key)
     {
-        return vkminer::kawpow::epochs_for(vkminer::kawpow::kKawpow,
+        return vkminer::progpow::epochs_for(vkminer::progpow::kKawpow,
                                            epoch_of(key));
     }
 
@@ -150,7 +150,7 @@ public:
     bool setup_seed(uint64_t key, uint64_t offset, void *out,
                     size_t bytes) const override
     {
-        if (!vkminer::kawpow::light_cache(epochs_of(key), offset, out, bytes)) {
+        if (!vkminer::progpow::light_cache(epochs_of(key), offset, out, bytes)) {
             fail("the light cache for epoch %u has no %u bytes at %u",
                  epoch_of(key), static_cast<unsigned>(bytes),
                  static_cast<unsigned>(offset));
@@ -166,15 +166,15 @@ public:
     size_t setup_push(uint64_t key, uint64_t first, uint64_t slot,
                       uint32_t count, void *out, size_t capacity) const override
     {
-        if (capacity < sizeof(vkminer::kawpow::DagPush))
+        if (capacity < sizeof(vkminer::progpow::DagPush))
             return 0;
 
-        vkminer::kawpow::DagPush push;
+        vkminer::progpow::DagPush push;
         push.count = count;
         push.first = static_cast<uint32_t>(first_of(key) + first);
         push.slot = static_cast<uint32_t>(slot);
         push.cache_items =
-            vkminer::kawpow::light_cache_items(epochs_of(key).light);
+            vkminer::progpow::light_cache_items(epochs_of(key).light);
         std::memcpy(out, &push, sizeof push);
 
         slices++;
@@ -202,8 +202,8 @@ public:
         spec.shared_chunk_bytes = kPieceBytes;
         spec.setup.spirv = dag_;
         spec.setup.spirv_words = dag_words_;
-        spec.setup.push_constant_bytes = sizeof(vkminer::kawpow::DagPush);
-        spec.setup.seed_bytes = vkminer::kawpow::light_cache_bytes(kEpoch);
+        spec.setup.push_constant_bytes = sizeof(vkminer::progpow::DagPush);
+        spec.setup.seed_bytes = vkminer::progpow::light_cache_bytes(kEpoch);
         spec.setup.items = kWindowItems;
         spec.algorithm = this;
         return spec;
@@ -232,7 +232,7 @@ public:
         const uint32_t half = static_cast<uint32_t>(nonce % kGroupsPerItem);
 
         uint32_t item[kItemWords];
-        if (!vkminer::kawpow::dataset_item(epochs_of(key), index, item)) {
+        if (!vkminer::progpow::dataset_item(epochs_of(key), index, item)) {
             fail("epoch %u has no DAG item %llu", epoch_of(key),
                  static_cast<unsigned long long>(index));
             std::memset(out, 0, kGroupWords * sizeof(uint32_t));
@@ -245,7 +245,7 @@ public:
     static constexpr uint64_t window_bytes()
     {
         return static_cast<uint64_t>(kWindowItems)
-             * vkminer::kawpow::kItemBytes;
+             * vkminer::progpow::kItemBytes;
     }
 
     // What the backend has asked this algorithm for since the run began: one
@@ -348,12 +348,12 @@ bool run_device(vkminer::VulkanBackend &backend,
         return false;
     }
 
-    const uint64_t items = vkminer::kawpow::dag_items(kEpoch);
-    const uint64_t cache = vkminer::kawpow::light_cache_bytes(kEpoch);
+    const uint64_t items = vkminer::progpow::dag_items(kEpoch);
+    const uint64_t cache = vkminer::progpow::light_cache_bytes(kEpoch);
     std::printf("     epoch %u: %llu MiB of DAG in %llu items, from a %llu MiB "
                 "cache\n", kEpoch,
                 static_cast<unsigned long long>(
-                    vkminer::kawpow::dag_bytes(kEpoch) >> 20),
+                    vkminer::progpow::dag_bytes(kEpoch) >> 20),
                 static_cast<unsigned long long>(items),
                 static_cast<unsigned long long>(cache >> 20));
 

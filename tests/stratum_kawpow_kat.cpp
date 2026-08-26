@@ -26,7 +26,7 @@
 // rewired its notify parser from inside the handler -- correct against every
 // pool that never sends it, and wrong against the ones that do.
 
-#include "algorithms/kawpow/kawpow.h"
+#include "algorithms/progpow/progpow.h"
 #include "algorithms/registry.h"
 
 extern "C" {

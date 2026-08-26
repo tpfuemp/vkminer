@@ -16,12 +16,12 @@
 #ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_HASH_H__
 #define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_HASH_H__
 
-#include "algorithms/kawpow/kawpow_program.h"
+#include "algorithms/progpow/progpow_program.h"
 
 #include <cstdint>
 
 namespace vkminer {
-namespace kawpow {
+namespace progpow {
 
 // Words in the piece of dataset one round reads: sixteen lanes taking four
 // words each, which is 256 bytes and four of the 64-byte items the generation
@@ -63,7 +63,7 @@ bool hash(const Params &params, const Program &program, const uint32_t *l1,
           uint64_t dag_lines, const DagLines &dag, const uint32_t header[8],
           uint64_t nonce, Hash *out);
 
-}  // namespace kawpow
+}  // namespace progpow
 }  // namespace vkminer
 
 #endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_HASH_H__

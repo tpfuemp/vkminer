@@ -24,7 +24,7 @@
 //   rasterizer alike. A run that returned nothing would compare nothing and
 //   pass, which is the failure this file must not have.
 
-#include "algorithms/kawpow/kawpow.h"
+#include "algorithms/progpow/progpow.h"
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "backends/vulkan/vulkan_common.h"
@@ -633,7 +633,7 @@ int main(int argc, char *argv[])
     const bool kawpow = std::strcmp(name, "kawpow") == 0;
     std::unique_ptr<vkminer::Algorithm> algo =
         kawpow && !device_dag
-            ? vkminer::make_progpow_host_dag(vkminer::kawpow::kKawpow, kKawpowEpoch, kKawpowLines)
+            ? vkminer::make_progpow_host_dag(vkminer::progpow::kKawpow, kKawpowEpoch, kKawpowLines)
             : vkminer::create_algorithm(name);
     if (!algo) {
         std::printf("FAIL no algorithm called '%s'\n", name);

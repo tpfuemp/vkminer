@@ -29,7 +29,7 @@
 //   dispatch -- or a hundred of the same dispatch -- says nothing at all about
 //   the mean, however tight the error bar printed beside it looks.
 
-#include "algorithms/kawpow/kawpow.h"
+#include "algorithms/progpow/progpow.h"
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "backends/vulkan/vulkan_common.h"
@@ -546,7 +546,7 @@ int main(int argc, char *argv[])
     constexpr uint64_t kKawpowLines = 8192;
     std::unique_ptr<vkminer::Algorithm> algo =
         std::strcmp(name, "kawpow") == 0
-            ? vkminer::make_progpow_host_dag(vkminer::kawpow::kKawpow, 0, kKawpowLines)
+            ? vkminer::make_progpow_host_dag(vkminer::progpow::kKawpow, 0, kKawpowLines)
             : vkminer::create_algorithm(name);
     if (!algo) {
         std::printf("FAIL no algorithm called '%s'\n", name);

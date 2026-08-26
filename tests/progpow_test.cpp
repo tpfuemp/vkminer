@@ -24,7 +24,7 @@
 // built, so a disagreement has exactly one cause.
 
 #include "algorithms/algorithm.h"
-#include "algorithms/kawpow/kawpow.h"
+#include "algorithms/progpow/progpow.h"
 #include "backends/vulkan/vulkan_backend.h"
 #include "backends/vulkan/vulkan_common.h"
 
@@ -72,7 +72,7 @@ constexpr uint64_t kLines = 8192;
 // The epoch and the table above are the fork's only through arithmetic this
 // test deliberately does not exercise: the table is `kLines` long whoever asked
 // for it, and the line index is taken modulo that on both sides.
-const vkminer::kawpow::Params *fork_params = &vkminer::kawpow::kKawpow;
+const vkminer::progpow::Params *fork_params = &vkminer::progpow::kKawpow;
 
 // The period the two ranges below sit in, in that fork's blocks. Arbitrary and
 // fixed, so that a failure is reproducible.
@@ -357,7 +357,7 @@ int main(int argc, char *argv[])
     uint32_t nonces = kDefaultNonces;
     for (int i = 1; i < argc; i++) {
         if (!std::strcmp(argv[i], "--fork") && i + 1 < argc) {
-            fork_params = vkminer::kawpow::find(argv[++i]);
+            fork_params = vkminer::progpow::find(argv[++i]);
             if (!fork_params) {
                 std::printf("usage: %s [nonces] [--fork name]\n", argv[0]);
                 return 2;

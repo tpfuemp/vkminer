@@ -5,7 +5,7 @@
 #define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_H__
 
 #include "algorithms/algorithm.h"
-#include "algorithms/kawpow/kawpow_params.h"
+#include "algorithms/progpow/progpow_params.h"
 
 #include <memory>
 
@@ -19,7 +19,7 @@ namespace vkminer {
 // kernel is built, so crossing an epoch means a rebuilt kernel. A caller asks
 // retarget() before each job and builds one again when the answer is true,
 // which makes zero the right starting point for a miner about to connect.
-std::unique_ptr<Algorithm> make_progpow(const kawpow::Params &params,
+std::unique_ptr<Algorithm> make_progpow(const progpow::Params &params,
                                         uint32_t epoch);
 
 // The same algorithm, hashing against a table the *host* builds and uploads:
@@ -33,7 +33,7 @@ std::unique_ptr<Algorithm> make_progpow(const kawpow::Params &params,
 // `lines` must be at least 64: the first 16 KiB of the DAG is also the cache
 // the program's read operations use, and a shorter table is one the kernel
 // would index past the end of.
-std::unique_ptr<Algorithm> make_progpow_host_dag(const kawpow::Params &params,
+std::unique_ptr<Algorithm> make_progpow_host_dag(const progpow::Params &params,
                                                  uint32_t epoch,
                                                  uint64_t lines);
 

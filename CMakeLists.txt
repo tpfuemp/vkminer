@@ -226,16 +226,16 @@ add_library(vkminer_algorithms STATIC
     algorithms/blake2s/blake2s.cpp
     algorithms/scrypt/scrypt.cpp
     algorithms/sha3t/sha3t.cpp
-    algorithms/kawpow/kawpow.cpp
-    algorithms/kawpow/kawpow_dag.cpp
-    algorithms/kawpow/kawpow_hash.cpp
-    algorithms/kawpow/kawpow_params.cpp
-    algorithms/kawpow/kawpow_program.cpp)
+    algorithms/progpow/progpow.cpp
+    algorithms/progpow/progpow_dag.cpp
+    algorithms/progpow/progpow_hash.cpp
+    algorithms/progpow/progpow_params.cpp
+    algorithms/progpow/progpow_program.cpp)
 
 target_include_directories(vkminer_algorithms PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer_algorithms PUBLIC vkminer_inherited)
 # ethash for the KawPoW DAG, and privately: what it computes is the reference a
-# kernel is judged against, and nothing outside algorithms/kawpow/ has any
+# kernel is judged against, and nothing outside algorithms/progpow/ has any
 # business including it.
 target_link_libraries(vkminer_algorithms PRIVATE
     vkminer_sha256 vkminer_warnings ethash)
@@ -257,10 +257,10 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/scrypt/scrypt.comp
                               algorithms/sha3t/sha3t.comp
                               algorithms/sha3t/sha3t32.comp
-                              algorithms/kawpow/kawpow.comp
-                              algorithms/kawpow/kawpow_spec.comp
-                              algorithms/kawpow/kawpow_spec_sub.comp
-                              algorithms/kawpow/dag.comp
+                              algorithms/progpow/progpow.comp
+                              algorithms/progpow/progpow_spec.comp
+                              algorithms/progpow/progpow_spec_sub.comp
+                              algorithms/progpow/dag.comp
                       INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
                       EMBED "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_spirv.cpp")
 

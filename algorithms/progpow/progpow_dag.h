@@ -15,13 +15,13 @@
 #ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_DAG_H__
 #define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_DAG_H__
 
-#include "algorithms/kawpow/kawpow_params.h"
+#include "algorithms/progpow/progpow_params.h"
 
 #include <cstddef>
 #include <cstdint>
 
 namespace vkminer {
-namespace kawpow {
+namespace progpow {
 
 // A DAG item and a light cache item are both 64 bytes, and the kernel works in
 // 32-bit words because that is what a storage buffer of uints is.
@@ -86,7 +86,7 @@ bool light_cache(const Epochs &epochs, uint64_t offset, void *out, size_t bytes)
 // the end of that DAG.
 bool dataset_item(const Epochs &epochs, uint64_t index, uint32_t out[kItemWords]);
 
-// The push block algorithms/kawpow/dag.comp takes, one per slice of the setup
+// The push block algorithms/progpow/dag.comp takes, one per slice of the setup
 // pass. `first` is where in the DAG the slice starts and `slot` is where in the
 // buffer bound to that dispatch it lands -- the same number only when that
 // buffer is the whole DAG, which it is not on a device that would not address
@@ -98,7 +98,7 @@ struct DagPush {
     uint32_t cache_items;
 };
 
-}  // namespace kawpow
+}  // namespace progpow
 }  // namespace vkminer
 
 #endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_DAG_H__

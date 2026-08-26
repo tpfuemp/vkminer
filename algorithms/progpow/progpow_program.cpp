@@ -1,10 +1,10 @@
 // vkminer -- a Vulkan compute cryptocurrency miner.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "algorithms/kawpow/kawpow_program.h"
+#include "algorithms/progpow/progpow_program.h"
 
 namespace vkminer {
-namespace kawpow {
+namespace progpow {
 
 void build_program(const Params &params, uint64_t period, Program *out)
 {
@@ -110,5 +110,5 @@ void build_program(const Params &params, uint64_t period, Program *out)
     }
 }
 
-}  // namespace kawpow
+}  // namespace progpow
 }  // namespace vkminer

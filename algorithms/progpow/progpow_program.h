@@ -22,12 +22,12 @@
 #ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__
 #define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__
 
-#include "algorithms/kawpow/kawpow_params.h"
+#include "algorithms/progpow/progpow_params.h"
 
 #include <cstdint>
 
 namespace vkminer {
-namespace kawpow {
+namespace progpow {
 
 // The one part of the shape no fork in this family has ever moved: sixteen
 // invocations cooperate on a nonce, and that is what makes a DAG line 256
@@ -145,7 +145,7 @@ inline bool names_a_register(uint32_t i)
     return (i - kDagBase) % kDagWords == 0;             // dst
 }
 
-}  // namespace kawpow
+}  // namespace progpow
 }  // namespace vkminer
 
 #endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__

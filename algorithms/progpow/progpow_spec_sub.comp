@@ -1,14 +1,14 @@
 // KawPoW specialized, with the lanes meeting in each other's registers.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The kernel is kawpow_spec_body.glsl, the same text kawpow_spec.comp compiles;
-// the macro below is the only difference, and shaders/common/kawpow_lanes.glsl
+// The kernel is progpow_spec_body.glsl, the same text progpow_spec.comp compiles;
+// the macro below is the only difference, and shaders/common/progpow_lanes.glsl
 // is what it changes. The extensions are declared here because an #extension
 // directive belongs at the top of a compilation unit.
 //
 // This module is not portable and is not meant to be. Declaring the shuffle
 // capability at module scope is enough for a device without the feature to
-// reject the whole thing, so kawpow.cpp offers it only where the device reports
+// reject the whole thing, so progpow.cpp offers it only where the device reports
 // subgroupShuffle and a subgroup that is a whole number of sixteens -- which
 // none of the software rasterizers are. It is an optimization that gets checked
 // against the interpreter, not a peer of it.
@@ -21,4 +21,4 @@
 
 #define KAWPOW_SUBGROUP_LANES 1
 
-#include "algorithms/kawpow/kawpow_spec_body.glsl"
+#include "algorithms/progpow/progpow_spec_body.glsl"

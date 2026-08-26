@@ -2,12 +2,12 @@
 // data.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The body of the kernel, included by kawpow_spec.comp and kawpow_spec_sub.comp
+// The body of the kernel, included by progpow_spec.comp and progpow_spec_sub.comp
 // -- one text, two modules, differing in how the sixteen lanes exchange a word.
-// See shaders/common/kawpow_lanes.glsl for what that difference is and why it
+// See shaders/common/progpow_lanes.glsl for what that difference is and why it
 // cannot be a specialization constant.
 //
-// The same rounds as kawpow.comp and the same answers, spelled the other way.
+// The same rounds as progpow.comp and the same answers, spelled the other way.
 // There the program is 134 words in workgroup memory, read an index and a
 // selector at a time; here it is 134 specialization constants the driver
 // resolves at vkCreateComputePipelines, so a register index becomes a register,
@@ -19,7 +19,7 @@
 // them by a number it cannot read (Algorithm::program_key) and knows nothing
 // about periods, blocks or chains.
 //
-// Everything that is not the program is identical to kawpow.comp line for line
+// Everything that is not the program is identical to progpow.comp line for line
 // -- the keccak, the seeding, the lane exchange, the fold and the emit. The two
 // are differentially tested against each other, and that test is only worth
 // something if the difference between them is the one thing it is about.
@@ -38,7 +38,7 @@
 
 layout(local_size_x_id = 0) in;
 
-// The same 92-byte block kawpow.comp declares and ProgPowPush fills: one
+// The same 92-byte block progpow.comp declares and ProgPowPush fills: one
 // algorithm prepares dispatches for both kernels without knowing which. The
 // period and the table's length are dead here, being constants below, but stay
 // so the block keeps its layout.
@@ -57,12 +57,12 @@ layout(push_constant) uniform Push {
 // ------------------------------------------------------------- the shape of it
 //
 // Which fork this is, and where the program's words sit. The host has the same
-// numbers in kawpow_params.h and kawpow_program.h.
+// numbers in progpow_params.h and progpow_program.h.
 #include "shaders/common/progpow_params.glsl"
 
 // -------------------------------------------------------------- the program
 //
-// One constant per word of what kawpow_program.cpp generates, in that order and
+// One constant per word of what progpow_program.cpp generates, in that order and
 // from constant ID 8 -- zero to three are the backend's own and four to seven
 // are spare, see kProgramConstantId. The defaults are not a program: the
 // backend refuses to dispatch until a pipeline is built with the period's real
@@ -255,7 +255,7 @@ layout(constant_id = 142) const uint kDagLines    = 1u;
 // How the lanes talk. Included here rather than at the top because it is
 // written in terms of kLanes, declared just above. There is no program array
 // here either way: that is the difference this file is.
-#include "shaders/common/kawpow_lanes.glsl"
+#include "shaders/common/progpow_lanes.glsl"
 
 // ------------------------------------------------------------------- the RNGs
 //
@@ -294,7 +294,7 @@ uint kiss99()
 
 // ------------------------------------------------- what the program's words do
 //
-// Byte for byte what kawpow.comp has, and called with constants rather than
+// Byte for byte what progpow.comp has, and called with constants rather than
 // with words read out of a buffer. Each switch is over a specialization
 // constant, so the compiler keeps one arm and deletes the statement.
 

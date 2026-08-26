@@ -1,7 +1,7 @@
 // vkminer -- a Vulkan compute cryptocurrency miner.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "algorithms/kawpow/kawpow_dag.h"
+#include "algorithms/progpow/progpow_dag.h"
 
 // The internal header, not the public one: build_light_cache and
 // calculate_dataset_item_512 are what a DAG is made of, and the public API
@@ -15,7 +15,7 @@
 #include <vector>
 
 namespace vkminer {
-namespace kawpow {
+namespace progpow {
 
 namespace {
 
@@ -186,5 +186,5 @@ bool dataset_item(const Epochs &epochs, uint64_t index, uint32_t out[kItemWords]
     return true;
 }
 
-}  // namespace kawpow
+}  // namespace progpow
 }  // namespace vkminer

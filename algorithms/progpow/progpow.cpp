@@ -9,10 +9,10 @@
 //   - it hashes against a gigabyte of DAG, which the device builds for itself
 //     before the first dispatch (KernelSpec::shared_bytes and the setup pass);
 //   - its inner loop is regenerated every few blocks, so the kernel reads the
-//     program rather than containing it (kawpow_program.h);
+//     program rather than containing it (progpow_program.h);
 //   - sixteen invocations cooperate on one nonce (KernelSpec::lanes).
 //
-// One class serves every fork. What separates them is a kawpow::Params handed
+// One class serves every fork. What separates them is a progpow::Params handed
 // to the factory and read from here: the shape of a round, how long a program
 // lasts, how the DAG is sized, and the words the two keccaks absorb. Nothing
 // below branches on which fork it is.
@@ -27,11 +27,11 @@
 // nonce word -- the nonce is a 64-bit field of its own, and the pool owns its
 // top two bytes.
 
-#include "algorithms/kawpow/kawpow.h"
+#include "algorithms/progpow/progpow.h"
 
-#include "algorithms/kawpow/kawpow_dag.h"
-#include "algorithms/kawpow/kawpow_hash.h"
-#include "algorithms/kawpow/kawpow_program.h"
+#include "algorithms/progpow/progpow_dag.h"
+#include "algorithms/progpow/progpow_hash.h"
+#include "algorithms/progpow/progpow_program.h"
 
 #ifdef VKMINER_HAVE_SHADERS
 #include "shaders/shader_source.h"
@@ -56,10 +56,10 @@ constexpr size_t kHeaderWords = 9;
 constexpr size_t kDerived = 2;
 
 // Specialization constants the specialized kernel is built from: the program's
-// words, then the table's length. kawpow_spec.comp declares exactly this many,
+// words, then the table's length. progpow_spec.comp declares exactly this many,
 // and program_values() fills exactly this many -- the backend refuses a
 // mismatch rather than building a pipeline out of half a program.
-constexpr size_t kProgramConstants = kawpow::kProgramWords + 1;
+constexpr size_t kProgramConstants = progpow::kProgramWords + 1;
 
 // The fork's own constants, in every pipeline this algorithm builds and the
 // same in all of them: the shape of a round, then the two keccak seals. Not
@@ -70,17 +70,17 @@ constexpr size_t kProgramConstants = kawpow::kProgramWords + 1;
 // lets one .comp serve four coins.
 constexpr size_t kShapeConstants = 4;
 constexpr size_t kKernelConstants =
-    kShapeConstants + kawpow::kSealSeedWords + kawpow::kSealFinalWords;
+    kShapeConstants + progpow::kSealSeedWords + progpow::kSealFinalWords;
 
 // 64-byte items in a 256-byte DAG line, which is what one round reads.
-constexpr uint64_t kItemsPerLine = kawpow::kLineWords * 4 / kawpow::kItemBytes;
+constexpr uint64_t kItemsPerLine = progpow::kLineWords * 4 / progpow::kItemBytes;
 
 // Lines of the head of the DAG that are also the cache the program's read
 // operations index into. Nothing separate is uploaded for it -- it is the same
 // bytes -- but a table shorter than this has no cache in it.
-constexpr uint64_t kL1Lines = kawpow::kL1Words * 4 / (kawpow::kLineWords * 4);
+constexpr uint64_t kL1Lines = progpow::kL1Words * 4 / (progpow::kLineWords * 4);
 
-// The push constant block algorithms/kawpow/kawpow.comp declares: 92 bytes
+// The push constant block algorithms/progpow/progpow.comp declares: 92 bytes
 // against a guaranteed minimum of 128. The GLSL and this struct are one
 // definition written twice, and nothing but the asserts would notice them
 // diverging.
@@ -96,7 +96,7 @@ struct ProgPowPush {
     uint32_t dag_lines;
 };
 
-static_assert(sizeof(ProgPowPush) == 92, "kawpow.comp's push block is 92 bytes");
+static_assert(sizeof(ProgPowPush) == 92, "progpow.comp's push block is 92 bytes");
 static_assert(sizeof(ProgPowPush) <= 128,
               "Vulkan guarantees only 128 bytes of push constants");
 static_assert(offsetof(ProgPowPush, target) == 32, "push block layout");
@@ -123,21 +123,21 @@ void header_words(const uint32_t *header, uint32_t out[8])
 // Slow on purpose: this re-verifies candidates once per share, and it is the
 // oracle the kernel is measured against. An oracle that shares an optimization
 // with the thing it checks is not one.
-class ReferenceLines final : public kawpow::DagLines {
+class ReferenceLines final : public progpow::DagLines {
 public:
-    explicit ReferenceLines(const kawpow::Epochs &epochs) : epochs_(epochs) {}
+    explicit ReferenceLines(const progpow::Epochs &epochs) : epochs_(epochs) {}
 
-    bool line(uint64_t index, uint32_t out[kawpow::kLineWords]) const override
+    bool line(uint64_t index, uint32_t out[progpow::kLineWords]) const override
     {
         for (uint64_t i = 0; i < kItemsPerLine; i++)
-            if (!kawpow::dataset_item(epochs_, index * kItemsPerLine + i,
-                                      out + i * kawpow::kItemWords))
+            if (!progpow::dataset_item(epochs_, index * kItemsPerLine + i,
+                                      out + i * progpow::kItemWords))
                 return false;
         return true;
     }
 
 private:
-    kawpow::Epochs epochs_;
+    progpow::Epochs epochs_;
 };
 
 // The largest power of two that is not more than `n`, and never less than a
@@ -145,7 +145,7 @@ private:
 // read, whatever the chain of compares did with the index.
 uint64_t chunk_floor(uint64_t n)
 {
-    uint64_t chunk = kawpow::kLineWords * 4;
+    uint64_t chunk = progpow::kLineWords * 4;
     while (chunk * 2 <= n)
         chunk *= 2;
     return chunk;
@@ -267,21 +267,21 @@ const Vectors kVectors[] = {
 
 class ProgPow final : public Algorithm {
 public:
-    ProgPow(const kawpow::Params &params, uint32_t epoch, uint64_t lines,
+    ProgPow(const progpow::Params &params, uint32_t epoch, uint64_t lines,
             bool host_dag)
-        : params_(params), epochs_(kawpow::epochs_for(params, epoch)),
+        : params_(params), epochs_(progpow::epochs_for(params, epoch)),
           host_dag_(host_dag),
           lines_(lines ? lines
-                       : kawpow::dag_items(epochs_.full) / kItemsPerLine)
+                       : progpow::dag_items(epochs_.full) / kItemsPerLine)
     {
         size_t at = 0;
         kernel_constants_[at++] = params_.regs;
         kernel_constants_[at++] = params_.cache_ops;
         kernel_constants_[at++] = params_.math_ops;
         kernel_constants_[at++] = params_.rounds;
-        for (uint32_t i = 0; i < kawpow::kSealSeedWords; i++)
+        for (uint32_t i = 0; i < progpow::kSealSeedWords; i++)
             kernel_constants_[at++] = params_.seal_seed[i];
-        for (uint32_t i = 0; i < kawpow::kSealFinalWords; i++)
+        for (uint32_t i = 0; i < progpow::kSealFinalWords; i++)
             kernel_constants_[at++] = params_.seal_final[i];
     }
 
@@ -318,7 +318,7 @@ public:
 
     // And what the forks with no row above are checked with instead: two
     // headers of this file's invention, hashed here. They pin the device to
-    // this host, not to a chain -- see algorithm.h, and tests/kawpow_test.cpp,
+    // this host, not to a chain -- see algorithm.h, and tests/progpow_test.cpp,
     // which is the same comparison over a far wider range and off a pool's
     // clock.
     //
@@ -363,7 +363,7 @@ public:
     bool submit_mix(const uint32_t *header, uint64_t nonce,
                     unsigned char out[32]) const override
     {
-        kawpow::Hash got;
+        progpow::Hash got;
         if (!full_hash(header, nonce, &got))
             return false;
 
@@ -387,12 +387,12 @@ public:
         if (host_dag_)
             return false;
 
-        const kawpow::Epochs epochs = kawpow::epochs_of(params_, header[8]);
+        const progpow::Epochs epochs = progpow::epochs_of(params_, header[8]);
         if (epochs.seed == epochs_.seed)
             return false;
 
         epochs_ = epochs;
-        lines_ = kawpow::dag_items(epochs_.full) / kItemsPerLine;
+        lines_ = progpow::dag_items(epochs_.full) / kItemsPerLine;
         l1_ready_ = false;
         return true;
     }
@@ -452,7 +452,7 @@ public:
     // many times for the same instructions.
     uint64_t program_key(const uint32_t *header) const override
     {
-        return kawpow::period_of(params_, header[8]);
+        return progpow::period_of(params_, header[8]);
     }
 
     // That period's 131 words, and the table's length after them. Derived from
@@ -464,16 +464,16 @@ public:
         if (max < kProgramConstants)
             return 0;
 
-        kawpow::Program program;
-        kawpow::build_program(params_, key, &program);
-        for (size_t i = 0; i < kawpow::kProgramWords; i++)
+        progpow::Program program;
+        progpow::build_program(params_, key, &program);
+        for (size_t i = 0; i < progpow::kProgramWords; i++)
             out[i] = program.word[i];
 
         // The epoch's, not the period's, so it is the same in every program
         // this kernel is built with -- but a constant rather than a push
         // constant, because the line index is taken modulo it once per round
         // and a compile-time modulus is a multiply and a shift.
-        out[kawpow::kProgramWords] = static_cast<uint32_t>(lines_);
+        out[progpow::kProgramWords] = static_cast<uint32_t>(lines_);
         return kProgramConstants;
     }
 
@@ -488,20 +488,20 @@ public:
     bool setup_seed(uint64_t key, uint64_t offset, void *out,
                     size_t bytes) const override
     {
-        return kawpow::light_cache(epochs_of_key(key), offset, out, bytes);
+        return progpow::light_cache(epochs_of_key(key), offset, out, bytes);
     }
 
     size_t setup_push(uint64_t key, uint64_t first, uint64_t slot,
                       uint32_t count, void *out, size_t capacity) const override
     {
-        if (capacity < sizeof(kawpow::DagPush))
+        if (capacity < sizeof(progpow::DagPush))
             return 0;
 
-        kawpow::DagPush push;
+        progpow::DagPush push;
         push.count = count;
         push.first = static_cast<uint32_t>(first);
         push.slot = static_cast<uint32_t>(slot);
-        push.cache_items = kawpow::light_cache_items(epochs_of_key(key).light);
+        push.cache_items = progpow::light_cache_items(epochs_of_key(key).light);
 
         std::memcpy(out, &push, sizeof push);
         return sizeof push;
@@ -516,23 +516,23 @@ public:
         if (!host_dag_)
             return false;
 
-        const kawpow::Epochs epochs = epochs_of_key(key);
+        const progpow::Epochs epochs = epochs_of_key(key);
         unsigned char *dst = static_cast<unsigned char *>(out);
 
         while (bytes) {
-            const uint64_t index = offset / kawpow::kItemBytes;
-            const size_t at = offset % kawpow::kItemBytes;
-            const size_t span = bytes < kawpow::kItemBytes - at
-                              ? bytes : kawpow::kItemBytes - at;
+            const uint64_t index = offset / progpow::kItemBytes;
+            const size_t at = offset % progpow::kItemBytes;
+            const size_t span = bytes < progpow::kItemBytes - at
+                              ? bytes : progpow::kItemBytes - at;
 
-            uint32_t item[kawpow::kItemWords];
-            if (!kawpow::dataset_item(epochs, index, item))
+            uint32_t item[progpow::kItemWords];
+            if (!progpow::dataset_item(epochs, index, item))
                 return false;
 
             // The canonical byte string, which a little-endian shader reads
             // back as the words it wants.
-            unsigned char bytes64[kawpow::kItemBytes];
-            for (uint32_t i = 0; i < kawpow::kItemWords; i++)
+            unsigned char bytes64[progpow::kItemBytes];
+            for (uint32_t i = 0; i < progpow::kItemWords; i++)
                 le32enc(bytes64 + i * 4, item[i]);
 
             std::memcpy(dst, bytes64 + at, span);
@@ -560,7 +560,7 @@ public:
         push.count = dispatch.count;
         push.capacity = dispatch.capacity;
 
-        const uint64_t period = kawpow::period_of(params_, dispatch.header[8]);
+        const uint64_t period = progpow::period_of(params_, dispatch.header[8]);
         push.period_lo = static_cast<uint32_t>(period);
         push.period_hi = static_cast<uint32_t>(period >> 32);
 
@@ -575,7 +575,7 @@ public:
     {
         std::memset(out, 0, 8 * sizeof(uint32_t));
 
-        kawpow::Hash got;
+        progpow::Hash got;
         if (!full_hash(header, nonce, &got))
             return;
 
@@ -595,10 +595,10 @@ private:
     // digest and reorders it for the target comparison; submit_mix() takes the
     // mix and writes it to a wire. Neither is a separate traversal of the DAG.
     bool full_hash(const uint32_t *header, uint64_t nonce,
-                   kawpow::Hash *out) const
+                   progpow::Hash *out) const
     {
-        kawpow::Program program;
-        kawpow::build_program(params_, kawpow::period_of(params_, header[8]),
+        progpow::Program program;
+        progpow::build_program(params_, progpow::period_of(params_, header[8]),
                               &program);
 
         const uint32_t *l1 = l1_cache();
@@ -609,16 +609,16 @@ private:
         header_words(header, words);
 
         const ReferenceLines lines(epochs_);
-        return kawpow::hash(params_, program, l1, lines_, lines, words, nonce,
+        return progpow::hash(params_, program, l1, lines_, lines, words, nonce,
                             out);
     }
 
     // The three epochs a state key stands for. The key is the seed epoch, which
     // is what everything outside this file has ever been given; the other two
     // follow from it and the fork's table.
-    kawpow::Epochs epochs_of_key(uint64_t key) const
+    progpow::Epochs epochs_of_key(uint64_t key) const
     {
-        return kawpow::epochs_for(params_, static_cast<uint32_t>(key));
+        return progpow::epochs_for(params_, static_cast<uint32_t>(key));
     }
 
     // The three shaders, which differ in whether the period's program is
@@ -636,8 +636,8 @@ private:
     static bool can_shuffle_lanes(const DeviceInfo &device)
     {
         return device.subgroup_shuffle
-            && device.subgroup_size >= kawpow::kLanes
-            && device.subgroup_size % kawpow::kLanes == 0;
+            && device.subgroup_size >= progpow::kLanes
+            && device.subgroup_size % progpow::kLanes == 0;
     }
 
     // One kernel or another, described by the same numbers: everything but the
@@ -658,10 +658,10 @@ private:
         // Sixteen invocations to a nonce, and for the shuffle kernel a
         // workgroup made of whole subgroups. Rounding the width to that is the
         // backend's job, since the width is also the tuner's.
-        spec.lanes = kawpow::kLanes;
+        spec.lanes = progpow::kLanes;
         spec.full_subgroups = subgroup;
 
-        spec.shared_bytes = lines_ * kawpow::kLineWords * 4;
+        spec.shared_bytes = lines_ * progpow::kLineWords * 4;
         spec.shared_chunks = kMaxSharedChunks;
 
         // A miner takes the largest binding the device will address, which is
@@ -675,9 +675,9 @@ private:
         ShaderModule &module = subgroup    ? spec_sub_module_
                              : specialized ? spec_module_
                                            : module_;
-        const char *shader = subgroup    ? "kawpow_spec_sub"
-                           : specialized ? "kawpow_spec"
-                                         : "kawpow";
+        const char *shader = subgroup    ? "progpow_spec_sub"
+                           : specialized ? "progpow_spec"
+                                         : "progpow";
         if (module.words.empty() && !load_shader(shader, &module))
             return spec;
 
@@ -714,8 +714,8 @@ private:
 
             spec.setup.spirv = setup_.words.data();
             spec.setup.spirv_words = setup_.words.size();
-            spec.setup.push_constant_bytes = sizeof(kawpow::DagPush);
-            spec.setup.seed_bytes = kawpow::light_cache_bytes(epochs_.light);
+            spec.setup.push_constant_bytes = sizeof(progpow::DagPush);
+            spec.setup.seed_bytes = progpow::light_cache_bytes(epochs_.light);
             spec.setup.items = lines_ * kItemsPerLine;
         }
 #endif
@@ -728,9 +728,9 @@ private:
     const uint32_t *l1_cache() const
     {
         if (!l1_ready_) {
-            for (uint64_t i = 0; i < kawpow::kL1Words / kawpow::kItemWords; i++)
-                if (!kawpow::dataset_item(epochs_, i,
-                                          l1_ + i * kawpow::kItemWords))
+            for (uint64_t i = 0; i < progpow::kL1Words / progpow::kItemWords; i++)
+                if (!progpow::dataset_item(epochs_, i,
+                                          l1_ + i * progpow::kItemWords))
                     return nullptr;
             l1_ready_ = true;
         }
@@ -781,8 +781,8 @@ private:
 
     // A reference into the table, which outlives every algorithm: the four
     // instances are constants with static storage.
-    const kawpow::Params &params_;
-    kawpow::Epochs epochs_;
+    const progpow::Params &params_;
+    progpow::Epochs epochs_;
     bool host_dag_;
 
     // 256-byte lines of table, which is what a round reads one of and what the
@@ -792,7 +792,7 @@ private:
     // Filled once in the constructor and handed to every spec by pointer.
     uint32_t kernel_constants_[kKernelConstants];
 
-    mutable uint32_t l1_[kawpow::kL1Words];
+    mutable uint32_t l1_[progpow::kL1Words];
     mutable bool l1_ready_ = false;
 
     mutable unsigned char derived_headers_[kDerived][kHeaderWords * 4];
@@ -813,13 +813,13 @@ private:
 
 }  // namespace
 
-std::unique_ptr<Algorithm> make_progpow(const kawpow::Params &params,
+std::unique_ptr<Algorithm> make_progpow(const progpow::Params &params,
                                         uint32_t epoch)
 {
     return std::unique_ptr<Algorithm>(new ProgPow(params, epoch, 0, false));
 }
 
-std::unique_ptr<Algorithm> make_progpow_host_dag(const kawpow::Params &params,
+std::unique_ptr<Algorithm> make_progpow_host_dag(const progpow::Params &params,
                                                  uint32_t epoch, uint64_t lines)
 {
     if (lines < kL1Lines)
@@ -836,13 +836,13 @@ std::unique_ptr<Algorithm> make_progpow_host_dag(const kawpow::Params &params,
 extern "C" bool progpow_seed_hash_check(uint64_t height,
                                         const unsigned char seed[32])
 {
-    namespace kawpow = vkminer::kawpow;
+    namespace progpow = vkminer::progpow;
 
-    const kawpow::Params *fork = kawpow::find(opt_algo);
+    const progpow::Params *fork = progpow::find(opt_algo);
     if (!fork || !seed)
         return true;
 
     unsigned char want[32];
-    kawpow::epoch_seed(kawpow::epochs_of(*fork, height).seed, want);
+    progpow::epoch_seed(progpow::epochs_of(*fork, height).seed, want);
     return std::memcmp(want, seed, sizeof want) == 0;
 }

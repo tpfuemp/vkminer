@@ -17,7 +17,7 @@
 // notice is a shader disagreeing with a reference -- two new implementations at
 // once, with no way to tell which is wrong.
 //
-// So this is that interpreter, algorithms/kawpow/kawpow_hash.cpp, against the
+// So this is that interpreter, algorithms/progpow/progpow_hash.cpp, against the
 // fork's own published vectors, before there is any shader. It establishes:
 //
 //   - the thirteen official hashes, mix and final, from the 131 words rather
@@ -30,8 +30,8 @@
 //     second source register of a math operation would reproduce every vector
 //     above whenever that register happened not to matter.
 
-#include "algorithms/kawpow/kawpow_hash.h"
-#include "algorithms/kawpow/kawpow_program.h"
+#include "algorithms/progpow/progpow_hash.h"
+#include "algorithms/progpow/progpow_program.h"
 
 #include <ethash/ethash.hpp>
 #include <ethash/progpow.hpp>
@@ -45,18 +45,18 @@
 
 namespace {
 
-using vkminer::kawpow::Kiss99;
-using vkminer::kawpow::Program;
-using vkminer::kawpow::build_program;
-using vkminer::kawpow::fnv1a;
-using vkminer::kawpow::period_of;
+using vkminer::progpow::Kiss99;
+using vkminer::progpow::Program;
+using vkminer::progpow::build_program;
+using vkminer::progpow::fnv1a;
+using vkminer::progpow::period_of;
 
-namespace kp = vkminer::kawpow;
+namespace pp = vkminer::progpow;
 
 // The fork these vectors are from. The generator below is the family's; what it
 // is checked against is one member's, and check_fork_table() is what the other
 // three get.
-const kp::Params &kFork = kp::kKawpow;
+const pp::Params &kFork = pp::kKawpow;
 
 int failures = 0;
 
@@ -118,16 +118,16 @@ void put_le32(uint8_t *p, uint32_t v)
 // reads 256 bytes where the kernel that generates writes 64, and `hash2048` is
 // the size this side counts in.
 
-class EthashLines final : public kp::DagLines {
+class EthashLines final : public pp::DagLines {
 public:
     explicit EthashLines(const ethash::epoch_context &context)
         : context_(&context) {}
 
-    bool line(uint64_t index, uint32_t out[kp::kLineWords]) const override
+    bool line(uint64_t index, uint32_t out[pp::kLineWords]) const override
     {
         const ethash::hash2048 item = ethash::calculate_dataset_item_2048(
             *context_, static_cast<uint32_t>(index));
-        for (uint32_t i = 0; i < kp::kLineWords; i++)
+        for (uint32_t i = 0; i < pp::kLineWords; i++)
             out[i] = le32(item.bytes + i * 4);
         return true;
     }
@@ -146,16 +146,16 @@ void hash_kawpow(const ethash::epoch_context &context, const Program &program,
         words[i] = le32(header + i * 4);
 
     const uint8_t *l1_bytes = reinterpret_cast<const uint8_t *>(context.l1_cache);
-    uint32_t l1[kp::kL1Words];
-    for (uint32_t i = 0; i < kp::kL1Words; i++)
+    uint32_t l1[pp::kL1Words];
+    for (uint32_t i = 0; i < pp::kL1Words; i++)
         l1[i] = le32(l1_bytes + i * 4);
 
     const EthashLines lines(context);
     const uint64_t dag_lines =
         static_cast<uint64_t>(context.full_dataset_num_items) / 2;
 
-    kp::Hash out;
-    if (!kp::hash(kFork, program, l1, dag_lines, lines, words, nonce, &out)) {
+    pp::Hash out;
+    if (!pp::hash(kFork, program, l1, dag_lines, lines, words, nonce, &out)) {
         fail("the interpreter refused a hash it has everything for");
         std::memset(mix_out, 0, 32);
         std::memset(final_out, 0, 32);
@@ -415,12 +415,12 @@ void check_against_reference(EpochCache &cache)
 // program leaves the twelfth cache read's three words unwritten -- and those
 // must change nothing, which is the same statement about the layout from the
 // other side.
-bool word_is_live(const kp::Params &fork, uint32_t i)
+bool word_is_live(const pp::Params &fork, uint32_t i)
 {
-    if (i < kp::kMathBase)
-        return i < kp::kCacheBase + fork.cache_ops * kp::kCacheWords;
-    if (i < kp::kDagBase)
-        return i < kp::kMathBase + fork.math_ops * kp::kMathWords;
+    if (i < pp::kMathBase)
+        return i < pp::kCacheBase + fork.cache_ops * pp::kCacheWords;
+    if (i < pp::kDagBase)
+        return i < pp::kMathBase + fork.math_ops * pp::kMathWords;
     return true;
 }
 
@@ -447,7 +447,7 @@ void check_every_word_is_read(EpochCache &cache)
     uint8_t base_final[32];
     hash_kawpow(*context, program, header, nonce, base_mix, base_final);
 
-    for (uint32_t i = 0; i < kp::kProgramWords; i++) {
+    for (uint32_t i = 0; i < pp::kProgramWords; i++) {
         Program perturbed = program;
         // Not a single bit: a register index is read modulo nothing and a
         // selector modulo 4 or 11, so flipping the low bit of a register index
@@ -459,7 +459,7 @@ void check_every_word_is_read(EpochCache &cache)
         // a program no generator can produce and then blaming it for walking off
         // the mix. (It did: one word past a 2 KiB array, padding on x86-64 and
         // the stack canary on aarch64.)
-        perturbed.word[i] = kp::names_a_register(i)
+        perturbed.word[i] = pp::names_a_register(i)
                                 ? (perturbed.word[i] + 1) % kFork.regs
                                 : perturbed.word[i] + 1;
 
@@ -508,25 +508,25 @@ void check_period()
     // must be a permutation of the registers: every register written once per
     // round, none twice, none left holding a whole period's stale value.
     const uint32_t regs = kFork.regs;
-    bool seen[kp::kMaxRegs] = {false};
+    bool seen[pp::kMaxRegs] = {false};
     uint32_t drawn = 0;
     for (uint32_t i = 0; i < kFork.cache_ops; i++) {
-        seen[a.word[kp::kCacheBase + i * kp::kCacheWords + 1] % regs] = true;
+        seen[a.word[pp::kCacheBase + i * pp::kCacheWords + 1] % regs] = true;
         drawn++;
     }
     for (uint32_t i = 0; i < kFork.math_ops; i++) {
-        seen[a.word[kp::kMathBase + i * kp::kMathWords + 3] % regs] = true;
+        seen[a.word[pp::kMathBase + i * pp::kMathWords + 3] % regs] = true;
         drawn++;
     }
-    for (uint32_t i = 1; i < kp::kDagLoads; i++) {
-        seen[a.word[kp::kDagBase + i * kp::kDagWords] % kFork.regs] = true;
+    for (uint32_t i = 1; i < pp::kDagLoads; i++) {
+        seen[a.word[pp::kDagBase + i * pp::kDagWords] % kFork.regs] = true;
         drawn++;
     }
 
     // The invariant both interpreters index the mix with unchecked, and the one
     // the perturbation below has to preserve to be testing anything.
-    for (uint32_t i = 0; i < kp::kProgramWords; i++)
-        if (kp::names_a_register(i) && a.word[i] >= kFork.regs)
+    for (uint32_t i = 0; i < pp::kProgramWords; i++)
+        if (pp::names_a_register(i) && a.word[i] >= kFork.regs)
             fail("program word %u names register %u, and there are %u", i,
                  a.word[i], kFork.regs);
 
@@ -553,14 +553,14 @@ void check_period()
 // chain nobody runs, and nothing else here would notice.
 void check_fork_table()
 {
-    const kp::Params *forks[] = {
-        &kp::kKawpow, &kp::kMeowpow, &kp::kEvrprogpow, &kp::kFiropow,
-        &kp::kMeraki,
+    const pp::Params *forks[] = {
+        &pp::kKawpow, &pp::kMeowpow, &pp::kEvrprogpow, &pp::kFiropow,
+        &pp::kMeraki,
     };
 
-    for (const kp::Params *f : forks) {
-        if (f->regs > kp::kMaxRegs || f->cache_ops > kp::kMaxCacheOps ||
-            f->math_ops > kp::kMaxMathOps || f->rounds > kp::kMaxRounds)
+    for (const pp::Params *f : forks) {
+        if (f->regs > pp::kMaxRegs || f->cache_ops > pp::kMaxCacheOps ||
+            f->math_ops > pp::kMaxMathOps || f->rounds > pp::kMaxRounds)
             fail("%s is wider than the layout the shaders are built for",
                  f->name);
         if (!f->period_length || !f->epoch_length)
@@ -568,9 +568,9 @@ void check_fork_table()
 
         // FiroPoW's two absorbs are two different padded states and not one
         // repeated; see the table.
-        if (f == &kp::kFiropow)
+        if (f == &pp::kFiropow)
             continue;
-        for (uint32_t i = 0; i < kp::kSealFinalWords; i++)
+        for (uint32_t i = 0; i < pp::kSealFinalWords; i++)
             if (f->seal_final[i] != f->seal_seed[i])
                 fail("%s: seal word %u is 0x%08x where it ends and 0x%08x "
                      "where it starts", f->name, i, f->seal_final[i],
@@ -600,7 +600,7 @@ int main()
     // KawPoW's own words, not the layout's: the three the widest fork of the
     // family adds are checked above for staying inert here.
     uint32_t live = 0;
-    for (uint32_t i = 0; i < kp::kProgramWords; i++)
+    for (uint32_t i = 0; i < pp::kProgramWords; i++)
         live += word_is_live(kFork, i) ? 1u : 0u;
 
     const size_t vectors = sizeof kVectors / sizeof kVectors[0];

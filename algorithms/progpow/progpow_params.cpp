@@ -1,12 +1,12 @@
 // vkminer -- a Vulkan compute cryptocurrency miner.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include "algorithms/kawpow/kawpow_params.h"
+#include "algorithms/progpow/progpow_params.h"
 
 #include <cstring>
 
 namespace vkminer {
-namespace kawpow {
+namespace progpow {
 
 // In every branded fork below, seal_final repeats the first nine words of
 // seal_seed -- one array read at two offsets, in the reference. Written out
@@ -148,5 +148,5 @@ const Params *find(const char *name)
     return nullptr;
 }
 
-}  // namespace kawpow
+}  // namespace progpow
 }  // namespace vkminer

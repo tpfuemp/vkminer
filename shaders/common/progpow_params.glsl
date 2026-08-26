@@ -9,7 +9,7 @@
 //
 // The IDs run from kKernelConstantId upwards -- above every constant a program
 // could occupy, so a shader with both never has to know how many of the first
-// kind it has -- in the order kawpow.cpp fills them. That order is the
+// kind it has -- in the order progpow.cpp fills them. That order is the
 // contract, and a constant declared at the wrong ID gets another fork's number
 // without anything failing to build.
 //
@@ -27,7 +27,7 @@ const uint kDagLoads = 4u;
 
 // The widest fork's shape. This is what the mix is sized for and where the
 // program's words sit, so moving one renumbers every program constant in every
-// shader -- see kawpow_program.h.
+// shader -- see progpow_program.h.
 const uint kMaxRegs     = 32u;
 const uint kMaxCacheOps = 12u;
 const uint kMaxMathOps  = 18u;

@@ -4,7 +4,7 @@
 // Every other KawPoW kernel against the interpreter, and all of them against
 // the host.
 //
-// kawpow_test showed that the interpreter hashes correctly. This file is about
+// progpow_test showed that the interpreter hashes correctly. This file is about
 // the kernels that are faster than it: the one whose rounds are compiled into
 // the pipeline rather than read out of a buffer, one pipeline per period, and
 // the one that additionally exchanges between lanes through subgroup shuffles
@@ -31,12 +31,12 @@
 //     enough to be called coverage, with the host left out so that the range
 //     can be: a host oracle that walks a DAG per nonce keeps it to dozens.
 //
-// The DAG is built on the host and uploaded, for the reason kawpow_test gives:
+// The DAG is built on the host and uploaded, for the reason progpow_test gives:
 // a disagreement should have one cause.
 
 #include "algorithms/algorithm.h"
-#include "algorithms/kawpow/kawpow.h"
-#include "algorithms/kawpow/kawpow_program.h"
+#include "algorithms/progpow/progpow.h"
+#include "algorithms/progpow/progpow_program.h"
 #include "backends/vulkan/vulkan_backend.h"
 #include "backends/vulkan/vulkan_common.h"
 
@@ -66,7 +66,7 @@ int api_thr_id = -1;
 namespace {
 
 // The epoch, and how much of its DAG to upload: the same small host-built table
-// kawpow_test uses, and for the same reasons.
+// progpow_test uses, and for the same reasons.
 constexpr uint32_t kEpoch = 0;
 constexpr uint64_t kLines = 8192;
 
@@ -74,7 +74,7 @@ constexpr uint64_t kLines = 8192;
 // is wide open.
 constexpr uint32_t kBatch = 16;
 
-// Nonces per period, unless argv[1] says otherwise. Lower than kawpow_test's
+// Nonces per period, unless argv[1] says otherwise. Lower than progpow_test's
 // count because every one of them is hashed twice on the host -- once per
 // period -- and the host is much the slower half.
 constexpr uint32_t kDefaultNonces = 64;
@@ -102,10 +102,10 @@ constexpr uint32_t kDefaultWide = 0;
 constexpr uint64_t kPeriod = 1249;
 
 // Which fork's constants the kernels are built from -- see the same declaration
-// in kawpow_test.cpp for why it is a command-line argument. Here it decides one
+// in progpow_test.cpp for why it is a command-line argument. Here it decides one
 // thing more: how many blocks a period lasts, and so where the boundary these
 // kernels are rebuilt at falls.
-const vkminer::kawpow::Params *fork_params = &vkminer::kawpow::kKawpow;
+const vkminer::progpow::Params *fork_params = &vkminer::progpow::kKawpow;
 
 int failures = 0;
 
@@ -356,9 +356,9 @@ bool check_kernel(vkminer::VulkanBackend &backend,
     std::printf("\n   kernel '%s'\n", desc.variant);
 
     if (desc.program_constants
-        && desc.program_constants != vkminer::kawpow::kProgramWords + 1) {
+        && desc.program_constants != vkminer::progpow::kProgramWords + 1) {
         fail("'%s' wants %u constants and the program is %u words", desc.variant,
-             desc.program_constants, vkminer::kawpow::kProgramWords);
+             desc.program_constants, vkminer::progpow::kProgramWords);
         return false;
     }
 
@@ -529,7 +529,7 @@ int main(int argc, char *argv[])
         }
 
         if (!std::strcmp(argv[i], "--fork") && i + 1 < argc) {
-            fork_params = vkminer::kawpow::find(argv[++i]);
+            fork_params = vkminer::progpow::find(argv[++i]);
             if (!fork_params) {
                 std::printf("usage: %s [nonces] [--wide nonces] [--fork name]\n",
                             argv[0]);
@@ -552,7 +552,7 @@ int main(int argc, char *argv[])
                 fork_params->regs, fork_params->cache_ops,
                 fork_params->math_ops, fork_params->period_length);
 
-    // Worth their cost for the barriers, as in kawpow_test, and for one thing
+    // Worth their cost for the barriers, as in progpow_test, and for one thing
     // more that is this file's own: pipelines are created and destroyed while
     // the device is working, from a thread that is not this one.
     opt_vk_validate = true;

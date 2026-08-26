@@ -307,11 +307,11 @@ if(TARGET vkminer_shaders)
     # from a light cache, which is a few minutes' worth only if the range is
     # made much larger than the default. The timeout is for the aarch64 box,
     # where building epoch 0's light cache is most of the run.
-    add_executable(kawpow_test kawpow_test.cpp)
-    target_link_libraries(kawpow_test PRIVATE
+    add_executable(progpow_test progpow_test.cpp)
+    target_link_libraries(progpow_test PRIVATE
         vkminer_backends vkminer_warnings Threads::Threads)
-    add_test(NAME kawpow_test COMMAND kawpow_test 256)
-    set_tests_properties(kawpow_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    add_test(NAME progpow_test COMMAND progpow_test 256)
+    set_tests_properties(progpow_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
     # And the other KawPoW kernel: the one whose program is compiled into the
     # pipeline rather than read out of a buffer. It hashes the same nonces both
@@ -319,13 +319,13 @@ if(TARGET vkminer_shaders)
     # only place a kernel that is rebuilt per period can go wrong invisibly,
     # because a stale pipeline keeps returning perfectly well-formed digests.
     #
-    # A smaller range than kawpow_test's: every nonce is hashed on the host
+    # A smaller range than progpow_test's: every nonce is hashed on the host
     # twice, once per period, and that is the slow half.
-    add_executable(kawpow_spec_test kawpow_spec_test.cpp)
-    target_link_libraries(kawpow_spec_test PRIVATE
+    add_executable(progpow_spec_test progpow_spec_test.cpp)
+    target_link_libraries(progpow_spec_test PRIVATE
         vkminer_backends vkminer_warnings Threads::Threads)
-    add_test(NAME kawpow_spec_test COMMAND kawpow_spec_test 64)
-    set_tests_properties(kawpow_spec_test
+    add_test(NAME progpow_spec_test COMMAND progpow_spec_test 64)
+    set_tests_properties(progpow_spec_test
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
     # Both of those again over another fork's row of constants. Only two of the
@@ -342,12 +342,12 @@ if(TARGET vkminer_shaders)
     # cache read, the widest the program layout goes.
     foreach(fork evrprogpow meowpow meraki)
         add_test(NAME kawpow_test_${fork}
-            COMMAND kawpow_test 256 --fork ${fork})
+            COMMAND progpow_test 256 --fork ${fork})
         set_tests_properties(kawpow_test_${fork}
             PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
         add_test(NAME kawpow_spec_test_${fork}
-            COMMAND kawpow_spec_test 64 --fork ${fork})
+            COMMAND progpow_spec_test 64 --fork ${fork})
         set_tests_properties(kawpow_spec_test_${fork}
             PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
     endforeach()
@@ -361,8 +361,8 @@ if(TARGET vkminer_shaders)
     #
     # Weaker per nonce than the arm above, because two kernels sharing a body
     # can share a mistake in it. It runs beside that arm, never instead of it.
-    add_test(NAME kawpow_wide_diff COMMAND kawpow_spec_test 8 --wide 100000)
-    set_tests_properties(kawpow_wide_diff
+    add_test(NAME progpow_wide_diff COMMAND progpow_spec_test 8 --wide 100000)
+    set_tests_properties(progpow_wide_diff
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 LABELS slow)
 
     # The same range with the queue held to one dispatch -- the path
@@ -440,7 +440,7 @@ if(TARGET vkminer_shaders)
     # well-formed answers. Both are single-bit perturbations here.
     #
     # Against the interpreter, which is what kernel() offers -- the specialized
-    # kernels are held to it digest for digest by kawpow_wide_diff, so the two
+    # kernels are held to it digest for digest by progpow_wide_diff, so the two
     # together say what running this per kernel would.
     add_test(NAME negative_kat_kawpow COMMAND negative_kat kawpow)
     set_tests_properties(negative_kat_kawpow

@@ -12,7 +12,7 @@ extern "C" {
 #include "core/miner.h"
 }
 
-#include "algorithms/kawpow/kawpow.h"
+#include "algorithms/progpow/progpow.h"
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "replay.h"

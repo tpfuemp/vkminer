@@ -16,7 +16,7 @@
 // each round mixes across them. The backend launches `count * lanes`
 // invocations and counts nothing but nonces; see KernelSpec::lanes.
 //
-// The lanes meet in exactly two places, both in kawpow_lanes.glsl, which also
+// The lanes meet in exactly two places, both in progpow_lanes.glsl, which also
 // spells them as subgroup shuffles. This kernel always takes the portable one:
 // a control that varied with the device would compare two unknowns.
 //
@@ -41,7 +41,7 @@
 layout(local_size_x_id = 0) in;
 
 // 92 bytes, against a guaranteed minimum of 128. Mirrored by ProgPowPush in
-// kawpow.cpp, which asserts its own size and offsets.
+// progpow.cpp, which asserts its own size and offsets.
 layout(push_constant) uniform Push {
     uint header[8];    // the 32-byte header hash, little-endian words
     uint target[8];    // as fulltest() compares: little-endian, most significant last
@@ -57,12 +57,12 @@ layout(push_constant) uniform Push {
 // ------------------------------------------------------------- the shape of it
 //
 // Which fork this is, and where the program's words sit. The host has the same
-// numbers in kawpow_params.h and kawpow_program.h.
+// numbers in progpow_params.h and progpow_program.h.
 #include "shaders/common/progpow_params.glsl"
 
 // How the lanes talk. Included here rather than at the top because it is
 // written in terms of kLanes, declared just above.
-#include "shaders/common/kawpow_lanes.glsl"
+#include "shaders/common/progpow_lanes.glsl"
 
 // ------------------------------------------------------------ workgroup memory
 //
@@ -111,7 +111,7 @@ uint kiss99()
 //
 // The draw order is the specification: every value comes off one KISS99
 // stream, so a call made in the wrong order -- or made at all -- changes every
-// value after it. This is kawpow_program.cpp step for step, and the KAT
+// value after it. This is progpow_program.cpp step for step, and the KAT
 // compares the two.
 
 // Sized for the widest fork and used a prefix at a time: an array a

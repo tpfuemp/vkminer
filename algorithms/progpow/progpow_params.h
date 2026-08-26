@@ -10,7 +10,7 @@
 // in the code that reads it -- so a variant is a row in this table and the
 // hash, the generator, the DAG and all three shaders stay written once. What a
 // row cannot do is ask for more operations than the program is laid out for;
-// that bound is kawpow_program.h's.
+// that bound is progpow_program.h's.
 //
 // The namespace is still `kawpow`: it is the family's first member and the one
 // this implementation was built and verified against.
@@ -21,7 +21,7 @@
 #include <cstdint>
 
 namespace vkminer {
-namespace kawpow {
+namespace progpow {
 
 // The seal is what the two keccaks absorb after the data: fifteen words at
 // state[10..24] for the first, nine at state[16..24] for the second. Three of
@@ -41,7 +41,7 @@ struct Params {
     uint32_t period_length;  // blocks one generated program lasts
 
     // The shape of a round. Each is bounded by the corresponding kMax in
-    // kawpow_program.h, which is what the program layout is sized for.
+    // progpow_program.h, which is what the program layout is sized for.
     uint32_t regs;       // mix registers per lane
     uint32_t cache_ops;  // reads of the 16 KiB cache per round
     uint32_t math_ops;   // arithmetic operations per round
@@ -88,7 +88,7 @@ extern const Params kMeraki;
 // registers and the miner reports, so there is one spelling and not two.
 const Params *find(const char *name);
 
-}  // namespace kawpow
+}  // namespace progpow
 }  // namespace vkminer
 
 #endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PARAMS_H__
