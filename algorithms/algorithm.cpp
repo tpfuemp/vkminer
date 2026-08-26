@@ -121,6 +121,27 @@ size_t Algorithm::known_answers(const KnownAnswer **out) const
     return 0;
 }
 
+size_t Algorithm::reference_answers(const KnownAnswer **out) const
+{
+    *out = nullptr;
+    return 0;
+}
+
+size_t startup_answers(const Algorithm &algo, const KnownAnswer **out,
+                       bool *published)
+{
+    const size_t count = algo.known_answers(out);
+    if (count) {
+        if (published)
+            *published = true;
+        return count;
+    }
+
+    if (published)
+        *published = false;
+    return algo.reference_answers(out);
+}
+
 bool Algorithm::verify(const uint32_t *header, uint64_t nonce,
                        const uint32_t *target, uint32_t out[8]) const
 {

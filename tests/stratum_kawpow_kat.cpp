@@ -26,6 +26,7 @@
 // rewired its notify parser from inside the handler -- correct against every
 // pool that never sends it, and wrong against the ones that do.
 
+#include "algorithms/kawpow/kawpow.h"
 #include "algorithms/registry.h"
 
 extern "C" {
@@ -289,6 +290,38 @@ int main()
         print_bytes("expected", want_mix, 32);
         print_bytes("got", mix, 32);
     }
+
+    // ------------------------------------------------ the seed hash
+    //
+    // The one notify field no algorithm reads. What it is worth is that the
+    // pool has stated which epoch it thinks this height is in, so a miner whose
+    // epoch length differs can find that out from the job instead of from a
+    // session of rejected shares. main.cpp installs the check; here it is
+    // installed the same way and asked about the same job twice, under two
+    // forks whose epochs are 7500 and 1300 blocks long.
+    unsigned char zeros[32];
+    std::memset(zeros, 0, sizeof zeros);
+    if (std::memcmp(sctx.job.seed_hash, zeros, sizeof zeros) != 0)
+        fail("epoch 0's seed hash did not reach the job as the pool sent it");
+
+    char kawpow_name[] = "kawpow";
+    char firopow_name[] = "firopow";
+    opt_algo = kawpow_name;
+    progpow_seed_hash_agrees = progpow_seed_hash_check;
+
+    if (!progpow_seed_hash_agrees(kHeight, sctx.job.seed_hash))
+        fail("the pool's seed hash for epoch 0 was read as some other epoch");
+
+    // Block 1300 is still epoch 0 for one of these forks and epoch 1 for the
+    // other, which is the disagreement this exists to catch -- and the reason
+    // it is not enough to check that the seed parses.
+    if (!progpow_seed_hash_agrees(1300, sctx.job.seed_hash))
+        fail("kawpow's epoch 0 no longer reaches block 1300");
+    opt_algo = firopow_name;
+    if (progpow_seed_hash_agrees(1300, sctx.job.seed_hash))
+        fail("a fork with 1300-block epochs agreed to epoch 0's seed hash at "
+             "block 1300");
+    opt_algo = kawpow_name;
 
     // ------------------------------------------------ the submit
     //

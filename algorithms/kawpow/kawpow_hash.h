@@ -1,8 +1,8 @@
 // vkminer -- a Vulkan compute cryptocurrency miner.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// KawPoW's hash, on the host: keccak-f800 at each end and, between them, the
-// period's program interpreted 64 times over sixteen lanes.
+// A ProgPoW fork's hash, on the host: keccak-f800 at each end and, between
+// them, the period's program interpreted once per round over sixteen lanes.
 //
 // Written the way the kernel is written rather than the way a CPU would prefer:
 // the lanes are the inner loop, the program is read rather than drawn, and every
@@ -59,9 +59,9 @@ struct Hash {
 // epoch this is once the bytes are in hand.
 //
 // False if a line could not be read; `out` is then untouched.
-bool hash(const Program &program, const uint32_t *l1, uint64_t dag_lines,
-          const DagLines &dag, const uint32_t header[8], uint64_t nonce,
-          Hash *out);
+bool hash(const Params &params, const Program &program, const uint32_t *l1,
+          uint64_t dag_lines, const DagLines &dag, const uint32_t header[8],
+          uint64_t nonce, Hash *out);
 
 }  // namespace kawpow
 }  // namespace vkminer

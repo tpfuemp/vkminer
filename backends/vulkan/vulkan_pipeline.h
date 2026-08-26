@@ -14,6 +14,7 @@
 #ifndef VKMINER_BACKENDS_VULKAN_PIPELINE_H__
 #define VKMINER_BACKENDS_VULKAN_PIPELINE_H__
 
+#include "backends/backend.h"
 #include "backends/vulkan/vulkan_device.h"
 
 #include <memory>
@@ -31,6 +32,11 @@ bool read_spirv(const std::string &path, std::vector<uint32_t> *out);
 // with -- and four to seven are left for the next one of those, so that adding
 // one does not renumber every program constant in every shader that has any.
 constexpr uint32_t kProgramConstantId = 8;
+
+// Where the job-independent ones start: above every program constant a module
+// could declare, so that a shader with both never has to know how many of the
+// first kind it has.
+constexpr uint32_t kKernelConstantId = kProgramConstantId + kMaxProgramConstants;
 
 struct ComputePipelineDesc {
     const uint32_t *spirv       = nullptr;
@@ -69,6 +75,12 @@ struct ComputePipelineDesc {
     // nothing else -- the driver has taken what it wants by the time it returns.
     const uint32_t *program = nullptr;
     uint32_t program_count  = 0;
+
+    // Constants that are the same in every pipeline of this kernel:
+    // `constant_count` of them from kKernelConstantId upwards. Same ownership
+    // rule as `program`.
+    const uint32_t *constants = nullptr;
+    uint32_t constant_count   = 0;
 
     // Interchangeable descriptor sets to allocate, all of the same layout. One
     // per dispatch that may be in flight: a set may not be rewritten while a

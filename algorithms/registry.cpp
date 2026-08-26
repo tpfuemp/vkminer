@@ -30,7 +30,27 @@ struct Entry {
 // which would be wrong within a week and silently.
 std::unique_ptr<Algorithm> make_kawpow_default()
 {
-    return make_kawpow(0);
+    return make_progpow(kawpow::kKawpow, 0);
+}
+
+std::unique_ptr<Algorithm> make_firopow_default()
+{
+    return make_progpow(kawpow::kFiropow, 0);
+}
+
+std::unique_ptr<Algorithm> make_evrprogpow_default()
+{
+    return make_progpow(kawpow::kEvrprogpow, 0);
+}
+
+std::unique_ptr<Algorithm> make_meowpow_default()
+{
+    return make_progpow(kawpow::kMeowpow, 0);
+}
+
+std::unique_ptr<Algorithm> make_meraki_default()
+{
+    return make_progpow(kawpow::kMeraki, 0);
 }
 
 const Entry kAlgorithms[] = {
@@ -42,6 +62,23 @@ const Entry kAlgorithms[] = {
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.
     { "kawpow",  "",       make_kawpow_default },
+    // Firo's, which is the same code over a different row of constants --
+    // 1300-block epochs, a new program every block, a dataset sized half again
+    // as large, and no name absorbed into the keccak seal.
+    { "firopow", "",       make_firopow_default },
+    // Evrmore's, which changes the fewest numbers of any of them: the round is
+    // KawPoW's, and what moves is the epoch -- 12000 blocks long, and a dataset
+    // that starts at three gigabytes rather than one.
+    { "evrprogpow", "",    make_evrprogpow_default },
+    // Meowcoin's, which halves the round itself: half the registers, cache
+    // reads and arithmetic, over a six-block program. The only one whose
+    // dataset is scaled rather than offset -- four times the epoch above epoch
+    // 110, seeded from the epoch it would have had.
+    { "meowpow", "",       make_meowpow_default },
+    // Telestai's, which rebalances the round instead: twelve cache reads to
+    // five arithmetic operations, half the rounds, and 27500-block epochs. Its
+    // seal is Ravencoin's, so the round and the epoch are all that differ.
+    { "meraki",  "",       make_meraki_default },
 };
 
 bool same_name(const char *a, const char *b)

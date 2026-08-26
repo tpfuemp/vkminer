@@ -53,6 +53,11 @@ using vkminer::kawpow::period_of;
 
 namespace kp = vkminer::kawpow;
 
+// The fork these vectors are from. The generator below is the family's; what it
+// is checked against is one member's, and check_fork_table() is what the other
+// three get.
+const kp::Params &kFork = kp::kKawpow;
+
 int failures = 0;
 
 #if defined(__MINGW_PRINTF_FORMAT)
@@ -150,7 +155,7 @@ void hash_kawpow(const ethash::epoch_context &context, const Program &program,
         static_cast<uint64_t>(context.full_dataset_num_items) / 2;
 
     kp::Hash out;
-    if (!kp::hash(program, l1, dag_lines, lines, words, nonce, &out)) {
+    if (!kp::hash(kFork, program, l1, dag_lines, lines, words, nonce, &out)) {
         fail("the interpreter refused a hash it has everything for");
         std::memset(mix_out, 0, 32);
         std::memset(final_out, 0, 32);
@@ -324,7 +329,8 @@ void check_vector(EpochCache &cache, const Vector &vector)
     }
 
     Program program;
-    build_program(period_of(static_cast<uint64_t>(vector.block)), &program);
+    build_program(kFork, period_of(kFork, static_cast<uint64_t>(vector.block)),
+                  &program);
 
     uint8_t mix[32];
     uint8_t final_hash[32];
@@ -359,7 +365,8 @@ void check_against_reference(EpochCache &cache)
         return;   // check_vector has already said so
 
     Program program;
-    build_program(period_of(static_cast<uint64_t>(block)), &program);
+    build_program(kFork, period_of(kFork, static_cast<uint64_t>(block)),
+                  &program);
 
     // Headers with no structure to them, so that nothing about the mix's first
     // round is accidentally uniform across the sample.
@@ -400,8 +407,23 @@ void check_against_reference(EpochCache &cache)
 // vectors would then pass or fail for reasons unrelated to the word.
 //
 // So every word is perturbed in turn and the answer must move. This says the
-// program is 131 words of live specification and not, say, 129 words and two the
-// interpreter never looks at.
+// program is live specification word for word and not, say, two words fewer
+// with two the interpreter never looks at.
+//
+// "Every word" means every word this fork's shape reaches. The layout is sized
+// for the widest fork of the family rather than for KawPoW, so KawPoW's own
+// program leaves the twelfth cache read's three words unwritten -- and those
+// must change nothing, which is the same statement about the layout from the
+// other side.
+bool word_is_live(const kp::Params &fork, uint32_t i)
+{
+    if (i < kp::kMathBase)
+        return i < kp::kCacheBase + fork.cache_ops * kp::kCacheWords;
+    if (i < kp::kDagBase)
+        return i < kp::kMathBase + fork.math_ops * kp::kMathWords;
+    return true;
+}
+
 void check_every_word_is_read(EpochCache &cache)
 {
     const int block = 0;
@@ -418,7 +440,8 @@ void check_every_word_is_read(EpochCache &cache)
     }
 
     Program program;
-    build_program(period_of(static_cast<uint64_t>(block)), &program);
+    build_program(kFork, period_of(kFork, static_cast<uint64_t>(block)),
+                  &program);
 
     uint8_t base_mix[32];
     uint8_t base_final[32];
@@ -437,17 +460,22 @@ void check_every_word_is_read(EpochCache &cache)
         // the mix. (It did: one word past a 2 KiB array, padding on x86-64 and
         // the stack canary on aarch64.)
         perturbed.word[i] = kp::names_a_register(i)
-                                ? (perturbed.word[i] + 1) % kp::kRegs
+                                ? (perturbed.word[i] + 1) % kFork.regs
                                 : perturbed.word[i] + 1;
 
         uint8_t mix[32];
         uint8_t final_hash[32];
         hash_kawpow(*context, perturbed, header, nonce, mix, final_hash);
 
-        if (std::memcmp(mix, base_mix, 32) == 0)
+        const bool moved = std::memcmp(mix, base_mix, 32) != 0;
+        if (word_is_live(kFork, i) && !moved)
             fail("program word %u changed nothing -- the interpreter does not "
                  "read it, and it is not part of the specification it looks "
                  "like it is part of", i);
+        if (!word_is_live(kFork, i) && moved)
+            fail("program word %u is past this fork's shape and changed the "
+                 "answer anyway -- the interpreter runs an operation the fork "
+                 "does not have", i);
     }
 }
 
@@ -457,15 +485,15 @@ void check_every_word_is_read(EpochCache &cache)
 // like a broken kernel.
 void check_period()
 {
-    if (kp::kPeriodLength != 3)
-        fail("the program changes every %u blocks, not 3", kp::kPeriodLength);
+    if (kFork.period_length != 3)
+        fail("the program changes every %u blocks, not 3", kFork.period_length);
 
     Program a;
     Program b;
     Program c;
-    build_program(period_of(30000), &a);
-    build_program(period_of(30002), &b);
-    build_program(period_of(30003), &c);
+    build_program(kFork, period_of(kFork, 30000), &a);
+    build_program(kFork, period_of(kFork, 30002), &b);
+    build_program(kFork, period_of(kFork, 30003), &c);
 
     if (std::memcmp(&a, &b, sizeof a) != 0)
         fail("two blocks of the same period got different programs");
@@ -479,44 +507,82 @@ void check_period()
     // nothing -- which is exactly one pass of the shuffled sequence. So the 32
     // must be a permutation of the registers: every register written once per
     // round, none twice, none left holding a whole period's stale value.
-    bool seen[kp::kRegs] = {false};
+    const uint32_t regs = kFork.regs;
+    bool seen[kp::kMaxRegs] = {false};
     uint32_t drawn = 0;
-    for (uint32_t i = 0; i < kp::kCacheOps; i++) {
-        seen[a.word[kp::kCacheBase + i * kp::kCacheWords + 1] % kp::kRegs] = true;
+    for (uint32_t i = 0; i < kFork.cache_ops; i++) {
+        seen[a.word[kp::kCacheBase + i * kp::kCacheWords + 1] % regs] = true;
         drawn++;
     }
-    for (uint32_t i = 0; i < kp::kMathOps; i++) {
-        seen[a.word[kp::kMathBase + i * kp::kMathWords + 3] % kp::kRegs] = true;
+    for (uint32_t i = 0; i < kFork.math_ops; i++) {
+        seen[a.word[kp::kMathBase + i * kp::kMathWords + 3] % regs] = true;
         drawn++;
     }
     for (uint32_t i = 1; i < kp::kDagLoads; i++) {
-        seen[a.word[kp::kDagBase + i * kp::kDagWords] % kp::kRegs] = true;
+        seen[a.word[kp::kDagBase + i * kp::kDagWords] % kFork.regs] = true;
         drawn++;
     }
 
     // The invariant both interpreters index the mix with unchecked, and the one
     // the perturbation below has to preserve to be testing anything.
     for (uint32_t i = 0; i < kp::kProgramWords; i++)
-        if (kp::names_a_register(i) && a.word[i] >= kp::kRegs)
+        if (kp::names_a_register(i) && a.word[i] >= kFork.regs)
             fail("program word %u names register %u, and there are %u", i,
-                 a.word[i], kp::kRegs);
+                 a.word[i], kFork.regs);
 
     uint32_t distinct = 0;
     for (bool s : seen)
         distinct += s ? 1 : 0;
-    if (drawn != kp::kRegs)
+    if (drawn != kFork.regs)
         fail("a round draws %u destinations, not %u -- it is no longer one pass "
              "of the sequence and the permutation says nothing", drawn,
-             kp::kRegs);
+             kFork.regs);
     else if (distinct != drawn)
         fail("the %u destinations of a round name only %u registers -- the "
              "destination sequence is not a permutation", drawn, distinct);
+}
+
+// The fork table itself, which is the only thing separating five coins and is
+// five rows of numbers nobody can read back off a chain.
+//
+// Two properties, both of which a typo breaks silently. A fork wider than the
+// layout every shader is compiled against would index past the mix; and in each
+// branded fork the final absorb repeats the first nine words of the seed
+// absorb, which the table states twice so that FiroPoW -- whose two are
+// unrelated -- needs no special case. A wrong digit in the second copy mines a
+// chain nobody runs, and nothing else here would notice.
+void check_fork_table()
+{
+    const kp::Params *forks[] = {
+        &kp::kKawpow, &kp::kMeowpow, &kp::kEvrprogpow, &kp::kFiropow,
+        &kp::kMeraki,
+    };
+
+    for (const kp::Params *f : forks) {
+        if (f->regs > kp::kMaxRegs || f->cache_ops > kp::kMaxCacheOps ||
+            f->math_ops > kp::kMaxMathOps || f->rounds > kp::kMaxRounds)
+            fail("%s is wider than the layout the shaders are built for",
+                 f->name);
+        if (!f->period_length || !f->epoch_length)
+            fail("%s divides by zero somewhere", f->name);
+
+        // FiroPoW's two absorbs are two different padded states and not one
+        // repeated; see the table.
+        if (f == &kp::kFiropow)
+            continue;
+        for (uint32_t i = 0; i < kp::kSealFinalWords; i++)
+            if (f->seal_final[i] != f->seal_seed[i])
+                fail("%s: seal word %u is 0x%08x where it ends and 0x%08x "
+                     "where it starts", f->name, i, f->seal_final[i],
+                     f->seal_seed[i]);
+    }
 }
 
 }  // namespace
 
 int main()
 {
+    check_fork_table();
     check_period();
 
     EpochCache cache;
@@ -531,10 +597,16 @@ int main()
         return 1;
     }
 
+    // KawPoW's own words, not the layout's: the three the widest fork of the
+    // family adds are checked above for staying inert here.
+    uint32_t live = 0;
+    for (uint32_t i = 0; i < kp::kProgramWords; i++)
+        live += word_is_live(kFork, i) ? 1u : 0u;
+
     const size_t vectors = sizeof kVectors / sizeof kVectors[0];
     std::printf("kawpow: %zu official vectors reproduce from a %u-word program, "
                 "8 unpublished headers agree with the reference, and every one "
                 "of those words changes the answer\n",
-                vectors, kp::kProgramWords);
+                vectors, live);
     return 0;
 }

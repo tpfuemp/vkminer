@@ -735,6 +735,10 @@ static bool parse_uint_field( json_t *val, uint64_t *out )
  * job without one is refused rather than mined at epoch zero.               */
 static bool stratum_progpow_notify( struct stratum_ctx *sctx, json_t *params )
 {
+   /* The last seed hash complained about below, so that a pool this miner
+      disagrees with costs one line an epoch and not one a job.  */
+   static unsigned char complained_about[32];
+
    const char *job_id, *header_hash, *seed_hash, *target_hex;
    uint64_t height = 0, nbits = 0;
    uint32_t target[8];
@@ -799,6 +803,29 @@ static bool stratum_progpow_notify( struct stratum_ctx *sctx, json_t *params )
                        "been set", job_id );
       return false;
    }
+
+   /* The pool's opinion of which epoch this is, against ours. Complained about
+      rather than refused: a disagreement means every share will be rejected,
+      but a miner that stopped on it would look exactly like one that cannot
+      reach the pool, and this is the first thing anybody would need to see.
+
+      Once per seed rather than once per job -- which is once per epoch without
+      having to know how long an epoch is here.  */
+   if ( progpow_seed_hash_agrees
+        && !progpow_seed_hash_agrees( height, sctx->job.seed_hash )
+        && memcmp( complained_about, sctx->job.seed_hash,
+                   sizeof complained_about ) )
+   {
+      char seen[65];
+      memcpy( complained_about, sctx->job.seed_hash,
+              sizeof complained_about );
+      bin2hex( seen, (char*) sctx->job.seed_hash, 32 );
+      applog( LOG_ERR, "Stratum notify: the pool's seed hash at block %u is "
+                       "%s, which is not the epoch '%s' would build -- one of "
+                       "us has the wrong dataset, and every share from here "
+                       "will be rejected", (uint32_t) height, seen, opt_algo );
+   }
+
    return true;
 }
 

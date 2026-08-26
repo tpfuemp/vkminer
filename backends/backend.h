@@ -233,6 +233,20 @@ struct KernelSpec {
     // of being asked -- see Kernel::prepare_program.
     uint32_t program_constants = 0;
 
+    // Specialization constants that do not change with the job: the same values
+    // in every pipeline built from this spec, handed to the compiler from a
+    // fixed constant ID above the program's.
+    //
+    // What this is for is one module serving a family of algorithms that differ
+    // only in numbers -- the shape of a loop, the words a hash absorbs. Those
+    // belong here rather than in the program, because a program is recompiled
+    // whenever the job moves and these never move at all.
+    //
+    // Borrowed, like the SPIR-V, and read whenever a pipeline is built: it must
+    // outlive the kernel.
+    const uint32_t *constants = nullptr;
+    size_t constant_count = 0;
+
     // Dispatches this kernel may hold at once; 0 lets the backend choose. Not
     // an algorithm's business -- it is here so a caller sweeping both axes can
     // ask for one combination without going through a process-wide global.

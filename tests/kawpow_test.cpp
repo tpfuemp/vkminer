@@ -61,6 +61,23 @@ namespace {
 constexpr uint32_t kEpoch = 0;
 constexpr uint64_t kLines = 8192;
 
+// Which fork's constants the kernel is built from, named on the command line
+// and KawPoW's when nothing is. The forks with no published vectors have no
+// other check of their shader before a pool sees it: their table of constants
+// reaches the kernel through specialization constants, and a wrong one there
+// produces digests that look exactly like digests. This test does not need a
+// vector -- the host reference is the oracle, and it is the same code the miner
+// re-hashes candidates with.
+//
+// The epoch and the table above are the fork's only through arithmetic this
+// test deliberately does not exercise: the table is `kLines` long whoever asked
+// for it, and the line index is taken modulo that on both sides.
+const vkminer::kawpow::Params *fork_params = &vkminer::kawpow::kKawpow;
+
+// The period the two ranges below sit in, in that fork's blocks. Arbitrary and
+// fixed, so that a failure is reproducible.
+constexpr uint64_t kPeriod = 1249;
+
 // Nonces per dispatch. Every one of them is a candidate in the first phase --
 // the target is wide open, so the device reports every digest it computes --
 // which puts the ceiling at kMaxCandidates.
@@ -268,10 +285,10 @@ bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info
                 vkminer::device_kind_name(info.kind));
 
     std::unique_ptr<vkminer::Algorithm> algo =
-        vkminer::make_kawpow_host_dag(kEpoch, kLines);
+        vkminer::make_progpow_host_dag(*fork_params, kEpoch, kLines);
     const vkminer::KernelSpec spec = algo->kernel(info);
     if (!spec.spirv) {
-        fail("the kawpow module is not embedded in this build");
+        fail("the %s module is not embedded in this build", fork_params->name);
         return false;
     }
 
@@ -291,7 +308,8 @@ bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info
     // The table, built here rather than on the device. Everything below hashes
     // against it, and it is the same bytes for both headers: the epoch decides
     // the table and the height decides only the program.
-    const std::vector<uint32_t> low = header_for(3 * 1249);
+    const std::vector<uint32_t> low =
+        header_for(kPeriod * fork_params->period_length);
     if (!kernel->prepare_state(algo->state_key(low.data()))) {
         fail("could not upload the DAG");
         return false;
@@ -304,7 +322,8 @@ bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info
     // the host draws, not that either matches a number written down somewhere.
     if (!range_matches(*kernel, *algo, low, 0, nonces, "low range"))
         return false;
-    std::printf("ok   %u nonces at period %u\n", nonces, 1249u);
+    std::printf("ok   %u nonces at period %llu\n", nonces,
+                static_cast<unsigned long long>(kPeriod));
 
     // ---- and one that crosses 2^32
     //
@@ -313,7 +332,8 @@ bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info
     // kernel does itself, once per invocation, because what it is handed is a
     // base and an index. This range starts eight nonces below the boundary.
     const uint64_t high_first = 0x00001234fffffff8ull;
-    const std::vector<uint32_t> high = header_for(3 * 2499 + 2);
+    const std::vector<uint32_t> high =
+        header_for((2 * kPeriod + 1) * fork_params->period_length + 2);
     if (!range_matches(*kernel, *algo, high, high_first, kBatch, "high range"))
         return false;
     std::printf("ok   %u nonces across 2^32, from %s\n", kBatch,
@@ -335,14 +355,27 @@ int main(int argc, char *argv[])
     pthread_mutex_init(&applog_lock, nullptr);
 
     uint32_t nonces = kDefaultNonces;
-    if (argc > 1) {
-        const long asked = std::strtol(argv[1], nullptr, 10);
+    for (int i = 1; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--fork") && i + 1 < argc) {
+            fork_params = vkminer::kawpow::find(argv[++i]);
+            if (!fork_params) {
+                std::printf("usage: %s [nonces] [--fork name]\n", argv[0]);
+                return 2;
+            }
+            continue;
+        }
+
+        const long asked = std::strtol(argv[i], nullptr, 10);
         if (asked <= 0) {
-            std::printf("usage: %s [nonces]\n", argv[0]);
+            std::printf("usage: %s [nonces] [--fork name]\n", argv[0]);
             return 2;
         }
         nonces = static_cast<uint32_t>(asked);
     }
+
+    std::printf("-- %s: %u regs, %u cache and %u math operations a round, a "
+                "program every %u block(s)\n", fork_params->name, fork_params->regs,
+                fork_params->cache_ops, fork_params->math_ops, fork_params->period_length);
 
     // Worth their cost here for the same reason as everywhere else the shared
     // table is involved, and one more: this is the first kernel with a barrier

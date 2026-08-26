@@ -32,6 +32,7 @@
 // SKIPs where there is no Vulkan device or no shader, like the other device
 // tests: neither is a wrong answer.
 
+#include "algorithms/kawpow/kawpow.h"
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "backends/vulkan/vulkan_common.h"
@@ -104,9 +105,20 @@ void print_hash(const char *label, const uint32_t *hash)
 // What the device makes of exactly one nonce. False means the device did not
 // answer the question -- a failed dispatch, or a candidate count that says the
 // kernel is not doing what this test assumes -- and it has already been logged.
-bool device_digest(vkminer::Kernel &kernel, const uint32_t *header,
-                   uint64_t nonce, uint32_t out[8])
+bool device_digest(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
+                   const uint32_t *header, uint64_t nonce, uint32_t out[8])
 {
+    // What the worker asks before every dispatch, and for the same reason: a
+    // kernel that hashes against a table, or against a program compiled from
+    // the header, has to be told which one this header wants. Both are no-ops
+    // for an algorithm that needs neither -- and one of the words perturbed
+    // below is what decides the second, so this cannot be hoisted out.
+    if (!kernel.prepare_state(algo.state_key(header)) ||
+        !kernel.prepare_program(algo.program_key(header))) {
+        fail("the kernel could not prepare itself for this header");
+        return false;
+    }
+
     if (!kernel.dispatch(header, kOpenTarget, nonce, 1)) {
         fail("the kernel refused a dispatch of one nonce");
         return false;
@@ -152,7 +164,7 @@ bool run_vector(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     // without it a device that returned a constant would "change its answer"
     // for no word at all and every check below would fail for the wrong reason.
     uint32_t base[8];
-    if (!device_digest(kernel, header.data(), answer.nonce, base))
+    if (!device_digest(kernel, algo, header.data(), answer.nonce, base))
         return false;
 
     if (std::memcmp(base, answer.digest, sizeof base) != 0) {
@@ -165,7 +177,7 @@ bool run_vector(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
         return false;
     }
 
-    unsigned ignored = 0, wrong = 0;
+    unsigned ignored = 0, wrong = 0, inert = 0;
 
     for (size_t w = 0; w < words; w++) {
         // The nonce word carries no information -- the dispatch supplies the
@@ -174,20 +186,45 @@ bool run_vector(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
         if (w == nonce_word)
             continue;
 
+        // Which bit to flip is the reference's answer rather than this test's.
+        // Bit 0 is the usual one and moves the digest for most algorithms, but
+        // a header word need not reach it bit for bit: KawPoW's block height
+        // selects the inner program by way of a period several blocks long, so
+        // its lowest bit is genuinely inert and a kernel producing the same
+        // digest under it is correct. Asking the reference for the first bit
+        // that does move keeps the assertion at "the device reads this word"
+        // instead of "the device reads this bit", and costs one host hash per
+        // word wherever bit 0 already works.
         std::vector<uint32_t> probe = header;
-        probe[w] ^= 1u;   // one bit, so nothing is proven by brute force
+        uint32_t want[8];
+        unsigned bit = 0;
+        for (; bit < 32; bit++) {
+            probe[w] = header[w] ^ (1u << bit);   // one bit, never a search
+            algo.hash(probe.data(), answer.nonce, want);
+            if (std::memcmp(want, base, sizeof base) != 0)
+                break;
+        }
+
+        // No bit of it reaches the digest at all. That is a statement about the
+        // algorithm, not about the device: nothing here can tell a kernel that
+        // reads such a word from one that ignores it, so it is reported rather
+        // than passed over in silence.
+        if (bit == 32) {
+            std::printf("     %s: header word %u is inert -- no single bit of "
+                        "it moves the reference's digest\n", answer.label,
+                        static_cast<unsigned>(w));
+            inert++;
+            continue;
+        }
 
         uint32_t got[8];
-        if (!device_digest(kernel, probe.data(), answer.nonce, got))
+        if (!device_digest(kernel, algo, probe.data(), answer.nonce, got))
             return false;
 
-        uint32_t want[8];
-        algo.hash(probe.data(), answer.nonce, want);
-
         if (std::memcmp(got, base, sizeof base) == 0) {
-            fail("%s: flipping a bit of header word %u left the device's "
+            fail("%s: flipping bit %u of header word %u left the device's "
                  "digest unchanged -- the kernel does not read that word",
-                 answer.label, static_cast<unsigned>(w));
+                 answer.label, bit, static_cast<unsigned>(w));
             ignored++;
         } else if (std::memcmp(got, want, sizeof want) != 0) {
             fail("%s: header word %u perturbed -- the device and the reference "
@@ -203,7 +240,7 @@ bool run_vector(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     // ignored its nonce would have passed every check above.
     {
         uint32_t got[8];
-        if (!device_digest(kernel, header.data(), answer.nonce + 1, got))
+        if (!device_digest(kernel, algo, header.data(), answer.nonce + 1, got))
             return false;
 
         uint32_t want[8];
@@ -246,10 +283,19 @@ bool run_vector(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
                  "target it was given", answer.label);
     }
 
-    if (!ignored && !wrong)
+    // Words actually put to the device: everything but the nonce's, where the
+    // header has one at all, less any the reference says nothing reaches.
+    const unsigned tested =
+        static_cast<unsigned>(words - (nonce_word < words ? 1 : 0)) - inert;
+
+    if (!ignored && !wrong) {
         std::printf("ok   %s: every one of the %u header words changes the "
-                    "device's answer, and changes it to the reference's\n",
-                    answer.label, static_cast<unsigned>(words - 1));
+                    "device's answer, and changes it to the reference's",
+                    answer.label, tested);
+        if (inert)
+            std::printf(" (%u more carry no bit that reaches it)", inert);
+        std::printf("\n");
+    }
     return !ignored && !wrong;
 }
 
@@ -274,10 +320,42 @@ bool run_device(vkminer::ComputeBackend &backend,
     }
 
     const vkminer::KnownAnswer *answers = nullptr;
-    const size_t count = algo.known_answers(&answers);
+    size_t count = algo.known_answers(&answers);
+
+    // An algorithm may have nothing published that this test can use: KawPoW's
+    // vectors are answers against the whole of an epoch's table and this hashes
+    // against a truncated one, so it withholds them rather than let a wrong
+    // table look like a wrong kernel. Manufacture a header there. A vector's
+    // worth is that a third party can confirm it, and nothing below asks that
+    // of one -- the words are perturbed into headers no chain ever saw on the
+    // second dispatch anyway, which is the whole point of the file. What is
+    // lost is only the positive control's external witness, and the startup KAT
+    // and the host-side KAT both hold that already.
+    std::vector<unsigned char> made_header;
+    unsigned char made_digest[32];
+    vkminer::KnownAnswer made = {};
     if (!count) {
-        fail("%s carries no known-answer vectors to perturb", algo.name());
-        return false;
+        const size_t words = algo.header_bytes() / 4;
+        std::vector<uint32_t> hdr(words);
+        for (size_t i = 0; i < words; i++)
+            hdr[i] = static_cast<uint32_t>(0x9e3779b9u * (i + 1));
+        if (algo.nonce_word() < words)
+            hdr[algo.nonce_word()] = 0;   // as run_vector will read it back
+
+        made_header.resize(words * 4);
+        for (size_t i = 0; i < words; i++)
+            be32enc(made_header.data() + i * 4, hdr[i]);
+
+        made.label = "manufactured";
+        made.header = made_header.data();
+        made.nonce = 0xdeadbeefu;   // inside a 32-bit nonce field as well
+        uint32_t digest[8];
+        algo.hash(hdr.data(), made.nonce, digest);
+        std::memcpy(made_digest, digest, sizeof made_digest);
+        made.digest = made_digest;
+
+        answers = &made;
+        count = 1;
     }
 
     bool ok = true;
@@ -303,7 +381,19 @@ int main(int argc, char *argv[])
             name = argv[i];
     }
 
-    std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(name);
+    // KawPoW is built by hand rather than by name, for the reason the other two
+    // KawPoW device tests do it: the registry's version generates a gigabyte of
+    // DAG on the device under test, and a run that spent most of itself in a
+    // setup pass could fail for two reasons at once. A short host-built table
+    // uploaded instead decides neither question by accident -- the line index
+    // is taken modulo its length on both sides -- and leaves the hash under
+    // test, which is what is being perturbed. Same epoch and same length as
+    // those tests use, so a disagreement can be chased in either of them.
+    constexpr uint64_t kKawpowLines = 8192;
+    std::unique_ptr<vkminer::Algorithm> algo =
+        std::strcmp(name, "kawpow") == 0
+            ? vkminer::make_progpow_host_dag(vkminer::kawpow::kKawpow, 0, kKawpowLines)
+            : vkminer::create_algorithm(name);
     if (!algo) {
         std::printf("FAIL no algorithm called '%s'\n", name);
         return 1;

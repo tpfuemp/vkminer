@@ -163,23 +163,34 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
     // All of them are offered to every module. A constant ID the shader does
     // not declare is ignored, which is what lets one block serve a shader with
     // a shared table in pieces and one with no table at all.
-    // ...and the program's constants after them, one word each, from
-    // kProgramConstantId upwards in the order the algorithm wrote them. Every
-    // one is a uint32 here, whatever the shader declares it as: a specialization
-    // constant is matched by ID and size, and a shader wanting something else
-    // would be a shader whose author picked the type on this side too.
+    // ...then the program's constants from kProgramConstantId upwards, then the
+    // kernel's own from kKernelConstantId, each in the order the algorithm wrote
+    // them. Every one is a uint32 here, whatever the shader declares it as: a
+    // specialization constant is matched by ID and size, and a shader wanting
+    // something else would be a shader whose author picked the type on this
+    // side too.
+    //
+    // The three groups are contiguous in the data block and not in the ID
+    // space, which is what the map entries are for.
     std::vector<uint32_t> constants;
-    constants.reserve(4 + desc.program_count);
+    constants.reserve(4 + desc.program_count + desc.constant_count);
     constants.push_back(desc.local_size_x);
     constants.push_back(desc.probe_best ? VK_TRUE : VK_FALSE);
     constants.push_back(desc.shared_chunks);
     constants.push_back(desc.shared_chunk_words);
     for (uint32_t i = 0; i < desc.program_count; i++)
         constants.push_back(desc.program ? desc.program[i] : 0);
+    for (uint32_t i = 0; i < desc.constant_count; i++)
+        constants.push_back(desc.constants ? desc.constants[i] : 0);
 
     std::vector<VkSpecializationMapEntry> entries(constants.size());
     for (uint32_t i = 0; i < entries.size(); i++) {
-        entries[i].constantID = i < 4 ? i : kProgramConstantId + (i - 4);
+        const uint32_t after_program = 4 + desc.program_count;
+        entries[i].constantID =
+            i < 4 ? i
+                  : i < after_program
+                        ? kProgramConstantId + (i - 4)
+                        : kKernelConstantId + (i - after_program);
         entries[i].offset = i * sizeof(uint32_t);
         entries[i].size = sizeof(uint32_t);
     }

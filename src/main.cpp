@@ -12,6 +12,7 @@ extern "C" {
 #include "core/miner.h"
 }
 
+#include "algorithms/kawpow/kawpow.h"
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "replay.h"
@@ -337,6 +338,7 @@ int main(int argc, char *argv[])
         opt_nonce_bits = algo->nonce_bits();
         if (algo->stratum_dialect() == vkminer::StratumDialect::kProgPow) {
             opt_stratum_dialect = STRATUM_PROGPOW;
+            progpow_seed_hash_agrees = progpow_seed_hash_check;
             applog(LOG_INFO, "'%s' speaks the ProgPoW stratum: the pool sends "
                              "a header hash rather than a coinbase, and keeps "
                              "the top %u bits of the nonce",

@@ -229,6 +229,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/kawpow/kawpow.cpp
     algorithms/kawpow/kawpow_dag.cpp
     algorithms/kawpow/kawpow_hash.cpp
+    algorithms/kawpow/kawpow_params.cpp
     algorithms/kawpow/kawpow_program.cpp)
 
 target_include_directories(vkminer_algorithms PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")

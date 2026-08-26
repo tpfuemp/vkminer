@@ -33,6 +33,10 @@ constexpr uint32_t kSpan = 256;
 // correct.
 constexpr int kMaxSolutions = 16;
 
+// Kernels one algorithm may offer for one device, matching the tuner's own
+// bound: what the tuner will race is what this has to have tested.
+constexpr size_t kMaxVariants = 4;
+
 std::string hex(const unsigned char *bytes, size_t n)
 {
     static const char digits[] = "0123456789abcdef";
@@ -270,7 +274,8 @@ bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
     }
 
     const KnownAnswer *answers = nullptr;
-    const size_t count = algo->known_answers(&answers);
+    bool published = false;
+    const size_t count = startup_answers(*algo, &answers, &published);
     if (!count) {
         applog(LOG_ERR, "Self-test: '%s' carries no known-answer vectors, so "
                         "this build cannot show that it hashes correctly",
@@ -282,12 +287,25 @@ bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
     // printf does not accept it and this binary is built for Windows.
     const unsigned n = static_cast<unsigned>(count);
 
-    for (size_t i = 0; i < count; i++)
-        if (!check_reference(*algo, answers[i]))
-            return false;
+    // Hashing the reference's own output with the reference proves nothing, so
+    // the pass below is skipped for an algorithm nobody published a vector for
+    // -- and the line that replaces it says what is left untested. The device
+    // pass is the same either way and is where those answers earn their keep.
+    if (!published) {
+        applog(LOG_WARNING, "Self-test: nobody published a vector for %s, so "
+                            "every kernel is checked against this build's own "
+                            "reference and not against the chain. A pool "
+                            "accepting a share is the only evidence that the "
+                            "reference is right about %s",
+               algo->name(), algo->name());
+    } else {
+        for (size_t i = 0; i < count; i++)
+            if (!check_reference(*algo, answers[i]))
+                return false;
 
-    applog(LOG_INFO, "Self-test: the %s reference reproduces %u published "
-                     "hash(es)", algo->name(), n);
+        applog(LOG_INFO, "Self-test: the %s reference reproduces %u published "
+                         "hash(es)", algo->name(), n);
+    }
 
     const std::vector<DeviceInfo> &devices = backend.devices();
 
@@ -298,23 +316,48 @@ bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
         }
         const DeviceInfo &info = devices[index];
 
-        std::unique_ptr<Kernel> kernel =
-            backend.create_kernel(index, algo->kernel(info));
-        if (!kernel) {
-            applog(LOG_ERR, "Self-test: '%s' would not build for device %d",
-                   algo->name(), index);
+        // Every kernel the device could run, not just the one kernel() picks.
+        // The tuner chooses the variant afterwards, so testing the default
+        // leaves whichever one goes on to mine untested on a boot that reads
+        // its choice from the cache -- and for an algorithm offering three,
+        // the default is the control rather than the fast one. Algorithms
+        // offering a single kernel pay nothing: kernels() answers with it.
+        KernelSpec variants[kMaxVariants];
+        const size_t variant_count = algo->kernels(info, variants,
+                                                   kMaxVariants);
+        if (!variant_count) {
+            applog(LOG_ERR, "Self-test: '%s' offers device %d no kernel it "
+                            "could build", algo->name(), index);
             return false;
         }
 
         const std::string device = "device " + std::to_string(index)
                                  + " (" + info.name + ")";
 
-        for (size_t i = 0; i < count; i++)
-            if (!kernel_reproduces(*kernel, *algo, answers[i], device.c_str()))
+        for (size_t v = 0; v < variant_count; v++) {
+            std::unique_ptr<Kernel> kernel =
+                backend.create_kernel(index, variants[v]);
+            if (!kernel) {
+                applog(LOG_ERR, "Self-test: '%s' would not build for device "
+                                "%d", algo->name(), index);
                 return false;
+            }
 
-        applog(LOG_INFO, "Self-test: %s reproduces %u published hash(es)",
-               device.c_str(), n);
+            // Named only where there is a choice, so the single-kernel
+            // algorithms keep the line they have always printed.
+            const std::string what =
+                variant_count > 1 && variants[v].variant
+                    ? device + ", kernel '" + variants[v].variant + "'"
+                    : device;
+
+            for (size_t i = 0; i < count; i++)
+                if (!kernel_reproduces(*kernel, *algo, answers[i],
+                                       what.c_str()))
+                    return false;
+
+            applog(LOG_INFO, "Self-test: %s reproduces %u %s hash(es)",
+                   what.c_str(), n, published ? "published" : "reference");
+        }
     }
 
     return true;

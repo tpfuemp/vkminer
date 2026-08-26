@@ -6,8 +6,16 @@
 namespace vkminer {
 namespace kawpow {
 
-void build_program(uint64_t period, Program *out)
+void build_program(const Params &params, uint64_t period, Program *out)
 {
+    // Every word first, because a fork using fewer operations than the layout
+    // holds leaves the tail of a section untouched, and a shader specialized on
+    // whatever was there would be specialized on nothing in particular.
+    for (uint32_t i = 0; i < kProgramWords; i++)
+        out->word[i] = 0;
+
+    const uint32_t regs = params.regs;
+
     const uint32_t lo = static_cast<uint32_t>(period);
     const uint32_t hi = static_cast<uint32_t>(period >> 32);
 
@@ -19,18 +27,18 @@ void build_program(uint64_t period, Program *out)
     Kiss99 rng(z, w, jsr, jcong);
 
     // Which register each operation writes, and which it reads, are drawn from
-    // two shuffled permutations rather than at random: over one pass of 32
+    // two shuffled permutations rather than at random: over one pass of `regs`
     // operations every register is written exactly once, so no register goes
     // untouched for a whole period and none is written twice while another is
     // ignored. Fisher-Yates, from the top down, and the two sequences are
     // interleaved -- one swap of each per step, destinations first.
-    uint32_t dst_seq[kRegs];
-    uint32_t src_seq[kRegs];
-    for (uint32_t i = 0; i < kRegs; i++) {
+    uint32_t dst_seq[kMaxRegs];
+    uint32_t src_seq[kMaxRegs];
+    for (uint32_t i = 0; i < regs; i++) {
         dst_seq[i] = i;
         src_seq[i] = i;
     }
-    for (uint32_t i = kRegs; i > 1; i--) {
+    for (uint32_t i = regs; i > 1; i--) {
         const uint32_t d = rng() % i;
         const uint32_t t0 = dst_seq[i - 1];
         dst_seq[i - 1] = dst_seq[d];
@@ -44,17 +52,18 @@ void build_program(uint64_t period, Program *out)
 
     uint32_t dst_counter = 0;
     uint32_t src_counter = 0;
-    auto next_dst = [&] { return dst_seq[dst_counter++ % kRegs]; };
-    auto next_src = [&] { return src_seq[src_counter++ % kRegs]; };
+    auto next_dst = [&] { return dst_seq[dst_counter++ % regs]; };
+    auto next_src = [&] { return src_seq[src_counter++ % regs]; };
 
     // The two kinds of operation are drawn interleaved, one of each per
-    // step, for as long as there are both -- eleven steps with a cache read and
-    // a math operation, then seven with only math. Drawing all the cache
-    // operations first would produce a different and entirely plausible-looking
-    // program.
-    const uint32_t steps = kCacheOps > kMathOps ? kCacheOps : kMathOps;
+    // step, for as long as there are both -- on KawPoW eleven steps with a cache
+    // read and a math operation, then seven with only math. Drawing all the
+    // cache operations first would produce a different and entirely
+    // plausible-looking program.
+    const uint32_t steps = params.cache_ops > params.math_ops ? params.cache_ops
+                                                              : params.math_ops;
     for (uint32_t i = 0; i < steps; i++) {
-        if (i < kCacheOps) {
+        if (i < params.cache_ops) {
             const uint32_t src = next_src();
             const uint32_t dst = next_dst();
             const uint32_t sel = rng();
@@ -64,13 +73,13 @@ void build_program(uint64_t period, Program *out)
             op[1] = dst;
             op[2] = sel;
         }
-        if (i < kMathOps) {
+        if (i < params.math_ops) {
             // Two *different* source registers, from one draw: the second is
             // taken from the range with the first removed and shifted back into
             // place, which is why it is not simply two independent numbers.
-            const uint32_t src_rnd = rng() % (kRegs * (kRegs - 1));
-            const uint32_t src1 = src_rnd % kRegs;
-            uint32_t src2 = src_rnd / kRegs;
+            const uint32_t src_rnd = rng() % (regs * (regs - 1));
+            const uint32_t src1 = src_rnd % regs;
+            uint32_t src2 = src_rnd / regs;
             if (src2 >= src1)
                 src2++;
 

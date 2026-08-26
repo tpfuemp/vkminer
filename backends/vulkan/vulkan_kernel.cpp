@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 #include <numeric>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -109,6 +110,15 @@ public:
         device_ = &device;
         algorithm_ = spec.algorithm;
         name_ = spec.name;
+
+        // Statistics are printed per pipeline, and an algorithm offering
+        // several kernels builds several -- so the label has to carry the
+        // variant or the numbers cannot be told apart afterwards.
+        stats_label_ = name_ ? name_ : "";
+        if (spec.variant && spec.variant[0]) {
+            stats_label_ += ", kernel ";
+            stats_label_ += spec.variant;
+        }
         push_bytes_ = spec.push_constant_bytes;
         shared_ = std::move(shared);
 
@@ -227,6 +237,12 @@ public:
                                       / sizeof(uint32_t));
         }
 
+        // The algorithm's fixed constants, in every pipeline built below.
+        // Pointed at rather than copied, which is why the spec must outlive
+        // this kernel -- the same rule as its SPIR-V.
+        desc.constants = spec.constants;
+        desc.constant_count = static_cast<uint32_t>(spec.constant_count);
+
         // How many constants the program is, where this module is built per
         // program. The pipeline cannot exist yet -- nothing here knows which
         // program, and the module's own defaults are nobody's -- so the first
@@ -339,10 +355,20 @@ public:
         if (!ring_)
             return false;
 
-        // A first guess, corrected from measurement after the first dispatch.
-        // It is deliberately low: too small costs throughput for a fraction of
-        // a second, too large risks a watchdog on hardware nobody has tested.
-        batch_ = info.kind == DeviceKind::Cpu ? (1u << 18) : (1u << 20);
+        // A first guess, corrected from measurement after the first dispatch --
+        // so what matters is not that it is close but that it can finish. A
+        // dispatch that runs into the timeout returns no measurement to correct
+        // from and the next one is the same size, which makes this the one
+        // number here with no way back from being wrong.
+        //
+        // Deliberately low, and lower per lane for the reason the floor is:
+        // sixteen lanes to a hash is sixteen times the work at the same count.
+        // A software rasterizer starts at the floor outright, because per-nonce
+        // cost there spans four orders of magnitude between sha256d and KawPoW
+        // and no single count is both useful for the first and survivable for
+        // the last. Climbing from it costs milliseconds on a device nobody
+        // measures a rate on.
+        batch_ = info.kind == DeviceKind::Cpu ? 0 : (1u << 20) / lanes_;
         clamp_batch(info);
 
         // The depth is on this line so that a log says which run it was --
@@ -690,7 +716,7 @@ private:
         // startup: whether the driver folds a program's constants into straight
         // line code, or leaves a switch per operation, is the whole question a
         // kernel built per program is betting on.
-        built->report_statistics(name_);
+        built->report_statistics(stats_label_.c_str());
         return built;
     }
 
@@ -870,8 +896,18 @@ private:
 
     void clamp_batch(const DeviceInfo &info)
     {
-        if (batch_ < kMinBatch)
-            batch_ = kMinBatch;
+        // The floor is a count of invocations rather than of nonces, because
+        // what it is for is giving a dispatch enough parallelism to fill a
+        // device, and a lane is a fraction of a hash and not another one.
+        // Sixteen lanes to the nonce made it sixteen times the intended size,
+        // and a floor the tuning cannot descend below is a floor it has to run
+        // at: on a software rasterizer that is a KawPoW dispatch of seconds
+        // where the aim is fifty milliseconds.
+        uint32_t least = kMinBatch / lanes_;
+        if (least < per_group_)
+            least = per_group_;
+        if (batch_ < least)
+            batch_ = least;
         if (batch_ > kMaxBatch)
             batch_ = kMaxBatch;
 
@@ -894,6 +930,7 @@ private:
     VulkanDevice *device_ = nullptr;
     const Algorithm *algorithm_ = nullptr;
     const char *name_ = "";
+    std::string stats_label_;
 
     std::unique_ptr<ComputePipeline> pipeline_;
     std::unique_ptr<CommandRing> ring_;

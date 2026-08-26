@@ -59,6 +59,17 @@ target_link_libraries(kawpow_program_kat PRIVATE
 add_test(NAME kawpow_program_kat COMMAND kawpow_program_kat)
 set_tests_properties(kawpow_program_kat PROPERTIES TIMEOUT 300)
 
+# The same interpreter again, for the forks of it: against the only vectors any
+# of them published, and against shares a pool accepted where there are none. No
+# vendored second opinion exists here -- see the file -- so this is what stands
+# between a fork's row of constants and a live pool. Light caches by the dozen,
+# the largest at epoch 1092 and 152 MiB, so twice the timeout above.
+add_executable(progpow_variants_kat progpow_variants_kat.cpp)
+target_link_libraries(progpow_variants_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME progpow_variants_kat COMMAND progpow_variants_kat)
+set_tests_properties(progpow_variants_kat PROPERTIES TIMEOUT 600)
+
 # One level up again: not whether a header hashes correctly, but whether a
 # mining.notify turns into the right header in the first place.
 add_executable(stratum_header_kat stratum_header_kat.cpp)
@@ -317,6 +328,43 @@ if(TARGET vkminer_shaders)
     set_tests_properties(kawpow_spec_test
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # Both of those again over another fork's row of constants. Only two of the
+    # forks have published hashes to be checked against, and the shader gets its
+    # constants through specialization -- so for the rest this pair is the whole
+    # check that what the device computes is what the host says it should,
+    # before a pool is asked. Cheap: the fork changes numbers, not sizes.
+    #
+    # meowpow and meraki earn the loop: they move the numbers the shader is
+    # specialized on -- sixteen registers instead of thirty-two, half the
+    # rounds, more cache reads than arithmetic -- so they are where a
+    # specialization constant that reached the pipeline but not the array it
+    # sizes would show up. meraki is also the only fork that uses the twelfth
+    # cache read, the widest the program layout goes.
+    foreach(fork evrprogpow meowpow meraki)
+        add_test(NAME kawpow_test_${fork}
+            COMMAND kawpow_test 256 --fork ${fork})
+        set_tests_properties(kawpow_test_${fork}
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+        add_test(NAME kawpow_spec_test_${fork}
+            COMMAND kawpow_spec_test 64 --fork ${fork})
+        set_tests_properties(kawpow_spec_test_${fork}
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    endforeach()
+
+    # The same kernels over a range the other arm cannot reach. Its host oracle
+    # walks a DAG per nonce, which is what holds it to 64; two kernels compared
+    # against each other are both the device, so the range costs dispatches
+    # rather than minutes of CPU. A few dozen nonces select a few dozen paths
+    # through a 134-word program, and this is the arm that says the rest of them
+    # agree too -- which is what makes it the gate for changing the shader.
+    #
+    # Weaker per nonce than the arm above, because two kernels sharing a body
+    # can share a mistake in it. It runs beside that arm, never instead of it.
+    add_test(NAME kawpow_wide_diff COMMAND kawpow_spec_test 8 --wide 100000)
+    set_tests_properties(kawpow_wide_diff
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 LABELS slow)
+
     # The same range with the queue held to one dispatch -- the path
     # --queue-depth 1 selects, and the baseline the pipelining is measured
     # against. It catches a kernel that only works with something queued behind
@@ -336,6 +384,25 @@ if(TARGET vkminer_shaders)
     add_test(NAME race_test COMMAND race_test sha256d 8)
     set_tests_properties(race_test
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
+    # And for the algorithm with the most to race about: sixteen invocations
+    # cooperate on one KawPoW nonce and exchange registers twice per round,
+    # through a workgroup array on one kernel and subgroup shuffles on another,
+    # so a missing barrier there is a wrong digest rather than a slow one.
+    # Nothing else here runs that at full occupancy.
+    #
+    # Against a short host-built table, because the machines this suite has to
+    # run on include two software rasterizers. That keeps the whole table in
+    # cache, so it cannot open a window that needs the latency of a real DRAM
+    # read: --device-dag is that run, by hand, on a card that can build one.
+    #
+    # It also carries this algorithm's differential test. The host reference
+    # walks the table once per hash, which puts a hundred thousand nonces of it
+    # out of reach -- but the three kernels can be compared against each other
+    # over that many, and a shader edit touches one of them.
+    add_test(NAME race_test_kawpow COMMAND race_test kawpow 8)
+    set_tests_properties(race_test_kawpow
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 LABELS slow)
 
     # The negative half of the known-answer test, perturbing the device rather
     # than the host reference. Cheap -- a couple of dozen single-nonce dispatches
@@ -364,6 +431,20 @@ if(TARGET vkminer_shaders)
     add_test(NAME negative_kat_sha3t32 COMMAND negative_kat sha3t --no-int64)
     set_tests_properties(negative_kat_sha3t32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # And for the fifth, where the question is sharper than elsewhere. Eight of
+    # its nine header words are a hash the pool already computed, so nothing on
+    # this side would notice one of them going unread; the ninth is a block
+    # height that reaches the digest only through the program it selects, and a
+    # kernel that built the program from a stale height would keep returning
+    # well-formed answers. Both are single-bit perturbations here.
+    #
+    # Against the interpreter, which is what kernel() offers -- the specialized
+    # kernels are held to it digest for digest by kawpow_wide_diff, so the two
+    # together say what running this per kernel would.
+    add_test(NAME negative_kat_kawpow COMMAND negative_kat kawpow)
+    set_tests_properties(negative_kat_kawpow
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
     # The calibration for --vk-probe-best, which is the only instrument that
     # says anything about the nonces a kernel did *not* find. It is checked
@@ -394,4 +475,18 @@ if(TARGET vkminer_shaders)
     add_test(NAME probe_test_sha3t COMMAND probe_test sha3t 4)
     set_tests_properties(probe_test_sha3t
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
+    # And for the fifth, whose kernel hands the probe a word computed by
+    # sixteen invocations between them rather than by the one that reports it.
+    # Its header is nine words, so this is also the arm that runs with a header
+    # shorter than the block the file carries -- and the arm whose exact check
+    # is bounded by the host rather than by the device, since its reference
+    # walks a DAG per nonce.
+    #
+    # Once, not three times, unlike the race arm above: which word reaches the
+    # probe is written in the body all three kernels are built from, so they
+    # cannot disagree about it.
+    add_test(NAME probe_test_kawpow COMMAND probe_test kawpow 4)
+    set_tests_properties(probe_test_kawpow
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 LABELS slow)
 endif()

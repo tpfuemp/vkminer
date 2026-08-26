@@ -472,6 +472,7 @@ extern bool opt_vk_pipeline_stats; /* report what the driver compiled a shader i
 extern bool opt_vk_probe_best; /* have the shader track the best digest it sees */
 extern bool opt_no_int64;      /* report every device as having no shaderInt64 */
 extern int opt_workgroup;      /* invocations per workgroup, 0 to let the backend pick */
+extern char *opt_kernel;       /* which of the algorithm's kernels, NULL = the tuner's */
 extern char *opt_replay;       /* capture file to re-run, NULL to mine */
 extern bool opt_self_test;     /* run the known-answer vectors and exit */
 extern char *opt_backend;      /* backend name, NULL means the default */
@@ -654,6 +655,19 @@ void   std_build_extraheader( struct work *g_work, struct stratum_ctx *sctx );
  * job into the words the algorithm reads, and put the pool's nonce prefix where
  * the workers will find it.  */
 void   progpow_gen_work( struct stratum_ctx *sctx, struct work *g_work );
+
+/* Whether the miner's epoch arithmetic agrees with the pool about which epoch
+ * `height` is in, given the seed hash the notify carried. Every ProgPoW pool
+ * states the seed and no algorithm here reads it, so this is a free assertion
+ * that the two ends will build the same dataset -- and for a fork whose epoch
+ * length was read out of a daemon rather than off a published vector, it is the
+ * only evidence there is before the first share comes back rejected.
+ *
+ * A pointer rather than a function because the epoch arithmetic lives in the
+ * algorithm layer, which is above this one: main.cpp installs it when the
+ * chosen algorithm speaks this dialect, and it is null the rest of the time.  */
+extern bool ( *progpow_seed_hash_agrees )( uint64_t height,
+                                           const unsigned char seed[32] );
 
 /* Rebuild `work` on the same job with a different extranonce2, which is a
  * different coinbase and so a fresh nonce range. False means the job has

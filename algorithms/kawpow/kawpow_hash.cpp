@@ -72,21 +72,6 @@ void keccak_f800(uint32_t st[25])
     }
 }
 
-// The fifteen words KawPoW pads its keccak state with, where Ethash's ProgPoW
-// pads with zeros. It is the only thing separating this chain's hash from
-// another fork's, and it is nearly "RAVENCOINKAWPOW" in ASCII.
-//
-// Nearly. The first word is 0x72, which is a lower-case 'r' -- upstream's
-// table says `//R` beside it and means it, and every miner on the network has
-// hashed the typo since. Written as numbers here because writing it as
-// characters is how it gets silently corrected: 'R' costs nothing, changes
-// every hash, and looks more right than the thing that works.
-const uint32_t kRavencoinKawpow[15] = {
-    0x00000072, 0x00000041, 0x00000056, 0x00000045, 0x0000004e,
-    0x00000043, 0x0000004f, 0x00000049, 0x0000004e, 0x0000004b,
-    0x00000041, 0x00000057, 0x00000050, 0x0000004f, 0x00000057,
-};
-
 // ----------------------------------------------- what the program's words do
 //
 // Two operations, selected by a word of the program rather than by anything the
@@ -180,13 +165,15 @@ void random_merge(uint32_t *a, uint32_t b, uint32_t selector)
 
 // -------------------------------------------------------------- the mix itself
 
-using Mix = uint32_t[kLanes][kRegs];
+// Sized for the widest fork; a narrower one uses a prefix of each lane's row
+// and never reads past params.regs.
+using Mix = uint32_t[kLanes][kMaxRegs];
 
-// The 512 words a hash starts from, and the only place the header and the nonce
+// The words a hash starts from, and the only place the header and the nonce
 // reach the mix. Each lane runs its own KISS99, seeded from the keccak digest
 // and from the lane number -- so the lanes start different, and so a device can
 // fill its own registers without talking to any other lane.
-void init_mix(uint32_t seed_lo, uint32_t seed_hi, Mix mix)
+void init_mix(const Params &params, uint32_t seed_lo, uint32_t seed_hi, Mix mix)
 {
     const uint32_t z = fnv1a(kFnvOffsetBasis, seed_lo);
     const uint32_t w = fnv1a(z, seed_hi);
@@ -196,7 +183,7 @@ void init_mix(uint32_t seed_lo, uint32_t seed_hi, Mix mix)
         const uint32_t jcong = fnv1a(jsr, l);
         Kiss99 rng(z, w, jsr, jcong);
 
-        for (uint32_t r = 0; r < kRegs; r++)
+        for (uint32_t r = 0; r < params.regs; r++)
             mix[l][r] = rng();
     }
 }
@@ -205,13 +192,14 @@ void init_mix(uint32_t seed_lo, uint32_t seed_hi, Mix mix)
 // here: every register index and every selector is read out of `program`, and
 // the only thing that varies from round to round is which line was fetched and
 // which quarter of it each lane takes.
-void run_round(const Program &program, uint32_t r, Mix mix,
+void run_round(const Params &params, const Program &program, uint32_t r, Mix mix,
                const uint32_t *line, const uint32_t *l1)
 {
-    const uint32_t steps = kCacheOps > kMathOps ? kCacheOps : kMathOps;
+    const uint32_t steps = params.cache_ops > params.math_ops ? params.cache_ops
+                                                              : params.math_ops;
 
     for (uint32_t i = 0; i < steps; i++) {
-        if (i < kCacheOps) {
+        if (i < params.cache_ops) {
             const uint32_t *op = program.word + kCacheBase + i * kCacheWords;
             const uint32_t src = op[0];
             const uint32_t dst = op[1];
@@ -222,7 +210,7 @@ void run_round(const Program &program, uint32_t r, Mix mix,
                 random_merge(&mix[l][dst], l1[offset], sel);
             }
         }
-        if (i < kMathOps) {
+        if (i < params.math_ops) {
             const uint32_t *op = program.word + kMathBase + i * kMathWords;
             const uint32_t src1 = op[0];
             const uint32_t src2 = op[1];
@@ -252,29 +240,29 @@ void run_round(const Program &program, uint32_t r, Mix mix,
 
 }  // namespace
 
-bool hash(const Program &program, const uint32_t *l1, uint64_t dag_lines,
-          const DagLines &dag, const uint32_t header[8], uint64_t nonce,
-          Hash *out)
+bool hash(const Params &params, const Program &program, const uint32_t *l1,
+          uint64_t dag_lines, const DagLines &dag, const uint32_t header[8],
+          uint64_t nonce, Hash *out)
 {
     if (!dag_lines)
         return false;
 
-    // Header, nonce and the fork's fifteen words, absorbed in one go: the state
-    // is exactly 25 words and every one of them is written, so there is no
-    // padding rule and no rate to think about.
+    // Header, nonce and the fork's fifteen seal words, absorbed in one go: the
+    // state is exactly 25 words and every one of them is written, so there is
+    // no padding rule and no rate to think about.
     uint32_t seed[25];
     for (uint32_t i = 0; i < 8; i++)
         seed[i] = header[i];
     seed[8] = static_cast<uint32_t>(nonce);
     seed[9] = static_cast<uint32_t>(nonce >> 32);
     for (uint32_t i = 10; i < 25; i++)
-        seed[i] = kRavencoinKawpow[i - 10];
+        seed[i] = params.seal_seed[i - 10];
     keccak_f800(seed);
 
     Mix mix;
-    init_mix(seed[0], seed[1], mix);
+    init_mix(params, seed[0], seed[1], mix);
 
-    for (uint32_t r = 0; r < kRounds; r++) {
+    for (uint32_t r = 0; r < params.rounds; r++) {
         // The one value a round takes from the mix rather than the program, and
         // the reason the dataset cannot be prefetched: lane r%16's register 0,
         // read by all sixteen lanes. On a device that is a broadcast, and it is
@@ -285,16 +273,17 @@ bool hash(const Program &program, const uint32_t *l1, uint64_t dag_lines,
         if (!dag.line(index, line))
             return false;
 
-        run_round(program, r, mix, line, l1);
+        run_round(params, program, r, mix, line, l1);
     }
 
-    // 512 words down to 16, and 16 down to 8. The second fold is where the
-    // lanes finally meet: lane l lands in word l % 8, so the eight words each
-    // take two lanes and the order they are folded in is the lane order.
+    // The whole mix down to 16 words, and 16 down to 8. The second fold is
+    // where the lanes finally meet: lane l lands in word l % 8, so the eight
+    // words each take two lanes and the order they are folded in is the lane
+    // order.
     uint32_t lane_hash[kLanes];
     for (uint32_t l = 0; l < kLanes; l++) {
         lane_hash[l] = kFnvOffsetBasis;
-        for (uint32_t r = 0; r < kRegs; r++)
+        for (uint32_t r = 0; r < params.regs; r++)
             lane_hash[l] = fnv1a(lane_hash[l], mix[l][r]);
     }
 
@@ -312,7 +301,7 @@ bool hash(const Program &program, const uint32_t *l1, uint64_t dag_lines,
     for (uint32_t i = 8; i < 16; i++)
         last[i] = out->mix[i - 8];
     for (uint32_t i = 16; i < 25; i++)
-        last[i] = kRavencoinKawpow[i - 16];
+        last[i] = params.seal_final[i - 16];
     keccak_f800(last);
 
     for (uint32_t i = 0; i < 8; i++)

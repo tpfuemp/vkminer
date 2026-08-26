@@ -24,6 +24,7 @@
 //   rasterizer alike. A run that returned nothing would compare nothing and
 //   pass, which is the failure this file must not have.
 
+#include "algorithms/kawpow/kawpow.h"
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "backends/vulkan/vulkan_common.h"
@@ -96,6 +97,21 @@ constexpr int kMaxSolutions = 256;
 // large batch, which is where a kernel treating the nonce as signed breaks.
 constexpr uint64_t kNonceBase = 0x7fff0000u;
 
+// Nonces every kernel of an algorithm is asked for, once each, and compared
+// against each other rather than against the host.
+//
+// The differential test is the gate on a shader edit and its bar is a hundred
+// thousand nonces, which for most algorithms the host reference meets in a few
+// seconds. For one whose reference walks a gigabyte of table per hash it is
+// hours, and that is exactly the algorithm with more than one kernel to compare.
+// Two kernels are not the host -- agreeing with each other is weaker than
+// agreeing with the reference, since a mistake in the body they share is
+// invisible here -- but they are two different spellings of the lane exchange,
+// the loads and the loop, and a hundred thousand nonces of them costs two
+// dispatches. The small host-checked vector is what says the shared body is
+// right; this is what says an edit to one kernel did not change what it answers.
+constexpr uint32_t kCrossNonces = 100000;
+
 // Block 125552's header, as it went over the wire. A real header rather than a
 // pattern, so the words the shader schedules are the shape of the thing it will
 // be given in earnest.
@@ -156,36 +172,60 @@ std::vector<Candidate> sorted_results(const vkminer::Solution *got, int n)
 // against millions of nonces -- and it is what keeps a device that returns the
 // same wrong answer every time from passing a test about repeatability.
 bool all_real(const vkminer::Algorithm &algo, const uint32_t *header,
-              const uint32_t *target, uint32_t batch,
-              const std::vector<Candidate> &got, int repetition)
+              const uint32_t *target, uint64_t base, uint32_t batch,
+              const std::vector<Candidate> &got, const char *what)
 {
     for (const Candidate &c : got) {
         // Asked for first, valid second. A nonce outside the range still hashes
         // to a real share and would pass every check below it, so without this
         // the only evidence of a kernel reaching past the end of its dispatch
         // is a candidate count that looks a little generous.
-        if (c.nonce - kNonceBase >= batch) {
-            fail("repetition %d returned nonce 0x%s, which is outside the "
-                 "%u nonces from 0x%s it was given", repetition,
+        if (c.nonce - base >= batch) {
+            fail("%s returned nonce 0x%s, which is outside the "
+                 "%u nonces from 0x%s it was given", what,
                  vkminer::nonce_hex(c.nonce).c_str(), batch,
-                 vkminer::nonce_hex(kNonceBase).c_str());
+                 vkminer::nonce_hex(base).c_str());
             return false;
         }
 
         uint32_t hash[8];
         if (!algo.verify(header, c.nonce, target, hash)) {
-            fail("repetition %d returned nonce 0x%s, which does not meet the "
-                 "target", repetition, vkminer::nonce_hex(c.nonce).c_str());
+            fail("%s returned nonce 0x%s, which does not meet the "
+                 "target", what, vkminer::nonce_hex(c.nonce).c_str());
             return false;
         }
         if (std::memcmp(hash, c.hash, sizeof hash) != 0) {
-            fail("repetition %d returned a digest for nonce 0x%s that the "
-                 "host does not compute", repetition,
+            fail("%s returned a digest for nonce 0x%s that the "
+                 "host does not compute", what,
                  vkminer::nonce_hex(c.nonce).c_str());
             return false;
         }
     }
     return true;
+}
+
+// Which nonces one set has and the other does not, in order. Shared by the two
+// comparisons below, because a disagreement is read the same way whichever axis
+// it is on: what was lost, and what appeared.
+void print_difference(const std::vector<Candidate> &first,
+                      const std::vector<Candidate> &got)
+{
+    size_t i = 0, j = 0;
+    while (i < first.size() || j < got.size()) {
+        if (j >= got.size() || (i < first.size()
+                                && first[i].nonce < got[j].nonce)) {
+            std::printf("  lost      nonce 0x%s\n",
+                        vkminer::nonce_hex(first[i].nonce).c_str());
+            i++;
+        } else if (i >= first.size() || got[j].nonce < first[i].nonce) {
+            std::printf("  appeared  nonce 0x%s\n",
+                        vkminer::nonce_hex(got[j].nonce).c_str());
+            j++;
+        } else {
+            i++;
+            j++;
+        }
+    }
 }
 
 // The comparison this file exists for. `first` is what the first repetition
@@ -199,22 +239,7 @@ bool same_results(const std::vector<Candidate> &first,
              repetition, static_cast<unsigned>(got.size()),
              static_cast<unsigned>(first.size()));
 
-        size_t i = 0, j = 0;
-        while (i < first.size() || j < got.size()) {
-            if (j >= got.size() || (i < first.size()
-                                    && first[i].nonce < got[j].nonce)) {
-                std::printf("  lost      nonce 0x%s\n",
-                            vkminer::nonce_hex(first[i].nonce).c_str());
-                i++;
-            } else if (i >= first.size() || got[j].nonce < first[i].nonce) {
-                std::printf("  appeared  nonce 0x%s\n",
-                            vkminer::nonce_hex(got[j].nonce).c_str());
-                j++;
-            } else {
-                i++;
-                j++;
-            }
-        }
+        print_difference(first, got);
         return false;
     }
 
@@ -230,6 +255,38 @@ bool same_results(const std::vector<Candidate> &first,
             fail("repetition %d hashed nonce 0x%s differently from the first "
                  "-- that is a race", repetition,
                  vkminer::nonce_hex(got[i].nonce).c_str());
+            return false;
+        }
+    }
+    return true;
+}
+
+// The same comparison across kernels instead of across repetitions. Every
+// difference means one of the two is wrong, and which one it is takes the host
+// to say -- but that there is one at all is the thing worth knowing before a
+// shader edit ships, and it is knowable at a hundred thousand nonces.
+bool same_kernels(const char *first_name, const std::vector<Candidate> &first,
+                  const char *name, const std::vector<Candidate> &got)
+{
+    if (first.size() != got.size()) {
+        fail("kernel '%s' found %u candidate(s) and '%s' found %u, over the "
+             "same nonces and the same header", name,
+             static_cast<unsigned>(got.size()), first_name,
+             static_cast<unsigned>(first.size()));
+        print_difference(first, got);
+        return false;
+    }
+
+    for (size_t i = 0; i < got.size(); i++) {
+        if (got[i].nonce != first[i].nonce) {
+            fail("kernel '%s' found nonce 0x%s where '%s' found 0x%s", name,
+                 vkminer::nonce_hex(got[i].nonce).c_str(), first_name,
+                 vkminer::nonce_hex(first[i].nonce).c_str());
+            return false;
+        }
+        if (std::memcmp(got[i].hash, first[i].hash, sizeof got[i].hash) != 0) {
+            fail("kernel '%s' hashed nonce 0x%s differently from '%s'", name,
+                 vkminer::nonce_hex(got[i].nonce).c_str(), first_name);
             return false;
         }
     }
@@ -275,13 +332,67 @@ void warm_up(vkminer::Kernel &kernel, const uint32_t *header)
     }
 }
 
-bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &info,
-                const vkminer::Algorithm &algo, int repetitions)
+// kCrossNonces from the same base, in whatever pieces this kernel is willing to
+// take them in. The pieces are the kernel's own dispatch size and so differ
+// between kernels; the nonces do not, and they are what is being compared.
+//
+// Cut into pieces at all because that size is what the kernel can finish inside
+// its timeout, and this many of a 16-lane hash is a minute of a software
+// rasterizer -- one dispatch of them would be refused. One at a time because
+// what is wanted here is the answer and not the rate.
+bool cross_pass(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
+                const uint32_t *header, const uint32_t *target,
+                const char *name, std::vector<Candidate> *out)
 {
-    std::printf("\n-- device %d: %s [%s]\n", info.index, info.name.c_str(),
-                vkminer::device_kind_name(info.kind));
+    out->clear();
+    uint32_t done = 0;
+    while (done < kCrossNonces) {
+        const uint32_t chunk =
+            std::min(kCrossNonces - done, kernel.preferred_batch());
+        const uint64_t base = kNonceBase + done;
 
-    const vkminer::KernelSpec spec = algo.kernel(info);
+        if (!kernel.dispatch(header, target, base, chunk)) {
+            fail("kernel '%s' refused %u nonces from 0x%s", name, chunk,
+                 vkminer::nonce_hex(base).c_str());
+            return false;
+        }
+
+        vkminer::Solution got[kMaxSolutions];
+        const int n = kernel.collect(got, kMaxSolutions);
+        if (n < 0) {
+            fail("kernel '%s' failed on %u nonces from 0x%s", name, chunk,
+                 vkminer::nonce_hex(base).c_str());
+            return false;
+        }
+
+        const std::vector<Candidate> piece = sorted_results(got, n);
+        if (!all_real(algo, header, target, base, chunk, piece, name))
+            return false;
+        out->insert(out->end(), piece.begin(), piece.end());
+        done += chunk;
+    }
+
+    // Two kernels that both found nothing agree perfectly, and that is the one
+    // way the comparison can pass without having compared anything.
+    if (out->empty()) {
+        fail("kernel '%s' found no candidate in %u nonces -- the target is "
+             "meant to be met about %.0f times", name, kCrossNonces,
+             kWantCandidates);
+        return false;
+    }
+
+    // Each piece arrives sorted and the pieces are in ascending order, so the
+    // whole is sorted already -- said rather than assumed, since the comparison
+    // is elementwise.
+    return true;
+}
+
+// One kernel of one algorithm on one device, repeated.
+bool run_kernel(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &info,
+                const vkminer::Algorithm &algo,
+                const vkminer::KernelSpec &spec, int repetitions,
+                std::vector<Candidate> *cross)
+{
     if (!spec.spirv || !spec.spirv_words) {
         std::printf("SKIP %s has no shader for this device\n", algo.name());
         return true;
@@ -299,6 +410,19 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     uint32_t header[20];
     for (size_t i = 0; i < 20; i++)
         header[i] = be32dec(kHeader + i * 4);
+
+    // Once, not per dispatch: every dispatch below is the same header, which is
+    // the whole point of the file, so the table and the program are the same
+    // ones throughout and the miner would skip the upload too. No-ops for an
+    // algorithm that needs neither. This can be slow -- a device-generated DAG
+    // is a gigabyte written by a kernel -- so it is said before it starts.
+    std::printf("     preparing the kernel for this header\n");
+    std::fflush(stdout);
+    if (!kernel->prepare_state(algo.state_key(header)) ||
+        !kernel->prepare_program(algo.program_key(header))) {
+        fail("the kernel could not prepare itself for this header");
+        return false;
+    }
 
     warm_up(*kernel, header);
 
@@ -346,7 +470,9 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
         inflight--;
 
         const std::vector<Candidate> results = sorted_results(got, n);
-        if (!all_real(algo, header, target, batch, results, collected))
+        char what[32];
+        std::snprintf(what, sizeof what, "repetition %d", collected);
+        if (!all_real(algo, header, target, kNonceBase, batch, results, what))
             return false;
 
         if (collected == 0)
@@ -368,13 +494,103 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
 
     std::printf("ok   %d repetition(s), %u candidate(s) each, identical\n",
                 collected, static_cast<unsigned>(first.size()));
+
+    // The nonces the caller compares between kernels. A different target from
+    // the one above, because it covers a different number of nonces and a
+    // target chosen for one would return either nothing or hundreds from the
+    // other.
+    if (cross) {
+        const char *name = spec.variant && spec.variant[0] ? spec.variant : "";
+        uint32_t cross_target[8];
+        target_for(kCrossNonces, cross_target);
+        if (!cross_pass(*kernel, algo, header, cross_target, name, cross))
+            return false;
+        std::printf("     %u nonces from 0x%s, target %08x, %u candidate(s)\n",
+                    kCrossNonces, vkminer::nonce_hex(kNonceBase).c_str(),
+                    cross_target[7], static_cast<unsigned>(cross->size()));
+    }
     return true;
+}
+
+// Kernels one algorithm may offer for one device, the tuner's own bound.
+constexpr size_t kMaxVariants = 4;
+
+// Every kernel the device could run, not the one kernel() opens with.
+//
+// A race is a property of a kernel and not of an algorithm, and the ones an
+// algorithm offers can differ in exactly the machinery a race lives in: KawPoW
+// exchanges registers between its sixteen invocations through a workgroup array
+// in two of its kernels and through subgroup shuffles in the third, and the
+// third is the one the tuner picks to mine with on this card. Testing the
+// default would leave that one unrepeated.
+bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &info,
+                const vkminer::Algorithm &algo, int repetitions)
+{
+    std::printf("\n-- device %d: %s [%s]\n", info.index, info.name.c_str(),
+                vkminer::device_kind_name(info.kind));
+
+    vkminer::KernelSpec variants[kMaxVariants];
+    const size_t count = algo.kernels(info, variants, kMaxVariants);
+    if (!count) {
+        std::printf("SKIP %s has no shader for this device\n", algo.name());
+        return true;
+    }
+
+    bool ok = true;
+    std::vector<Candidate> first;
+    const char *first_name = nullptr;
+
+    for (size_t i = 0; i < count; i++) {
+        // Named only where there is a choice, so the single-kernel algorithms
+        // keep the output they have always had -- and where there is no choice
+        // there is nothing to compare against either.
+        std::vector<Candidate> cross;
+        if (count > 1 && variants[i].variant)
+            std::printf("\n   kernel '%s'\n", variants[i].variant);
+        if (!run_kernel(backend, info, algo, variants[i], repetitions,
+                        count > 1 ? &cross : nullptr)) {
+            ok = false;
+            continue;   // it has nothing to be compared against
+        }
+        if (cross.empty())
+            continue;   // no shader for this device, so no answers from it
+
+        const char *name = variants[i].variant ? variants[i].variant : "";
+        if (!first_name) {
+            first = std::move(cross);
+            first_name = name;
+        } else if (same_kernels(first_name, first, name, cross)) {
+            std::printf("ok   kernel '%s' and '%s' agree on all %u candidate(s) "
+                        "in %u nonces\n", first_name, name,
+                        static_cast<unsigned>(first.size()), kCrossNonces);
+        } else {
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 void usage(const char *program)
 {
-    std::printf("usage: %s [algo] [repetitions] [queue-depth]\n", program);
+    std::printf("usage: %s [algo] [repetitions] [queue-depth] [--device-dag]\n",
+                program);
 }
+
+// KawPoW's table, and the choice between the two of them.
+//
+// The default is a short one the host builds and uploads, as the other KawPoW
+// device tests use: the registry's algorithm generates a gigabyte on the device
+// under test, which is seconds on a GPU and out of reach on the software
+// rasterizer some machines here have nothing but.
+//
+// It is not the same experiment. Sixteen invocations cooperating on one nonce
+// is unchanged -- the lane exchanges, the workgroup array and the loop are what
+// they always were -- but two megabytes of table stays in cache, so a race that
+// needs the latency of a real DRAM read to open a window will not open one.
+// --device-dag is that experiment, and it is worth running by hand on a card
+// that can build the table before a memory-path change is believed.
+constexpr uint64_t kKawpowLines = 8192;
+constexpr uint32_t kKawpowEpoch = 0;   // the header below states height 0
 
 }  // namespace
 
@@ -382,10 +598,19 @@ int main(int argc, char *argv[])
 {
     pthread_mutex_init(&applog_lock, nullptr);
 
-    const char *name = argc > 1 ? argv[1] : "sha256d";
+    bool device_dag = false;
+    std::vector<const char *> positional;
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--device-dag") == 0)
+            device_dag = true;
+        else
+            positional.push_back(argv[i]);
+    }
+
+    const char *name = !positional.empty() ? positional[0] : "sha256d";
     int repetitions = 8;
-    if (argc > 2) {
-        const long n = std::strtol(argv[2], nullptr, 0);
+    if (positional.size() > 1) {
+        const long n = std::strtol(positional[1], nullptr, 0);
         if (n < 2) {
             // One repetition compares nothing. Refused rather than accepted as
             // a fast run, because a test that cannot fail is worse than one
@@ -396,8 +621,8 @@ int main(int argc, char *argv[])
         repetitions = static_cast<int>(n);
     }
 
-    if (argc > 3) {
-        const long n = std::strtol(argv[3], nullptr, 0);
+    if (positional.size() > 2) {
+        const long n = std::strtol(positional[2], nullptr, 0);
         if (n < 1 || n > 16) {
             usage(argv[0]);
             return 2;
@@ -405,11 +630,20 @@ int main(int argc, char *argv[])
         opt_queue_depth = static_cast<int>(n);
     }
 
-    std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(name);
+    const bool kawpow = std::strcmp(name, "kawpow") == 0;
+    std::unique_ptr<vkminer::Algorithm> algo =
+        kawpow && !device_dag
+            ? vkminer::make_progpow_host_dag(vkminer::kawpow::kKawpow, kKawpowEpoch, kKawpowLines)
+            : vkminer::create_algorithm(name);
     if (!algo) {
         std::printf("FAIL no algorithm called '%s'\n", name);
         return 1;
     }
+    if (kawpow)
+        std::printf("%s: against %s\n", name,
+                    device_dag ? "the whole of the epoch's DAG, generated on "
+                                 "the device"
+                               : "a short host-built table -- see --device-dag");
 
     // Deliberately without the validation layers, which diff_test runs under.
     // They serialize a good deal of what a driver would otherwise overlap, and

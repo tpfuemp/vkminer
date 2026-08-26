@@ -1,13 +1,14 @@
 // vkminer -- a Vulkan compute cryptocurrency miner.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// The program KawPoW runs, and where it comes from.
+// The program a ProgPoW fork runs, and where it comes from.
 //
-// ProgPoW's inner loop is not fixed. Every `period` -- three blocks, about
-// three minutes on Ravencoin -- a pseudo-random sequence of arithmetic is
-// derived from the period number, and that is what the 64 rounds execute:
-// eleven cache reads, eighteen arithmetic operations and four DAG merges, each
-// a few small integers naming registers and selecting operations. 131 words.
+// ProgPoW's inner loop is not fixed. Every `period` -- three blocks on
+// Ravencoin, one on Firo, six on Meowcoin -- a pseudo-random sequence of
+// arithmetic is derived from the period number, and that is what the rounds
+// execute: a fork's cache reads, its arithmetic operations, and four DAG
+// merges, each a few small integers naming registers and selecting operations.
+// 134 words at the largest shape any of them asks for.
 //
 // The same generator exists on the device, so a hashing kernel needs no buffer
 // uploaded every three minutes; this copy is what says the device's program is
@@ -21,20 +22,28 @@
 #ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__
 #define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__
 
+#include "algorithms/kawpow/kawpow_params.h"
+
 #include <cstdint>
 
 namespace vkminer {
 namespace kawpow {
 
-// The shape of the thing, which is what the ProgPoW revision fixes and what a
-// variant of it changes. All four are pinned by the KAT against the published
-// vectors; none is a tuning knob.
-constexpr uint32_t kLanes    = 16;   // invocations cooperating on one nonce
-constexpr uint32_t kRegs     = 32;   // mix registers per lane
-constexpr uint32_t kCacheOps = 11;   // reads of the 16 KiB cache per round
-constexpr uint32_t kMathOps  = 18;   // arithmetic operations per round
-constexpr uint32_t kRounds   = 64;   // rounds, each reading one DAG item
-constexpr uint32_t kPeriodLength = 3;   // blocks one program lasts
+// The one part of the shape no fork in this family has ever moved: sixteen
+// invocations cooperate on a nonce, and that is what makes a DAG line 256
+// bytes. Pinned by the KAT against the published vectors; not a tuning knob.
+constexpr uint32_t kLanes = 16;
+
+// The rest of the shape is per-fork -- Params::regs, cache_ops, math_ops and
+// rounds -- and these are the most any of them may ask for. They are the
+// program layout, so moving one renumbers every specialization constant in
+// every shader; a fork wanting more is a layout change and not a table entry.
+// They are KawPoW's own values but for the cache reads, where MeraKi asks for
+// one more.
+constexpr uint32_t kMaxRegs     = 32;
+constexpr uint32_t kMaxCacheOps = 12;
+constexpr uint32_t kMaxMathOps  = 18;
+constexpr uint32_t kMaxRounds   = 64;
 
 // Words of a DAG item one lane takes, and so how many merges end a round:
 // sixteen lanes over a 256-byte item is four words each.
@@ -49,13 +58,18 @@ constexpr uint32_t kL1Words = 16 * 1024 / 4;
 // sel2); a DAG merge is (dst, sel). Laid out by kind rather than in draw order
 // because that is how they are executed: the shader walks the cache and math
 // arrays together, then the DAG array.
+//
+// Sized for the maxima above and the same for every fork, so a fork using fewer
+// operations leaves the tail of a section zero rather than shifting the section
+// after it. That costs a handful of dead constants in a pipeline and buys one
+// constant ID layout across the whole family.
 constexpr uint32_t kCacheWords = 3;
 constexpr uint32_t kMathWords  = 5;
 constexpr uint32_t kDagWords   = 2;
 
 constexpr uint32_t kCacheBase = 0;
-constexpr uint32_t kMathBase  = kCacheBase + kCacheOps * kCacheWords;
-constexpr uint32_t kDagBase   = kMathBase + kMathOps * kMathWords;
+constexpr uint32_t kMathBase  = kCacheBase + kMaxCacheOps * kCacheWords;
+constexpr uint32_t kDagBase   = kMathBase + kMaxMathOps * kMathWords;
 constexpr uint32_t kProgramWords = kDagBase + kDagLoads * kDagWords;
 
 // FNV-1a over one word, and KISS99: the whole source of randomness in KawPoW.
@@ -102,20 +116,22 @@ struct Program {
     uint32_t word[kProgramWords];
 };
 
-// Which program a block runs. Three blocks share one, and the period rather
-// than the height seeds the generator.
-inline uint64_t period_of(uint64_t block_height)
+// Which program a block runs. A fork's period_length blocks share one, and the
+// period rather than the height seeds the generator -- so FiroPoW, at a period
+// of one, draws a new program every block.
+inline uint64_t period_of(const Params &params, uint64_t block_height)
 {
-    return block_height / kPeriodLength;
+    return block_height / params.period_length;
 }
 
-// Generate `period`'s program. Deterministic and cheap, with the number as its
-// only input.
-void build_program(uint64_t period, Program *out);
+// Generate `period`'s program for `params`. Deterministic and cheap, with those
+// two as its only inputs. Words the fork's shape does not reach are zeroed
+// rather than left alone.
+void build_program(const Params &params, uint64_t period, Program *out);
 
-// Whether word `i` names one of the 32 mix registers rather than selecting an
-// operation. A register word is used as an index and nothing reduces it, in
-// either interpreter, so a program carrying 32 there indexes a register that
+// Whether word `i` names a mix register rather than selecting an operation. A
+// register word is used as an index and nothing reduces it, in either
+// interpreter, so a program carrying params.regs there indexes a register that
 // does not exist. build_program always writes in range; this is for code that
 // makes up a program of its own.
 inline bool names_a_register(uint32_t i)

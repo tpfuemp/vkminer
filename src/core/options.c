@@ -95,6 +95,11 @@ double opt_target_factor = 1.0;
 int      opt_stratum_dialect = STRATUM_BITCOIN;
 uint32_t opt_nonce_bits      = 32;
 
+/* Installed beside those two when the algorithm has epoch arithmetic to check
+ * a pool's seed hash against, and null otherwise. */
+bool ( *progpow_seed_hash_agrees )( uint64_t height,
+                                    const unsigned char seed[32] ) = NULL;
+
 char *rpc_url = NULL;
 char *rpc_userpass = NULL;
 char *rpc_user = NULL;
@@ -144,6 +149,17 @@ int opt_queue_depth = 0;
  * two runs at two widths are the only way to check that tuning it is worth
  * anything. Zero lets the backend pick. */
 int opt_workgroup = 0;
+
+/* Which of an algorithm's kernels to run, by the name kernels() gives it. NULL
+ * lets the tuner choose, which is the setting to mine with.
+ *
+ * The third axis, and the one --no-tune leaves nowhere to go without this: with
+ * the tuner off there is no measurement to read, so the algorithm's own opening
+ * guess runs -- and for an algorithm offering several that guess is the control
+ * rather than the fast one. Two runs a change is being measured across have to
+ * be the same kernel as well as the same width and depth, and this is how they
+ * are said to be. */
+char *opt_kernel = NULL;
 
 /* What to do about the tuning file. By default it is read and a sweep runs only
  * where this device, driver, algorithm and shader are not in it; --retune
@@ -232,6 +248,10 @@ Options:\n\
       --workgroup=N     invocations per workgroup (vulkan only; default: let\n\
                         the backend choose). The tuner's other axis, named so\n\
                         that two runs can be compared at two widths\n\
+      --kernel=NAME     which of the algorithm's kernels to run, where it\n\
+                        offers more than one (default: let the tuner choose).\n\
+                        --no-tune otherwise falls back to the algorithm's\n\
+                        opening guess, which need not be the fast one\n\
       --retune          measure the workgroup size and queue depth this GPU\n\
                         runs fastest at, even though they are already known.\n\
                         The sweep takes a few seconds, runs against the\n\
@@ -330,6 +350,7 @@ static struct option const options[] = {
    { "diff-multiplier",   1, NULL, 'm' },
    { "hash-meter",        0, NULL, 1014 },
    { "help",              0, NULL, 'h' },
+   { "kernel",            1, NULL, 1055 },
    { "no-color",          0, NULL, 1002 },
    { "no-extranonce",     0, NULL, 1012 },
    { "no-gbt",            0, NULL, 1011 },
@@ -591,6 +612,11 @@ void parse_arg( int key, char *arg )
          if ( v < 1 || v > 1024 )
             show_usage_and_exit( 1 );
          opt_workgroup = v;
+         break;
+
+      case 1055: // kernel
+         free( opt_kernel );
+         opt_kernel = strdup( arg );
          break;
 
       case 1047: // retune

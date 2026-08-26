@@ -137,11 +137,20 @@ public:
     static uint32_t epoch_of(uint64_t key) { return uint32_t(key >> 32); }
     static uint64_t first_of(uint64_t key) { return key & 0xffffffffu; }
 
+    // The three epochs that number stands for. KawPoW's are all the same one;
+    // this goes through the table anyway, because what is under test is the
+    // path a real algorithm takes.
+    static vkminer::kawpow::Epochs epochs_of(uint64_t key)
+    {
+        return vkminer::kawpow::epochs_for(vkminer::kawpow::kKawpow,
+                                           epoch_of(key));
+    }
+
     // The light cache, which is what the pass generates from.
     bool setup_seed(uint64_t key, uint64_t offset, void *out,
                     size_t bytes) const override
     {
-        if (!vkminer::kawpow::light_cache(epoch_of(key), offset, out, bytes)) {
+        if (!vkminer::kawpow::light_cache(epochs_of(key), offset, out, bytes)) {
             fail("the light cache for epoch %u has no %u bytes at %u",
                  epoch_of(key), static_cast<unsigned>(bytes),
                  static_cast<unsigned>(offset));
@@ -164,7 +173,8 @@ public:
         push.count = count;
         push.first = static_cast<uint32_t>(first_of(key) + first);
         push.slot = static_cast<uint32_t>(slot);
-        push.cache_items = vkminer::kawpow::light_cache_items(epoch_of(key));
+        push.cache_items =
+            vkminer::kawpow::light_cache_items(epochs_of(key).light);
         std::memcpy(out, &push, sizeof push);
 
         slices++;
@@ -222,7 +232,7 @@ public:
         const uint32_t half = static_cast<uint32_t>(nonce % kGroupsPerItem);
 
         uint32_t item[kItemWords];
-        if (!vkminer::kawpow::dataset_item(epoch_of(key), index, item)) {
+        if (!vkminer::kawpow::dataset_item(epochs_of(key), index, item)) {
             fail("epoch %u has no DAG item %llu", epoch_of(key),
                  static_cast<unsigned long long>(index));
             std::memset(out, 0, kGroupWords * sizeof(uint32_t));

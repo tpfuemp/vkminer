@@ -5,21 +5,20 @@
 // the host.
 //
 // kawpow_test showed that the interpreter hashes correctly. This file is about
-// the kernels that are faster than it, whatever a device happens to offer:
-// the one whose 64 rounds are not read out of a buffer but compiled into the
-// pipeline, one pipeline per three-block period, and the one that additionally
-// exchanges between lanes through subgroup shuffles instead of shared memory.
-// It asks the algorithm what those are rather than naming them, so a kernel
-// added later is tested by having been offered.
+// the kernels that are faster than it: the one whose rounds are compiled into
+// the pipeline rather than read out of a buffer, one pipeline per period, and
+// the one that additionally exchanges between lanes through subgroup shuffles
+// instead of shared memory. It asks the algorithm what those are rather than
+// naming them, so a kernel added later is tested by having been offered.
 //
 // Everything that could go wrong with them goes wrong quietly: a specialization
 // constant declared at the wrong ID is a valid program that is not this
-// period's, reordering the interleaved cache and arithmetic operations produces
-// digests that look exactly like digests, a shuffle reaching the wrong
-// invocation mixes two nonces and both still look random, and a pipeline never
-// rebuilt at a period boundary keeps mining the previous program at full speed.
+// period's, reordered operations produce digests that look exactly like
+// digests, a shuffle reaching the wrong invocation mixes two nonces and both
+// still look random, and a pipeline never rebuilt at a period boundary keeps
+// mining the previous program at full speed.
 //
-// So there are three comparisons here, each catching a different one:
+// So there are four comparisons here, each catching a different one:
 //
 //   - the kernel against the scalar reference, word by word, which is the only
 //     oracle not itself under test;
@@ -27,10 +26,13 @@
 //     points at the difference between the two files rather than at KawPoW;
 //   - the same nonces either side of a period boundary, which have to stop
 //     agreeing -- the height is not hashed, so unchanged digests can only mean
-//     a stale program.
+//     a stale program;
+//   - and, under --wide, the kernel against the interpreter over a range wide
+//     enough to be called coverage, with the host left out so that the range
+//     can be: a host oracle that walks a DAG per nonce keeps it to dozens.
 //
-// The DAG is built on the host and uploaded, for the reason kawpow_test gives
-// at more length: a disagreement should have one cause.
+// The DAG is built on the host and uploaded, for the reason kawpow_test gives:
+// a disagreement should have one cause.
 
 #include "algorithms/algorithm.h"
 #include "algorithms/kawpow/kawpow.h"
@@ -77,10 +79,33 @@ constexpr uint32_t kBatch = 16;
 // period -- and the host is much the slower half.
 constexpr uint32_t kDefaultNonces = 64;
 
+// Nonces for the wide comparison, unless --wide says otherwise. Off by default
+// because it is a second run of everything.
+//
+// The host oracle is what holds the count above down to dozens: one host KawPoW
+// hash walks a DAG, so a range wide enough to be worth calling coverage would
+// take longer than anyone waits. Two kernels compared against each other have
+// no such cost -- both halves are the device -- and what that buys is the one
+// thing the small count cannot: enough distinct mixes to reach the parts of a
+// program a few dozen nonces never select.
+//
+// It is a weaker check than the one above, and deliberately so. Two kernels
+// agreeing says only that they agree; if the shared body they are both built
+// from is wrong, they will agree about that too. So this runs beside the host
+// comparison rather than instead of it, and its job is the narrow one of
+// catching a change that makes one kernel diverge from the other.
+constexpr uint32_t kDefaultWide = 0;
+
 // The period the run starts in. Arbitrary, and fixed so that a failure is
 // reproducible; what matters is that the next one follows it, because that is
 // the key the backend will have been building ahead.
 constexpr uint64_t kPeriod = 1249;
+
+// Which fork's constants the kernels are built from -- see the same declaration
+// in kawpow_test.cpp for why it is a command-line argument. Here it decides one
+// thing more: how many blocks a period lasts, and so where the boundary these
+// kernels are rebuilt at falls.
+const vkminer::kawpow::Params *fork_params = &vkminer::kawpow::kKawpow;
 
 int failures = 0;
 
@@ -234,6 +259,49 @@ bool period_agrees(vkminer::Kernel &spec, vkminer::Kernel &interp,
     return true;
 }
 
+// The candidate against the control over a range wide enough to be called
+// coverage, with the host left out of it. Same period, same header, position
+// for position.
+//
+// Progress is printed because this is the one phase that runs long enough for a
+// silent test to look like a hung one.
+bool wide_agrees(vkminer::Kernel &spec, vkminer::Kernel &interp,
+                 const std::vector<uint32_t> &header, uint32_t nonces,
+                 const char *variant)
+{
+    // In chunks, so that a disagreement is reported after seconds rather than
+    // after the whole range, and so that two ranges of digests rather than the
+    // whole run are in memory at once.
+    constexpr uint32_t kChunk = 4096;
+
+    std::vector<Digest> mine, theirs;
+    for (uint32_t done = 0; done < nonces; done += kChunk) {
+        const uint32_t count = std::min(kChunk, nonces - done);
+
+        if (!digests_of(spec, header, done, count, variant, &mine))
+            return false;
+        if (!digests_of(interp, header, done, count, "interp", &theirs))
+            return false;
+
+        for (uint32_t i = 0; i < count; i++)
+            for (uint32_t w = 0; w < 8; w++)
+                if (mine[i].word[w] != theirs[i].word[w]) {
+                    fail("wide: nonce %s word %u is 0x%08x from '%s' and "
+                         "0x%08x interpreted",
+                         vkminer::nonce_hex(done + i).c_str(), w,
+                         mine[i].word[w], variant, theirs[i].word[w]);
+                    return false;
+                }
+
+        std::printf("     %u of %u agree\r", done + count, nonces);
+        std::fflush(stdout);
+    }
+
+    std::printf("\rok   %u nonces agree with the interpreter, digest for "
+                "digest    \n", nonces);
+    return true;
+}
+
 // The control, and everything to be checked against it. The control is found by
 // the name the algorithm gives it rather than by position -- which kernel
 // kernels() offers first is a guess about which is faster, and this test is
@@ -282,7 +350,8 @@ bool specs_for(const vkminer::Algorithm &algo, const vkminer::DeviceInfo &info,
 bool check_kernel(vkminer::VulkanBackend &backend,
                   const vkminer::DeviceInfo &info,
                   const vkminer::Algorithm &algo, vkminer::Kernel &interp,
-                  const vkminer::KernelSpec &desc, uint32_t nonces)
+                  const vkminer::KernelSpec &desc, uint32_t nonces,
+                  uint32_t wide)
 {
     std::printf("\n   kernel '%s'\n", desc.variant);
 
@@ -301,8 +370,9 @@ bool check_kernel(vkminer::VulkanBackend &backend,
         return false;
     }
 
-    const std::vector<uint32_t> low = header_for(kPeriod * 3);
-    const std::vector<uint32_t> high = header_for((kPeriod + 1) * 3);
+    const std::vector<uint32_t> low = header_for(kPeriod * fork_params->period_length);
+    const std::vector<uint32_t> high =
+        header_for((kPeriod + 1) * fork_params->period_length);
 
     if (!spec->prepare_state(algo.state_key(low.data()))) {
         fail("could not upload the DAG for '%s'", desc.variant);
@@ -356,7 +426,8 @@ bool check_kernel(vkminer::VulkanBackend &backend,
     std::printf("ok   every digest changed with the period\n");
 
     if (!desc.program_constants)
-        return true;
+        return wide ? wide_agrees(*spec, interp, high, wide, desc.variant)
+                    : true;
 
     // ---- and the next program was built before it was asked for
     //
@@ -379,17 +450,23 @@ bool check_kernel(vkminer::VulkanBackend &backend,
                 static_cast<unsigned long long>(stats.builds),
                 static_cast<unsigned long long>(stats.ahead));
 
+    // Last, because it is much the longest phase and everything above is worth
+    // knowing before waiting for it. On the program the kernel already holds,
+    // so this adds no pipeline to the count just checked.
+    if (wide && !wide_agrees(*spec, interp, high, wide, desc.variant))
+        return false;
+
     return true;
 }
 
 bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info,
-                uint32_t nonces)
+                uint32_t nonces, uint32_t wide)
 {
     std::printf("\n-- device %d: %s [%s]\n", info.index, info.name.c_str(),
                 vkminer::device_kind_name(info.kind));
 
     std::unique_ptr<vkminer::Algorithm> algo =
-        vkminer::make_kawpow_host_dag(kEpoch, kLines);
+        vkminer::make_progpow_host_dag(*fork_params, kEpoch, kLines);
 
     vkminer::KernelSpec interp_desc;
     std::vector<vkminer::KernelSpec> candidates;
@@ -413,7 +490,7 @@ bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info
         return false;
     }
 
-    const std::vector<uint32_t> low = header_for(kPeriod * 3);
+    const std::vector<uint32_t> low = header_for(kPeriod * fork_params->period_length);
     if (!interp->prepare_state(algo->state_key(low.data()))) {
         fail("could not upload the DAG");
         return false;
@@ -425,7 +502,8 @@ bool run_device(vkminer::VulkanBackend &backend, const vkminer::DeviceInfo &info
     // specialized one is already right.
     bool ok = true;
     for (const vkminer::KernelSpec &desc : candidates)
-        ok = check_kernel(backend, info, *algo, *interp, desc, nonces) && ok;
+        ok = check_kernel(backend, info, *algo, *interp, desc, nonces, wide)
+             && ok;
 
     return ok;
 }
@@ -437,14 +515,42 @@ int main(int argc, char *argv[])
     pthread_mutex_init(&applog_lock, nullptr);
 
     uint32_t nonces = kDefaultNonces;
-    if (argc > 1) {
-        const long asked = std::strtol(argv[1], nullptr, 10);
+    uint32_t wide = kDefaultWide;
+    for (int i = 1; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--wide") && i + 1 < argc) {
+            const long asked = std::strtol(argv[++i], nullptr, 10);
+            if (asked < 0) {
+                std::printf("usage: %s [nonces] [--wide nonces] [--fork name]\n",
+                            argv[0]);
+                return 2;
+            }
+            wide = static_cast<uint32_t>(asked);
+            continue;
+        }
+
+        if (!std::strcmp(argv[i], "--fork") && i + 1 < argc) {
+            fork_params = vkminer::kawpow::find(argv[++i]);
+            if (!fork_params) {
+                std::printf("usage: %s [nonces] [--wide nonces] [--fork name]\n",
+                            argv[0]);
+                return 2;
+            }
+            continue;
+        }
+
+        const long asked = std::strtol(argv[i], nullptr, 10);
         if (asked <= 0) {
-            std::printf("usage: %s [nonces]\n", argv[0]);
+            std::printf("usage: %s [nonces] [--wide nonces] [--fork name]\n",
+                        argv[0]);
             return 2;
         }
         nonces = static_cast<uint32_t>(asked);
     }
+
+    std::printf("-- %s: %u regs, %u cache and %u math operations a round, a "
+                "program every %u block(s)\n", fork_params->name,
+                fork_params->regs, fork_params->cache_ops,
+                fork_params->math_ops, fork_params->period_length);
 
     // Worth their cost for the barriers, as in kawpow_test, and for one thing
     // more that is this file's own: pipelines are created and destroyed while
@@ -458,7 +564,7 @@ int main(int argc, char *argv[])
     }
 
     for (const vkminer::DeviceInfo &info : backend.devices())
-        run_device(backend, info, nonces);
+        run_device(backend, info, nonces, wide);
 
     if (vkminer::vk_validation_errors) {
         std::printf("\nFAIL the validation layers reported %u error(s)\n",

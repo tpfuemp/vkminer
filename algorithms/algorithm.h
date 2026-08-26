@@ -181,6 +181,18 @@ public:
     // for work.
     virtual size_t known_answers(const KnownAnswer **out) const;
 
+    // What an algorithm nobody published a vector for offers instead: the same
+    // shape, filled in by this build's own reference. Not test vectors, and the
+    // self-test says so -- what a device checked against them shows is that
+    // every kernel it runs agrees with the code each candidate is re-checked
+    // against, which is the difference between a wrong shader and a session of
+    // rejected shares. Whether the reference is itself right about the chain is
+    // a question only that chain can answer.
+    //
+    // Consulted only when known_answers() came back empty, and empty for
+    // everything that has real ones.
+    virtual size_t reference_answers(const KnownAnswer **out) const;
+
     // The scalar reference. `header` is the header as struct work carries it,
     // one 32-bit word per field in host order, with the nonce word ignored:
     // `nonce` is substituted. `out` receives the 8-word hash in the order
@@ -196,6 +208,13 @@ public:
     virtual bool verify(const uint32_t *header, uint64_t nonce,
                         const uint32_t *target, uint32_t out[8]) const;
 };
+
+// The answers a startup check should hash: the published ones where they exist,
+// and the algorithm's own where they do not. `published` reports which, because
+// the two carry different weight and whoever prints a line about it has to say
+// so. Zero means the algorithm offers neither, which is a refusal to mine.
+size_t startup_answers(const Algorithm &algo, const KnownAnswer **out,
+                       bool *published);
 
 }  // namespace vkminer
 

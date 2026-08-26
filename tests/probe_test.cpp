@@ -29,6 +29,7 @@
 //   dispatch -- or a hundred of the same dispatch -- says nothing at all about
 //   the mean, however tight the error bar printed beside it looks.
 
+#include "algorithms/kawpow/kawpow.h"
 #include "algorithms/registry.h"
 #include "backends/backend.h"
 #include "backends/vulkan/vulkan_common.h"
@@ -38,6 +39,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -90,6 +92,15 @@ void fail(const char *fmt, ...)
 // an equality between two independently computed minima is still an equality
 // between two 32-bit values.
 constexpr uint32_t kExactNonces = 1u << 21;
+
+// And the other bound on it, which is the one that usually binds. The cost of a
+// nonce is the algorithm's business and spans orders of magnitude across the
+// ones here -- two block compressions for sha256d, four thousand Salsa cores
+// for scrypt, a walk of 256 DAG items for KawPoW -- so a count that suits the
+// first is an afternoon for the last. A minute of the host's time is the same
+// minute on every machine and for every algorithm, and what it buys is however
+// many nonces that turns out to be.
+constexpr int kExactSeconds = 60;
 
 constexpr uint32_t kNonceBase = 0x7fff0000u;
 constexpr int kMaxSolutions = 64;
@@ -204,15 +215,37 @@ bool probe_dispatch(vkminer::Kernel &kernel, const uint32_t *header,
 // target is all ones so that verify() takes every nonce and fills in the
 // digest; word 7 is the most significant, which is the word the shader screens
 // on and the word the probe reports.
+//
+// Over as many of `*count` nonces as fit in kExactSeconds, and `*count` comes
+// back lowered to however many that was: the two minima have to be over the
+// same nonces to be compared at all, so the host decides the range and the
+// device follows. A shorter one is a weaker check -- the expected minimum over
+// n nonces is 2^32/n, so it compares two larger numbers -- but not an empty
+// one. An equality between two independently computed 32-bit minima is an
+// equality.
 uint32_t reference_best(const vkminer::Algorithm &algo, const uint32_t *header,
-                        uint32_t start, uint32_t count)
+                        uint32_t start, uint32_t *count)
 {
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(kExactSeconds);
+
     uint32_t best = 0xffffffffu;
-    for (uint32_t i = 0; i < count; i++) {
+    uint32_t done = 0;
+    while (done < *count) {
         uint32_t hash[8];
-        if (algo.verify(header, start + i, kTargetAll, hash) && hash[7] < best)
+        if (algo.verify(header, start + done, kTargetAll, hash)
+            && hash[7] < best)
             best = hash[7];
+        done++;
+
+        // In blocks, because a clock read per nonce would be a fair share of
+        // the cheapest algorithm's whole cost per nonce.
+        if ((done & 0x3ffu) == 0
+            && std::chrono::steady_clock::now() >= deadline)
+            break;
     }
+
+    *count = done;
     return best;
 }
 
@@ -257,8 +290,14 @@ bool calibrate(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
 {
     // Any word but the nonce, which the dispatch supplies and which must stay
     // where it is. The timestamp by preference, since a real miner stirs that
-    // one too.
-    const size_t stir = algo.nonce_word() == 17 ? 0 : 17;
+    // one too -- but only where the header reaches it. KawPoW's is nine words
+    // long, and stirring word 17 there would change nothing the kernel reads,
+    // leaving every round a repeat of the round before while the error bar went
+    // on shrinking. Which is the one thing this check must not do.
+    const size_t words = algo.header_bytes() / 4;
+    size_t stir = 17;
+    if (stir >= words || stir == algo.nonce_word())
+        stir = algo.nonce_word() == 0 ? 1 : 0;
 
     uint32_t header[20];
     std::memcpy(header, header_in, sizeof header);
@@ -353,14 +392,28 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     for (size_t i = 0; i < 20; i++)
         header[i] = be32dec(kHeader + i * 4);
 
-    const uint32_t exact = std::min(kExactNonces, kernel->max_batch());
+    // Once, not per dispatch: every dispatch below is this header or a stir of
+    // one word of it, and neither the table nor the program moves under that.
+    // No-ops for an algorithm that needs neither. This can be slow -- a
+    // device-generated table is a gigabyte written by a kernel -- so it is
+    // announced before it starts.
+    std::printf("     preparing the kernel for this header\n");
+    std::fflush(stdout);
+    if (!kernel->prepare_state(algo.state_key(header)) ||
+        !kernel->prepare_program(algo.program_key(header))) {
+        fail("the kernel could not prepare itself for this header");
+        return false;
+    }
+
+    // The host first, because it is the side that decides how far this check
+    // reaches -- see reference_best -- and the device has to be given the same
+    // nonces or the two minima are minima over different sets.
+    uint32_t exact = std::min(kExactNonces, kernel->max_batch());
+    const uint32_t host_best = reference_best(algo, header, kNonceBase, &exact);
 
     uint32_t device_best = 0;
     if (!probe_dispatch(*kernel, header, kNonceBase, exact, &device_best))
         return false;
-
-    const uint32_t host_best =
-        reference_best(algo, header, kNonceBase, exact);
 
     if (device_best != host_best) {
         fail("over %u nonces from 0x%08x the probe says the smallest digest "
@@ -484,19 +537,31 @@ int main(int argc, char *argv[])
     // probe folded out and every reading below is an absence.
     opt_vk_probe_best = true;
 
-    std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(name);
+    // KawPoW by hand rather than by name, as its other device tests build it:
+    // the registry's version generates a gigabyte of DAG on the device under
+    // test, which the software rasterizers some machines here have nothing but
+    // cannot do in any usable time. A short host-built table changes what the
+    // loads land on and not what the probe sees -- the reading is a minimum
+    // over digests, and every nonce still produces one.
+    constexpr uint64_t kKawpowLines = 8192;
+    std::unique_ptr<vkminer::Algorithm> algo =
+        std::strcmp(name, "kawpow") == 0
+            ? vkminer::make_progpow_host_dag(vkminer::kawpow::kKawpow, 0, kKawpowLines)
+            : vkminer::create_algorithm(name);
     if (!algo) {
         std::printf("FAIL no algorithm called '%s'\n", name);
         return 1;
     }
 
-    // The header below is one particular block of one particular chain, and
-    // eighty bytes of it. An algorithm whose header is some other length would
-    // be handed the first n bytes of it and asked about the digests -- a
-    // question with an answer, and not the one this file claims to be asking.
-    if (algo->header_bytes() != sizeof kHeader) {
-        std::printf("FAIL '%s' reads a %u-byte header, and this test has an "
-                    "80-byte block to give it\n",
+    // The header above is one particular block of one particular chain, and
+    // eighty bytes of it. A shorter header takes the first n of them, which is
+    // no longer that block and does not need to be: what is under test here is
+    // an estimator over digests, and any header produces digests. A longer one
+    // there is nothing to give, and a run that padded it would be answering
+    // about bytes this file made up.
+    if (algo->header_bytes() > sizeof kHeader) {
+        std::printf("FAIL '%s' reads a %u-byte header, and this test has only "
+                    "an 80-byte block to give it\n",
                     algo->name(),
                     static_cast<unsigned>(algo->header_bytes()));
         return 1;

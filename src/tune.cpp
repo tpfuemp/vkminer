@@ -15,6 +15,7 @@ extern "C" {
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <memory>
@@ -538,7 +539,7 @@ void tune_devices(ComputeBackend &backend,
         return;
 
     const KnownAnswer *answers = nullptr;
-    const size_t answer_count = algo->known_answers(&answers);
+    const size_t answer_count = startup_answers(*algo, &answers, nullptr);
     if (!answer_count)
         return;   // nothing to sweep against, and the self-test already said so
 
@@ -604,6 +605,28 @@ KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
 {
     KernelSpec spec = algo.kernel(device);
 
+    // The user's choice first and unconditionally, because the case it exists
+    // for is --no-tune, where there is no entry below to read. Refused rather
+    // than fallen back from: a run that quietly measured some other kernel than
+    // the one named is worse than a run that does not start.
+    if (opt_kernel && opt_kernel[0]) {
+        KernelSpec variants[kMaxVariants];
+        const size_t count = algo.kernels(device, variants, kMaxVariants);
+        bool named = false;
+        for (size_t i = 0; i < count && !named; i++)
+            if (variants[i].variant
+                && std::strcmp(variants[i].variant, opt_kernel) == 0) {
+                spec = variants[i];
+                named = true;
+            }
+        if (!named) {
+            applog(LOG_ERR, "device %d (%s) has no '%s' kernel for %s",
+                   device_index, device.name.c_str(), opt_kernel, algo.name());
+            spec.spirv = nullptr;
+            return spec;
+        }
+    }
+
     const std::map<int, Tuning>::const_iterator found =
         g_tuning.find(device_index);
     if (found == g_tuning.end())
@@ -614,8 +637,8 @@ KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
     // A named kernel is looked up, not trusted: the entry may name one this
     // build no longer offers. Not finding it leaves the algorithm's own choice
     // carrying sizes measured on a different module -- a slower start, not a
-    // wrong one.
-    if (!tuning.variant.empty()) {
+    // wrong one. Skipped where the user named one, which outranks a cache.
+    if (!tuning.variant.empty() && !(opt_kernel && opt_kernel[0])) {
         KernelSpec variants[kMaxVariants];
         const size_t count = algo.kernels(device, variants, kMaxVariants);
         for (size_t i = 0; i < count; i++)

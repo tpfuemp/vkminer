@@ -1,12 +1,16 @@
-// KawPoW, interpreted: sixteen invocations per nonce, reading the program.
+// A ProgPoW fork, interpreted: sixteen invocations per nonce, reading the
+// program.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// ProgPoW's inner loop is regenerated every three blocks, so a kernel either
-// bakes the period in and is rebuilt three-minutely or reads the program as
+// ProgPoW's inner loop is regenerated every few blocks, so a kernel either
+// bakes the period in and is rebuilt every few minutes or reads the program as
 // data. This one reads it as data: 131 words in workgroup memory, an index and
 // a selector at a time. That makes it the slow one and the control -- what
 // every faster spelling is compared against, and the only kernel here that
 // needs nothing of a device but Vulkan 1.1.
+//
+// Which fork it is arrives as specialization constants and nothing else; see
+// shaders/common/progpow_params.glsl.
 //
 // Sixteen invocations per nonce, because ProgPoW's mix is 16 lanes wide and
 // each round mixes across them. The backend launches `count * lanes`
@@ -36,7 +40,7 @@
 
 layout(local_size_x_id = 0) in;
 
-// 92 bytes, against a guaranteed minimum of 128. Mirrored by KawpowPush in
+// 92 bytes, against a guaranteed minimum of 128. Mirrored by ProgPowPush in
 // kawpow.cpp, which asserts its own size and offsets.
 layout(push_constant) uniform Push {
     uint header[8];    // the 32-byte header hash, little-endian words
@@ -45,54 +49,16 @@ layout(push_constant) uniform Push {
     uint nonce_hi;
     uint count;        // nonces to test, which is a sixteenth of the invocations
     uint capacity;     // candidates the result buffer can hold
-    uint period_lo;    // block height / 3: the program's only input
+    uint period_lo;    // block height / the period length: the program's input
     uint period_hi;
     uint dag_lines;    // 256-byte lines in the table bound above
 } push;
 
 // ------------------------------------------------------------- the shape of it
 //
-// The constants that make this KawPoW rather than another ProgPoW: the
-// algorithm, not a tuning point. The host has the same numbers in
-// kawpow_program.h.
-
-const uint kLanes    = 16u;
-const uint kRegs     = 32u;
-const uint kCacheOps = 11u;
-const uint kMathOps  = 18u;
-const uint kRounds   = 64u;
-const uint kDagLoads = 4u;
-
-// Words of a 256-byte DAG line, and words of the 16 KiB the cache operations
-// read. That cache is the first 16 KiB of the DAG itself -- word i of it is
-// word i of the table -- so there is nothing separate to bind.
-const uint kLineWords = kLanes * kDagLoads;
-const uint kL1Words   = 16u * 1024u / 4u;
-
-// Where each kind of operation starts in the program. A cache operation is
-// (src, dst, sel), a math operation is (src1, src2, sel1, dst, sel2), a DAG
-// merge is (dst, sel).
-const uint kCacheWords = 3u;
-const uint kMathWords  = 5u;
-const uint kDagWords   = 2u;
-
-const uint kCacheBase = 0u;
-const uint kMathBase  = kCacheBase + kCacheOps * kCacheWords;
-const uint kDagBase   = kMathBase + kMathOps * kMathWords;
-const uint kProgramWords = kDagBase + kDagLoads * kDagWords;
-
-const uint kFnvPrime = 0x01000193u;
-const uint kFnvOffsetBasis = 0x811c9dc5u;
-
-// The fifteen words KawPoW pads its keccak state with, where Ethash's ProgPoW
-// pads with zeros -- the only thing separating this chain's hash from another
-// fork's. The first is 0x72, a lower-case 'r', which is upstream's typo and
-// is now what the whole network hashes. Written as numbers because written as
-// characters is how it gets silently corrected.
-const uint kRavencoinKawpow[15] = uint[15](
-    0x00000072u, 0x00000041u, 0x00000056u, 0x00000045u, 0x0000004eu,
-    0x00000043u, 0x0000004fu, 0x00000049u, 0x0000004eu, 0x0000004bu,
-    0x00000041u, 0x00000057u, 0x00000050u, 0x0000004fu, 0x00000057u);
+// Which fork this is, and where the program's words sit. The host has the same
+// numbers in kawpow_params.h and kawpow_program.h.
+#include "shaders/common/progpow_params.glsl"
 
 // How the lanes talk. Included here rather than at the top because it is
 // written in terms of kLanes, declared just above.
@@ -148,8 +114,11 @@ uint kiss99()
 // value after it. This is kawpow_program.cpp step for step, and the KAT
 // compares the two.
 
-uint dst_seq[kRegs];
-uint src_seq[kRegs];
+// Sized for the widest fork and used a prefix at a time: an array a
+// specialization constant is the length of is one no compiler will keep in
+// registers.
+uint dst_seq[kMaxRegs];
+uint src_seq[kMaxRegs];
 uint dst_counter;
 uint src_counter;
 
@@ -170,6 +139,13 @@ void build_program(uint period_lo, uint period_hi)
     uint jsr = fnv1a(w, period_lo);
     uint jcong = fnv1a(jsr, period_hi);
     kiss99_seed(z, w, jsr, jcong);
+
+    // The whole program, not just the words this fork fills: the layout is the
+    // widest fork's, and a narrower one leaves a tail no round reads. Zeroed so
+    // that what it does not read is nothing in particular, which is what the
+    // host does and what the KAT compares against.
+    for (uint i = 0u; i < kProgramWords; i++)
+        prog[i] = 0u;
 
     // Destinations and sources come from two shuffled permutations, so that
     // over one pass every register is written exactly once. Fisher-Yates from
@@ -337,14 +313,13 @@ void main()
         seed[i] = push.header[i];
     seed[8] = nonce_lo;
     seed[9] = nonce_hi;
-    for (uint i = 10u; i < 25u; i++)
-        seed[i] = kRavencoinKawpow[i - 10u];
+    progpow_absorb_seed(seed);
     keccak_f800(seed);
 
-    // The 32 words this lane starts from. Each lane runs its own KISS99, seeded
+    // The words this lane starts from. Each lane runs its own KISS99, seeded
     // from the digest and from the lane number, so the lanes start different
     // and no lane needs another to fill its registers.
-    uint mix[kRegs];
+    uint mix[kMaxRegs];
     {
         uint z = fnv1a(kFnvOffsetBasis, seed[0]);
         uint w = fnv1a(z, seed[1]);
@@ -392,7 +367,7 @@ void main()
         }
     }
 
-    // 512 words down to 16.
+    // The whole mix down to 16 words.
     uint lane_hash = kFnvOffsetBasis;
     for (uint i = 0u; i < kRegs; i++)
         lane_hash = fnv1a(lane_hash, mix[i]);
@@ -422,8 +397,7 @@ void main()
         last[i] = seed[i];
     for (uint i = 8u; i < 16u; i++)
         last[i] = mix_hash[i - 8u];
-    for (uint i = 16u; i < 25u; i++)
-        last[i] = kRavencoinKawpow[i - 16u];
+    progpow_absorb_final(last);
     keccak_f800(last);
 
     // Both a reversal and a byte swap. KawPoW's digest is eight
