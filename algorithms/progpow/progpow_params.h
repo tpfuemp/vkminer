@@ -15,8 +15,8 @@
 // The namespace is still `kawpow`: it is the family's first member and the one
 // this implementation was built and verified against.
 
-#ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PARAMS_H__
-#define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PARAMS_H__
+#ifndef VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PARAMS_H__
+#define VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PARAMS_H__
 
 #include <cstdint>
 
@@ -91,4 +91,4 @@ const Params *find(const char *name);
 }  // namespace progpow
 }  // namespace vkminer
 
-#endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PARAMS_H__
+#endif  // VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PARAMS_H__

@@ -99,14 +99,14 @@ int failures = 0;
 // has to be checked against the printf that will read it rather than against
 // the C library's default one. progpow_kat says the same thing at more length.
 #if defined(__MINGW_PRINTF_FORMAT)
-#define KAWPOW_PRINTF_FORMAT __MINGW_PRINTF_FORMAT
+#define PROGPOW_PRINTF_FORMAT __MINGW_PRINTF_FORMAT
 #elif defined(__GNUC__)
-#define KAWPOW_PRINTF_FORMAT printf
+#define PROGPOW_PRINTF_FORMAT printf
 #endif
 
 void fail(const char *fmt, ...)
-#if defined(KAWPOW_PRINTF_FORMAT)
-    __attribute__((format(KAWPOW_PRINTF_FORMAT, 1, 2)))
+#if defined(PROGPOW_PRINTF_FORMAT)
+    __attribute__((format(PROGPOW_PRINTF_FORMAT, 1, 2)))
 #endif
     ;
 

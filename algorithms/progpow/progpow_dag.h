@@ -12,8 +12,8 @@
 // Implemented against the vendored ethash, for the reason
 // third_party/CMakeLists gives. Nothing here exposes it.
 
-#ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_DAG_H__
-#define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_DAG_H__
+#ifndef VKMINER_ALGORITHMS_PROGPOW_PROGPOW_DAG_H__
+#define VKMINER_ALGORITHMS_PROGPOW_PROGPOW_DAG_H__
 
 #include "algorithms/progpow/progpow_params.h"
 
@@ -101,4 +101,4 @@ struct DagPush {
 }  // namespace progpow
 }  // namespace vkminer
 
-#endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_DAG_H__
+#endif  // VKMINER_ALGORITHMS_PROGPOW_PROGPOW_DAG_H__

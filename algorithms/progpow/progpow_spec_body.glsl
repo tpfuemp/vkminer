@@ -24,8 +24,8 @@
 // are differentially tested against each other, and that test is only worth
 // something if the difference between them is the one thing it is about.
 
-#ifndef VKMINER_ALGORITHMS_KAWPOW_SPEC_BODY_GLSL_INCLUDED
-#define VKMINER_ALGORITHMS_KAWPOW_SPEC_BODY_GLSL_INCLUDED
+#ifndef VKMINER_ALGORITHMS_PROGPOW_SPEC_BODY_GLSL_INCLUDED
+#define VKMINER_ALGORITHMS_PROGPOW_SPEC_BODY_GLSL_INCLUDED
 
 #include "shaders/common/bits.glsl"
 #include "shaders/common/candidates.glsl"
@@ -388,8 +388,8 @@ uint random_merge(uint a, uint b, uint selector)
 
 void main()
 {
-    uint lane = kawpow_lane();
-    uint nonce_index = kawpow_nonce_index();
+    uint lane = progpow_lane();
+    uint nonce_index = progpow_nonce_index();
 
     // No early return for the invocations past the end of the dispatch.
     // Every exchange below has to be reached by every invocation of the group
@@ -428,7 +428,7 @@ void main()
         // The one value a round takes from the mix rather than from the
         // program, and the reason the DAG cannot be prefetched: lane r%16's
         // register 0, read by all sixteen.
-        uint line = kawpow_broadcast(mix[0], r % kLanes) % kDagLines;
+        uint line = progpow_broadcast(mix[0], r % kLanes) % kDagLines;
 
         CACHE_OP(0u, kCacheSrc0, kCacheDst0, kCacheSel0);
         MATH_OP(0u, kMathA0, kMathB0, kMathOp0, kMathDst0, kMathSel0);
@@ -476,7 +476,7 @@ void main()
     for (uint i = 0u; i < kRegs; i++)
         lane_hash = fnv1a(lane_hash, mix[i]);
 
-    kawpow_publish(lane_hash);
+    progpow_publish(lane_hash);
 
     // ...and 16 down to 8, where the lanes finally meet: lane l lands in word
     // l % 8, so each word takes two lanes in lane order.
@@ -488,7 +488,7 @@ void main()
     // emits, but a shuffle reads a register out of an invocation that must
     // still be running, so no lane may leave before the loop below is over.
     for (uint l = 0u; l < kLanes; l++)
-        mix_hash[l % 8u] = fnv1a(mix_hash[l % 8u], kawpow_published(l));
+        mix_hash[l % 8u] = fnv1a(mix_hash[l % 8u], progpow_published(l));
 
     if (lane != 0u)
         return;
@@ -533,4 +533,4 @@ void main()
     emit_candidate64(push.capacity, nonce_lo, nonce_hi, state);
 }
 
-#endif  // VKMINER_ALGORITHMS_KAWPOW_SPEC_BODY_GLSL_INCLUDED
+#endif  // VKMINER_ALGORITHMS_PROGPOW_SPEC_BODY_GLSL_INCLUDED

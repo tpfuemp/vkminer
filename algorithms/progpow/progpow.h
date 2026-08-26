@@ -1,8 +1,8 @@
 // vkminer -- a Vulkan compute cryptocurrency miner.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_H__
-#define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_H__
+#ifndef VKMINER_ALGORITHMS_PROGPOW_PROGPOW_H__
+#define VKMINER_ALGORITHMS_PROGPOW_PROGPOW_H__
 
 #include "algorithms/algorithm.h"
 #include "algorithms/progpow/progpow_params.h"
@@ -46,4 +46,4 @@ std::unique_ptr<Algorithm> make_progpow_host_dag(const progpow::Params &params,
 extern "C" bool progpow_seed_hash_check(uint64_t height,
                                         const unsigned char seed[32]);
 
-#endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_H__
+#endif  // VKMINER_ALGORITHMS_PROGPOW_PROGPOW_H__

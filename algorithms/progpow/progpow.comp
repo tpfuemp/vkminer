@@ -290,8 +290,8 @@ uint random_merge(uint a, uint b, uint selector)
 
 void main()
 {
-    uint lane = kawpow_lane();
-    uint nonce_index = kawpow_nonce_index();
+    uint lane = progpow_lane();
+    uint nonce_index = progpow_nonce_index();
 
     // No early return for the invocations past the end of the dispatch.
     // Every barrier below has to be reached by every invocation in the
@@ -336,7 +336,7 @@ void main()
         // register 0, read by all sixteen. At r == 0 this is also what
         // publishes the program -- the barrier inside it is the only thing
         // between invocation 0's writes to prog[] and everyone's first read.
-        uint line = kawpow_broadcast(mix[0], r % kLanes) % push.dag_lines;
+        uint line = progpow_broadcast(mix[0], r % kLanes) % push.dag_lines;
 
         for (uint i = 0u; i < steps; i++) {
             if (i < kCacheOps) {
@@ -372,7 +372,7 @@ void main()
     for (uint i = 0u; i < kRegs; i++)
         lane_hash = fnv1a(lane_hash, mix[i]);
 
-    kawpow_publish(lane_hash);
+    progpow_publish(lane_hash);
 
     // ...and 16 down to 8, where the lanes finally meet: lane l lands in word
     // l % 8, so each word takes two lanes in lane order.
@@ -384,7 +384,7 @@ void main()
     for (uint i = 0u; i < 8u; i++)
         mix_hash[i] = kFnvOffsetBasis;
     for (uint l = 0u; l < kLanes; l++)
-        mix_hash[l % 8u] = fnv1a(mix_hash[l % 8u], kawpow_published(l));
+        mix_hash[l % 8u] = fnv1a(mix_hash[l % 8u], progpow_published(l));
 
     if (lane != 0u)
         return;

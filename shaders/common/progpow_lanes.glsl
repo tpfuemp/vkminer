@@ -24,7 +24,7 @@
 // containing it, however unreachable the code is. So it is two modules, offered
 // by Algorithm::kernels() from the feature bits and raced by the tuner.
 //
-// Define KAWPOW_SUBGROUP_LANES before including this for the second one. The
+// Define PROGPOW_SUBGROUP_LANES before including this for the second one. The
 // includer also has to require GL_KHR_shader_subgroup_basic and
 // GL_KHR_shader_subgroup_shuffle itself, since an #extension directive belongs
 // at the top of a compilation unit.
@@ -32,7 +32,7 @@
 // Include this after kLanes is declared: it is the algorithm's constant, not
 // this file's.
 
-#ifdef KAWPOW_SUBGROUP_LANES
+#ifdef PROGPOW_SUBGROUP_LANES
 
 // Which lane this invocation is, and which nonce it is helping hash, both come
 // from the subgroup rather than from gl_LocalInvocationID: the mapping between
@@ -42,12 +42,12 @@
 // It does assume every subgroup is full -- a short one at the end of a
 // workgroup would leave nonce indices no invocation claims, and those nonces
 // would never be hashed. KernelSpec::full_subgroups is what prevents it.
-uint kawpow_lane()
+uint progpow_lane()
 {
     return gl_SubgroupInvocationID % kLanes;
 }
 
-uint kawpow_nonce_index()
+uint progpow_nonce_index()
 {
     uint subgroup = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID;
     return subgroup * (gl_SubgroupSize / kLanes)
@@ -58,25 +58,25 @@ uint kawpow_nonce_index()
 // reach this, since a shuffle reads a register out of an invocation that must
 // be active -- the same rule the barrier below imposes, and the reason neither
 // kernel returns early.
-uint kawpow_broadcast(uint value, uint from)
+uint progpow_broadcast(uint value, uint from)
 {
     return subgroupShuffle(value,
-                           gl_SubgroupInvocationID - kawpow_lane() + from);
+                           gl_SubgroupInvocationID - progpow_lane() + from);
 }
 
 // The fold at the end wants all sixteen, so the value is parked once and read
 // sixteen times rather than broadcast sixteen times. Here that is a register;
 // in the other spelling it is what the barriers are protecting.
-uint kawpow_parked;
+uint progpow_parked;
 
-void kawpow_publish(uint value)
+void progpow_publish(uint value)
 {
-    kawpow_parked = value;
+    progpow_parked = value;
 }
 
-uint kawpow_published(uint from)
+uint progpow_published(uint from)
 {
-    return kawpow_broadcast(kawpow_parked, from);
+    return progpow_broadcast(progpow_parked, from);
 }
 
 #else
@@ -85,12 +85,12 @@ uint kawpow_published(uint from)
 // specialization constant, so it is exactly as large as the dispatch made it.
 shared uint xchg[gl_WorkGroupSize.x];
 
-uint kawpow_lane()
+uint progpow_lane()
 {
     return gl_LocalInvocationID.x % kLanes;
 }
 
-uint kawpow_nonce_index()
+uint progpow_nonce_index()
 {
     return gl_GlobalInvocationID.x / kLanes;
 }
@@ -99,26 +99,26 @@ uint kawpow_nonce_index()
 // reading the slot this call is about to overwrite -- without it a fast lane
 // laps a slow one and reads the next round's line index. The second says the
 // write has landed.
-uint kawpow_broadcast(uint value, uint from)
+uint progpow_broadcast(uint value, uint from)
 {
     barrier();
-    if (kawpow_lane() == from)
+    if (progpow_lane() == from)
         xchg[gl_LocalInvocationID.x] = value;
     barrier();
 
-    return xchg[gl_LocalInvocationID.x - kawpow_lane() + from];
+    return xchg[gl_LocalInvocationID.x - progpow_lane() + from];
 }
 
-void kawpow_publish(uint value)
+void progpow_publish(uint value)
 {
     barrier();
     xchg[gl_LocalInvocationID.x] = value;
     barrier();
 }
 
-uint kawpow_published(uint from)
+uint progpow_published(uint from)
 {
-    return xchg[gl_LocalInvocationID.x - kawpow_lane() + from];
+    return xchg[gl_LocalInvocationID.x - progpow_lane() + from];
 }
 
 #endif

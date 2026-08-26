@@ -13,8 +13,8 @@
 // This is also what the miner re-hashes candidates with, so it must stay simple
 // and must never be optimized; candidates arrive a few times a minute.
 
-#ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_HASH_H__
-#define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_HASH_H__
+#ifndef VKMINER_ALGORITHMS_PROGPOW_PROGPOW_HASH_H__
+#define VKMINER_ALGORITHMS_PROGPOW_PROGPOW_HASH_H__
 
 #include "algorithms/progpow/progpow_program.h"
 
@@ -66,4 +66,4 @@ bool hash(const Params &params, const Program &program, const uint32_t *l1,
 }  // namespace progpow
 }  // namespace vkminer
 
-#endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_HASH_H__
+#endif  // VKMINER_ALGORITHMS_PROGPOW_PROGPOW_HASH_H__

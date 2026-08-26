@@ -19,8 +19,8 @@
 // it and no individual line looks wrong. Read this against progpow.cpp's
 // `round()` and `mix_rng_state`, not against a description of them.
 
-#ifndef VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__
-#define VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__
+#ifndef VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PROGRAM_H__
+#define VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PROGRAM_H__
 
 #include "algorithms/progpow/progpow_params.h"
 
@@ -148,4 +148,4 @@ inline bool names_a_register(uint32_t i)
 }  // namespace progpow
 }  // namespace vkminer
 
-#endif  // VKMINER_ALGORITHMS_KAWPOW_KAWPOW_PROGRAM_H__
+#endif  // VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PROGRAM_H__

@@ -19,6 +19,6 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 
-#define KAWPOW_SUBGROUP_LANES 1
+#define PROGPOW_SUBGROUP_LANES 1
 
 #include "algorithms/progpow/progpow_spec_body.glsl"
