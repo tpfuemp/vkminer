@@ -356,6 +356,27 @@ uint random_merge(uint a, uint b, uint selector)
     }
 }
 
+// -------------------------------------------------- the 16 KiB, once per group
+//
+// The cache operations read the first 16 KiB of the table eleven or twelve
+// times a round at an index taken from the mix, so no read is predictable and
+// no two lanes want the same word. Held here they are shared-memory reads and
+// the copy is paid once per workgroup instead of once per read.
+//
+// Sized by a specialization constant because a Vulkan device need only offer
+// 16 KiB of workgroup memory in total, the lane exchange included. Where it
+// does not fit the host says zero and the reads go to the table as before. The
+// array is one word then: a zero-length array is not a type.
+shared uint c_dag[kL1SharedWords + 1u];
+
+// Word `index` of that 16 KiB, from wherever this device keeps it. The compare
+// is against a specialization constant, so only one arm reaches the pipeline --
+// the same trick as the chain of compares in shared_table.glsl.
+uint progpow_l1(uint index)
+{
+    return kL1SharedWords == 0u ? shared_word(index) : c_dag[index];
+}
+
 // ------------------------------------------------------------- one round, once
 //
 // ProgPoW generates a single body and runs it for every round -- only the DAG
@@ -375,14 +396,37 @@ uint random_merge(uint a, uint b, uint selector)
 
 #define CACHE_OP(n, src, dst, sel) \
     if (n < kCacheOps) \
-        mix[dst] = random_merge(mix[dst], shared_word(mix[src] % kL1Words), sel)
+        mix[dst] = random_merge(mix[dst], progpow_l1(mix[src] % kL1Words), sel)
 
 #define MATH_OP(n, a, b, op, dst, sel) \
     if (n < kMathOps) \
         mix[dst] = random_merge(mix[dst], random_math(mix[a], mix[b], op), sel)
 
-#define DAG_OP(dst, sel, word) \
-    mix[dst] = random_merge(mix[dst], shared_word(word), sel)
+// A value rather than an index: a lane's four words are one 16-byte load, not
+// four -- see the round. The other two operations read scattered words.
+#define DAG_OP(dst, sel, value) \
+    mix[dst] = random_merge(mix[dst], value, sel)
+
+// ---------------------------------------------------------- the seal, per hash
+//
+// The first keccak depends on the header and the nonce and on nothing per-lane,
+// so kLanes lanes computing it is kLanes-1 copies of one answer. Masking them
+// off saves nothing -- a hash's lanes are consecutive invocations of one warp,
+// which would issue all 22 rounds regardless -- so the only way to stop paying
+// is for fewer invocations to do the work.
+//
+// The invocations numbered below the group's hash count compute its seals
+// between them and park eight words each: the eight that survive, two read by
+// the seeding and all eight by the final absorb. It costs one barrier per
+// dispatch, and that is the barrier the copy above already needs.
+//
+// A workgroup holds width / kLanes hashes, and the width is the tuner's rather
+// than the algorithm's -- hence kSeedPrePass being a switch and not a count.
+const uint kSeedSlots = gl_WorkGroupSize.x / kLanes;
+
+// Eight words a hash, and the same one-word floor as c_dag: a zero-length array
+// is not a type.
+shared uint seed_slots[kSeedPrePass * kSeedSlots * 8u + 1u];
 
 // ------------------------------------------------------------------ the kernel
 
@@ -390,6 +434,44 @@ void main()
 {
     uint lane = progpow_lane();
     uint nonce_index = progpow_nonce_index();
+
+    // The group's seals, one invocation each. The index is arithmetic and not
+    // a lookup, which is the correctness argument: under both lane spellings a
+    // hash's global index is gl_WorkGroupID.x * kSeedSlots + slot, so this
+    // branch and the read below need not agree on which invocation is where,
+    // only on how many hashes a group holds. KernelSpec::full_subgroups is what
+    // makes that count exact for the shuffle kernel.
+    if (kSeedPrePass != 0u && gl_LocalInvocationID.x < kSeedSlots) {
+        uint slot = gl_LocalInvocationID.x;
+        uint index = gl_WorkGroupID.x * kSeedSlots + slot;
+        uint lo = push.nonce_lo + index;
+        uint hi = push.nonce_hi + (lo < push.nonce_lo ? 1u : 0u);
+
+        uint s[25];
+        for (uint i = 0u; i < 8u; i++)
+            s[i] = push.header[i];
+        s[8] = lo;
+        s[9] = hi;
+        progpow_absorb_seed(s);
+        keccak_f800(s);
+        for (uint i = 0u; i < 8u; i++)
+            seed_slots[slot * 8u + i] = s[i];
+    }
+
+    // The copy, before anything reads it, and by the whole workgroup: 16 KiB
+    // between however many invocations there are, whatever their width.
+    if (kL1SharedWords != 0u) {
+        for (uint i = gl_LocalInvocationID.x; i < kL1SharedWords;
+             i += gl_WorkGroupSize.x)
+            c_dag[i] = shared_word(i);
+    }
+
+    // One barrier for both, and none where the host switched both off -- that
+    // device runs the kernel it ran before, this barrier included. Both
+    // conditions are specialization constants, hence uniform across the group,
+    // which is what makes a barrier reached from inside them legal.
+    if (kSeedPrePass != 0u || kL1SharedWords != 0u)
+        barrier();
 
     // No early return for the invocations past the end of the dispatch.
     // Every exchange below has to be reached by every invocation of the group
@@ -402,15 +484,26 @@ void main()
 
     // Header, nonce and the fork's fifteen words, absorbed in one go: the state
     // is exactly 25 words and all of them are written, so there is no padding
-    // rule and no rate. All sixteen lanes compute the same permutation rather
-    // than one broadcasting it -- 22 rounds, against a barrier to save them.
-    uint seed[25];
-    for (uint i = 0u; i < 8u; i++)
-        seed[i] = push.header[i];
-    seed[8] = nonce_lo;
-    seed[9] = nonce_hi;
-    progpow_absorb_seed(seed);
-    keccak_f800(seed);
+    // rule and no rate. Only eight words are read again, which is what the
+    // pre-pass parks; where it ran, the 25-word state is not in this path at
+    // all and its registers are the lane's to spend. The compare is against a
+    // specialization constant, so only one arm reaches the pipeline.
+    uint seed[8];
+    if (kSeedPrePass == 0u) {
+        uint s[25];
+        for (uint i = 0u; i < 8u; i++)
+            s[i] = push.header[i];
+        s[8] = nonce_lo;
+        s[9] = nonce_hi;
+        progpow_absorb_seed(s);
+        keccak_f800(s);
+        for (uint i = 0u; i < 8u; i++)
+            seed[i] = s[i];
+    } else {
+        uint slot = nonce_index - gl_WorkGroupID.x * kSeedSlots;
+        for (uint i = 0u; i < 8u; i++)
+            seed[i] = seed_slots[slot * 8u + i];
+    }
 
     // The 32 words this lane starts from. Each lane runs its own KISS99, seeded
     // from the digest and from the lane number, so the lanes start different
@@ -464,11 +557,17 @@ void main()
         // A lane's four words are not its own quarter of the line: the
         // offset is (lane ^ r), so which lane reads which quarter changes every
         // round and the sixteen between them still cover all 256 bytes.
+        //
+        // One 16-byte load, not four 4-byte ones. Legal because kLineWords and
+        // kDagLoads are both multiples of four, so `word` is one whatever the
+        // line and lane -- progpow_hash.h asserts it, so a fork that changed
+        // the shape would not compile.
         uint word = line * kLineWords + ((lane ^ r) % kLanes) * kDagLoads;
-        DAG_OP(kDagDst0, kDagSel0, word);
-        DAG_OP(kDagDst1, kDagSel1, word + 1u);
-        DAG_OP(kDagDst2, kDagSel2, word + 2u);
-        DAG_OP(kDagDst3, kDagSel3, word + 3u);
+        uvec4 quad = shared_quad(word);
+        DAG_OP(kDagDst0, kDagSel0, quad.x);
+        DAG_OP(kDagDst1, kDagSel1, quad.y);
+        DAG_OP(kDagDst2, kDagSel2, quad.z);
+        DAG_OP(kDagDst3, kDagSel3, quad.w);
     }
 
     // 512 words down to 16.

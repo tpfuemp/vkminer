@@ -92,6 +92,21 @@ std::shared_ptr<SharedState> SharedState::create(VulkanDevice &device,
 
     const uint64_t count = (bytes + chunk - 1) / chunk;
 
+    // Every piece a whole number of 16-byte quads, the short last one included.
+    // shared_table.glsl declares these bindings as `uvec4 quad[]`, so a piece
+    // ending mid-quad leaves its last words off the end of that array, where a
+    // read returns whatever the device's robustness rules say. A check and not
+    // arithmetic that rounds: rounding would silently make a table's tail
+    // unreadable, and every size here is a power of two or the table itself.
+    if ((bytes % 16) || (chunk % 16)) {
+        applog(LOG_ERR, "Vulkan: '%s' asked for %llu bytes of shared state in "
+                        "pieces of %llu, and a piece has to be a whole number "
+                        "of 16 bytes", name,
+               static_cast<unsigned long long>(bytes),
+               static_cast<unsigned long long>(chunk));
+        return nullptr;
+    }
+
     // How many bindings the shader has for it. Zero and one both mean the one
     // binding every kernel before KawPoW had, and the chain that would select
     // between several is not in those shaders at all.

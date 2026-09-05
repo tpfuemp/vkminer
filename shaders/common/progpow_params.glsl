@@ -69,6 +69,21 @@ layout(constant_id = 289) const uint kSealFinal6 = 0x0000004fu;
 layout(constant_id = 290) const uint kSealFinal7 = 0x00000049u;
 layout(constant_id = 291) const uint kSealFinal8 = 0x0000004eu;
 
+// Not the fork's shape but the device's answer, kept here because this is
+// where the IDs live: words of the 16 KiB cache a workgroup copies into
+// workgroup memory, or zero to read it from the table as every kernel once did.
+// Only the specialized body fills the array; the interpreter declares the
+// constant, never reads it, and the driver drops it. progpow.cpp decides.
+layout(constant_id = 292) const uint kL1SharedWords = 0u;
+
+// The same answer about the same budget: non-zero to have a workgroup compute
+// each of its hashes' seed keccaks once and park the digest, zero to have every
+// lane of a hash compute the same permutation as before. A switch and not a
+// count because the count is gl_WorkGroupSize.x / kLanes and the width belongs
+// to the tuner. progpow.cpp decides it beside the copy it shares a barrier
+// with.
+layout(constant_id = 293) const uint kSeedPrePass = 0u;
+
 // Words of a 256-byte DAG line, and words of the 16 KiB the cache operations
 // read. That cache is the first 16 KiB of the DAG itself -- word i of it is
 // word i of the table -- so there is nothing separate to bind.

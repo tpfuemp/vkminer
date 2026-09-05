@@ -69,8 +69,16 @@ constexpr size_t kProgramConstants = progpow::kProgramWords + 1;
 // Every shader in the family reads these from the same positions, which is what
 // lets one .comp serve four coins.
 constexpr size_t kShapeConstants = 4;
+
+// Two more that are the device's rather than the fork's: whether the
+// specialized kernels cache the 16 KiB in workgroup memory, and whether they
+// compute a hash's seed keccak once per workgroup. Both are paid out of the one
+// workgroup memory budget. Last, because their order is the contract the
+// shader's IDs are written against. See l1_shared_words(), seed_pre_pass().
+constexpr size_t kDeviceConstants = 2;
 constexpr size_t kKernelConstants =
-    kShapeConstants + progpow::kSealSeedWords + progpow::kSealFinalWords;
+    kShapeConstants + progpow::kSealSeedWords + progpow::kSealFinalWords
+    + kDeviceConstants;
 
 // 64-byte items in a 256-byte DAG line, which is what one round reads.
 constexpr uint64_t kItemsPerLine = progpow::kLineWords * 4 / progpow::kItemBytes;
@@ -283,6 +291,12 @@ public:
             kernel_constants_[at++] = params_.seal_seed[i];
         for (uint32_t i = 0; i < progpow::kSealFinalWords; i++)
             kernel_constants_[at++] = params_.seal_final[i];
+
+        // The device's are spec_for()'s to write. Zero until then, which is
+        // both the answer for a device that never gets asked and the kernel
+        // that shipped before there was a question.
+        while (at < kKernelConstants)
+            kernel_constants_[at++] = 0;
     }
 
     const char *name() const override { return params_.name; }
@@ -640,13 +654,68 @@ private:
             && device.subgroup_size % progpow::kLanes == 0;
     }
 
+    // The widest workgroup the tuner could choose here. The width is measured
+    // later, so the budgets below are taken against the worst case: being wrong
+    // the other way is not a slower kernel but a pipeline that fails to build.
+    static uint64_t widest_workgroup(const DeviceInfo &device)
+    {
+        uint64_t widest = device.max_workgroup_size;
+        if (device.max_invocations && device.max_invocations < widest)
+            widest = device.max_invocations;
+        return widest;
+    }
+
+    // The lane exchange, one word per invocation. Charged to both specialized
+    // kernels though only one has it, so that the tuner's choice between them
+    // is not also a choice between two workgroup memory budgets.
+    static uint64_t exchange_bytes(const DeviceInfo &device)
+    {
+        return widest_workgroup(device) * 4;
+    }
+
+    // The parked seals: eight words per hash, a hash per kLanes invocations,
+    // plus the array's one-word floor. Two bytes an invocation.
+    static uint64_t seed_slot_bytes(const DeviceInfo &device)
+    {
+        return (widest_workgroup(device) / progpow::kLanes * 8 + 1) * 4;
+    }
+
+    // How many words of the 16 KiB the cache operations read the specialized
+    // kernels keep in workgroup memory: all of it, or none and read the table.
+    //
+    // Not a formality: the copy is 16 KiB and a Vulkan device need only offer
+    // 16 KiB in total, exchange included, so a device at that floor gets the
+    // kernel that shipped before. Asked first, and the pre-pass takes what is
+    // left, because the copy is much the larger win of the two.
+    static uint32_t l1_shared_words(const DeviceInfo &device)
+    {
+        // The array is one word longer than the copy; see the shader.
+        const uint64_t copy = (progpow::kL1Words + 1) * 4;
+
+        if (device.max_shared_memory < copy + exchange_bytes(device))
+            return 0;
+        return progpow::kL1Words;
+    }
+
+    // Whether they compute each hash's seed keccak once for the workgroup
+    // instead of once per lane, out of whatever the copy did not take.
+    //
+    // A switch and not a count: a workgroup holds width / kLanes hashes and the
+    // width is not known here, so the shader is left to divide.
+    static uint32_t seed_pre_pass(const DeviceInfo &device)
+    {
+        uint64_t taken = exchange_bytes(device);
+        if (l1_shared_words(device))
+            taken += (progpow::kL1Words + 1) * 4;
+
+        return device.max_shared_memory >= taken + seed_slot_bytes(device);
+    }
+
     // One kernel or another, described by the same numbers: everything but the
     // shader choice is the table -- how big, how cut up, who fills it -- which
     // does not change with how the program reaches the device.
     KernelSpec spec_for(const DeviceInfo &device, Kind kind) const
     {
-        (void)device;
-
         const bool specialized = kind != Kind::kInterpreted;
         const bool subgroup = kind == Kind::kSpecializedSubgroup;
 
@@ -687,6 +756,13 @@ private:
         // The fork, in every pipeline built from this spec. One module, four
         // coins: what the shader compiles down to is decided here and not by
         // which file was loaded.
+        //
+        // The last two are the device's. Every kind gets the same answers, the
+        // interpreter included -- it does not declare them and the driver drops
+        // them -- because a spec carries a pointer to this array, so a value
+        // that varied by kind would end up being whichever kind was last.
+        kernel_constants_[kKernelConstants - 2] = l1_shared_words(device);
+        kernel_constants_[kKernelConstants - 1] = seed_pre_pass(device);
         spec.constants = kernel_constants_;
         spec.constant_count = kKernelConstants;
 
@@ -789,8 +865,11 @@ private:
     // shader takes the line index modulo.
     uint64_t lines_;
 
-    // Filled once in the constructor and handed to every spec by pointer.
-    uint32_t kernel_constants_[kKernelConstants];
+    // Filled in the constructor and handed to every spec by pointer, bar the
+    // last two words: those are the device's and spec_for() writes them. One
+    // Algorithm belongs to one worker, which is what makes a single copy of it
+    // enough -- the rule the shader modules below are cached under.
+    mutable uint32_t kernel_constants_[kKernelConstants];
 
     mutable uint32_t l1_[progpow::kL1Words];
     mutable bool l1_ready_ = false;

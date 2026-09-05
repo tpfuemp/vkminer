@@ -29,6 +29,17 @@ namespace progpow {
 // else -- a "DAG item" is 64 bytes to the setup pass and 256 bytes here.
 constexpr uint32_t kLineWords = kLanes * kDagLoads;
 
+// The specialized shaders take a lane's four words as one 16-byte load, which
+// addresses only if the lane's run starts on a 16-byte boundary. That index is
+// line * kLineWords + lane * kDagLoads, so both counts must be multiples of
+// four -- as they are in every fork and in the specification. Asserted here
+// because GLSL cannot say it, and asserted at all because the failure is
+// silent: a misaligned quad reads the four words around the wrong boundary.
+static_assert(kDagLoads % 4 == 0,
+              "a lane's DAG words must be a whole number of 16-byte quads");
+static_assert(kLineWords % 4 == 0,
+              "a DAG line must be a whole number of 16-byte quads");
+
 // Where those lines come from. The interpreter reads 64 words per round and
 // does not care whether they were generated, uploaded or computed on demand.
 class DagLines {
