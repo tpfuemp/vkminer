@@ -340,7 +340,10 @@ if(TARGET vkminer_shaders)
     # specialization constant that reached the pipeline but not the array it
     # sizes would show up. meraki is also the only fork that uses the twelfth
     # cache read, the widest the program layout goes.
-    foreach(fork evrprogpow meowpow meraki)
+    # firopow earns it for a different reason: its keccak seal is the vanilla
+    # padding rather than a seed-word injection, which is a pair of arrays no
+    # other row here puts on a device.
+    foreach(fork evrprogpow meowpow meraki firopow)
         add_test(NAME progpow_test_${fork}
             COMMAND progpow_test 256 --fork ${fork})
         set_tests_properties(progpow_test_${fork}
