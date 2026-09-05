@@ -12,8 +12,8 @@
 // row cannot do is ask for more operations than the program is laid out for;
 // that bound is progpow_program.h's.
 //
-// The namespace is still `kawpow`: it is the family's first member and the one
-// this implementation was built and verified against.
+// KawPoW is named throughout because it carries the published vectors the other
+// rows are stated against; nothing here is specific to it.
 
 #ifndef VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PARAMS_H__
 #define VKMINER_ALGORITHMS_PROGPOW_PROGPOW_PARAMS_H__

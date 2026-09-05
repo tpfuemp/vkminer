@@ -341,14 +341,14 @@ if(TARGET vkminer_shaders)
     # sizes would show up. meraki is also the only fork that uses the twelfth
     # cache read, the widest the program layout goes.
     foreach(fork evrprogpow meowpow meraki)
-        add_test(NAME kawpow_test_${fork}
+        add_test(NAME progpow_test_${fork}
             COMMAND progpow_test 256 --fork ${fork})
-        set_tests_properties(kawpow_test_${fork}
+        set_tests_properties(progpow_test_${fork}
             PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
-        add_test(NAME kawpow_spec_test_${fork}
+        add_test(NAME progpow_spec_test_${fork}
             COMMAND progpow_spec_test 64 --fork ${fork})
-        set_tests_properties(kawpow_spec_test_${fork}
+        set_tests_properties(progpow_spec_test_${fork}
             PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
     endforeach()
 

@@ -133,8 +133,10 @@ size_t benchmark_word(const vkminer::Algorithm &algo)
 // than a pattern that might optimize differently.
 bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
 {
+    // A benchmark wants a header of the right shape, not one whose digest was
+    // published, and the two sources are mutually exclusive by construction.
     const vkminer::KnownAnswer *answers = nullptr;
-    if (!algo.known_answers(&answers))
+    if (!algo.known_answers(&answers) && !algo.reference_answers(&answers))
         return false;
 
     memset(work, 0, sizeof *work);

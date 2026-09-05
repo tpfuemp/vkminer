@@ -227,8 +227,16 @@ static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
 
    pthread_mutex_unlock( &stats_lock );
 
+   /* A ProgPoW pool governs with mining.set_target, whose handler deliberately
+      leaves next_diff alone to keep the target whole -- so job.diff is frozen at
+      the handshake scalar and is not the difficulty in force. targetdiff is.  */
+   const bool have_stratum_diff = ( opt_stratum_dialect != STRATUM_PROGPOW );
+   const bool diff_changed = have_stratum_diff
+                           ? ( stratum_diff != sctx->job.diff )
+                           : ( last_targetdiff != g_work->targetdiff );
+
    char db[24];
-   if ( stratum_diff != sctx->job.diff )
+   if ( have_stratum_diff && diff_changed )
       applog( LOG_BLUE, "New Stratum Diff %s, Block %d, Tx %d, Job %s",
                         format_diff( db, sizeof db, sctx->job.diff ),
                         sctx->block_height,
@@ -251,7 +259,7 @@ static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
    }
 
    // Update data and calculate new estimates.
-   if ( ( stratum_diff != sctx->job.diff )
+   if ( diff_changed
      || ( last_block_height != (uint32_t)sctx->block_height ) )
    {
       if ( unlikely( !session_first_block ) )
@@ -269,11 +277,13 @@ static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
         * Multiply by opt_target_factor to display in pool scale.
         * net_diff is already scaled above. stratum_diff is pool scale. */
        char dn[24], ds[24], dt[24];
-       applog2( LOG_INFO, "Diff: Net %s, Stratum %s, Target %s",
-                          format_diff( dn, sizeof dn, net_diff ),
-                          format_diff( ds, sizeof ds, stratum_diff ),
-                          format_diff( dt, sizeof dt,
-                                       g_work->targetdiff * opt_target_factor ) );
+       format_diff( dn, sizeof dn, net_diff );
+       format_diff( dt, sizeof dt, g_work->targetdiff * opt_target_factor );
+       if ( have_stratum_diff )
+          applog2( LOG_INFO, "Diff: Net %s, Stratum %s, Target %s", dn,
+                             format_diff( ds, sizeof ds, stratum_diff ), dt );
+       else
+          applog2( LOG_INFO, "Diff: Net %s, Target %s", dn, dt );
 
        if ( likely( hr > 0. ) )
        {

@@ -1,4 +1,4 @@
-// KawPoW specialized, with the lanes meeting in each other's registers.
+// ProgPoW specialized, with the lanes meeting in each other's registers.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // The kernel is progpow_spec_body.glsl, the same text progpow_spec.comp compiles;

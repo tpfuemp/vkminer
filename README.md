@@ -176,28 +176,35 @@ rounds disagreed with each other, so on a noisy device the tuner will decline to
 ## Performance
 
 One card, one driver, so read them as an order of magnitude rather than a table to buy
-hardware from. Measured on an RTX 3060 under sustained load, not from the tuner's own line:
+hardware from. Measured on an RTX 3060 under sustained load, each row a settled figure from a
+run of at least three minutes read off the periodic rate -- not the tuner's line, and not the
+one printed at exit, which divides by the whole wall clock:
 
 | Algorithm | Rate |
 | :--- | :--- |
-| `blake2s` | ~4.6 GH/s |
-| `sha256d` | ~750 MH/s |
-| `sha3t` | ~240 MH/s |
-| `scrypt` | ~300 kH/s |
-| `kawpow` | ~12 MH/s |
-| `firopow` | ~11.7 MH/s |
-| `evrprogpow` | ~11 MH/s |
-| `meowpow` | ~15 MH/s |
-| `meraki` | ~27 MH/s |
+| `blake2s` | ~4.7 GH/s |
+| `sha256d` | ~1370 MH/s |
+| `sha3t` | ~225 MH/s |
+| `scrypt` | ~285 kH/s |
+| `kawpow` | ~17.9 MH/s |
+| `firopow` | ~17.4 MH/s |
+| `evrprogpow` | ~17.8 MH/s |
+| `meowpow` | ~18.9 MH/s |
+| `meraki` | ~31 MH/s |
+
+One caveat on the ProgPoW family. A benchmark hashes the epoch its known-answer header names,
+and those datasets (1.0 to 3.0 GiB) are smaller than the ones the live chains are on now. A
+fork mining for real reads a larger table more slowly and will sit below its row here, by the
+dataset rather than by the shader.
 
 `meowpow` and `meraki` sit above the rest of that family because their rounds are smaller, not
 because anything here is tuned for them: `meowpow` halves KawPoW's arithmetic and cache reads,
 and `meraki` runs half as many rounds with five arithmetic operations in each.
 
 The two memory-bound algorithms are the ones with a fair comparison available. On the same
-card ccminer manages about 408 kH/s at scrypt and about 19.5 MH/s at kawpow, so vkminer is at
-roughly three quarters and three fifths of a mature CUDA implementation on the two algorithms
-that stress memory hardest. Closing those gaps is open work.
+card ccminer manages about 408 kH/s at scrypt and about 19.4 MH/s at kawpow, so against a
+mature CUDA implementation vkminer is at roughly seven tenths on scrypt and roughly nine
+tenths on kawpow. Closing what is left of both is open work.
 
 ## How results are verified
 
