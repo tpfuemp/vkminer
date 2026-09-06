@@ -174,6 +174,10 @@ Where an algorithm has more than one kernel, which one to run is measured the sa
 than chosen from a feature bit. `sha3t` ships a 64-bit and a 2x32-bit shader, and the faster
 of the two is not the one the hardware's advertised support predicts on every card.
 
+An algorithm that keeps a scratchpad per hash -- `scrypt` is the one today -- is swept one
+candidate at a time rather than with all of them side by side, so that each is measured with
+the whole card rather than a share of it. That sweep takes about twice as long.
+
 Two numbers a reader should not over-read. The rate printed by the sweep is a ranking, not a
 benchmark: it is taken in the first seconds of load, which on a thermally capped card are its
 best. And a candidate only displaces the default if it beats it by more than the sweep's own
@@ -191,7 +195,7 @@ one printed at exit, which divides by the whole wall clock:
 | `blake2s` | ~4.7 GH/s |
 | `sha256d` | ~1370 MH/s |
 | `sha3t` | ~225 MH/s |
-| `scrypt` | ~285 kH/s |
+| `scrypt` | ~1820 kH/s |
 | `kawpow` | ~17.9 MH/s |
 | `firopow` | ~17.4 MH/s |
 | `evrprogpow` | ~17.8 MH/s |
@@ -209,8 +213,8 @@ and `meraki` runs half as many rounds with five arithmetic operations in each.
 
 The two memory-bound algorithms are the ones with a fair comparison available. On the same
 card ccminer manages about 408 kH/s at scrypt and about 19.4 MH/s at kawpow, so against a
-mature CUDA implementation vkminer is at roughly seven tenths on scrypt and roughly nine
-tenths on kawpow. Closing what is left of both is open work.
+mature CUDA implementation vkminer is about four and a half times its rate on scrypt and about
+nine tenths of it on kawpow. Closing what is left on kawpow is open work.
 
 ## How results are verified
 

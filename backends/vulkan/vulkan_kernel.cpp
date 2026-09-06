@@ -803,8 +803,14 @@ private:
                ? kMaxBatch : static_cast<uint32_t>(next);
         clamp_batch(device_->info());
 
-        if (batch_ != before)
+        if (batch_ != before) {
             hold_ = depth_;
+            // The two numbers a rate is the product of: a configuration that
+            // reads slowly is dispatching too little or taking too long per
+            // dispatch, and nothing outside this function can tell which.
+            applog(LOG_DEBUG, "Vulkan: '%s' sizes to %u hashes, retiring one "
+                              "every %.1f ms", name_, batch_, seconds * 1e3);
+        }
     }
 
     // How many invocations this device can afford in flight at once. Sets
@@ -830,11 +836,18 @@ private:
         // the host's RAM and three quarters of that is a swapping machine. It
         // is there to say whether the kernel is correct, which takes a few
         // thousand invocations.
+        //
+        // Only a discrete card has memory of its own; every other kind reports
+        // the machine's RAM as device-local, where three quarters is not a slow
+        // allocation but a dead machine. Unknown kinds count as shared, because
+        // guessing wrong that way costs a reboot, not a failed build.
         const bool soft = info.kind == DeviceKind::Cpu;
+        const bool shares_host_ram = info.kind != DeviceKind::DiscreteGpu;
+        const double share = soft ? 0.15 : shares_host_ram ? 0.25 : 0.75;
         const uint64_t usable =
-            soft ? static_cast<uint64_t>(static_cast<double>(info.memory) * 0.15)
-                 : static_cast<uint64_t>(static_cast<double>(info.memory) * 0.75);
-        const uint64_t ceiling = soft ? (256ull << 20) : ~0ull;
+            static_cast<uint64_t>(static_cast<double>(info.memory) * share);
+        const uint64_t ceiling =
+            soft ? (256ull << 20) : shares_host_ram ? (1ull << 30) : ~0ull;
         uint64_t budget = usable < ceiling ? usable : ceiling;
 
         // The shared table is already on the device and is not scratch: taken

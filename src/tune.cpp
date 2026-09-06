@@ -17,6 +17,7 @@ extern "C" {
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -141,6 +142,12 @@ struct Candidate {
     std::unique_ptr<Kernel> kernel;
     std::vector<double> rate;
 
+    // What it was built from, so a race holding one at a time can build it
+    // again, and what it dispatched -- the kernel that could be asked for that
+    // is gone by the time the report is written.
+    KernelSpec spec;
+    uint32_t batch = 0;
+
     // The configuration the backend would have used unaided. It wins ties, and
     // it wins anything closer than kMargin.
     bool is_default = false;
@@ -244,26 +251,31 @@ std::unique_ptr<Kernel> build(ComputeBackend &backend, int device_index,
     return kernel;
 }
 
-// Measure every candidate against every other, then say which won.
-//
-// Interleaved rather than one block each, with the order reversed every round:
-// a card that reads 20% faster cold than hot would otherwise favour whatever
-// was tried first. That is bias, not noise -- more samples do not remove it and
-// only ordering does.
-int race(int device_index, std::vector<Candidate> &candidates,
-         const uint32_t *header, uint64_t *nonce)
+// Every candidate, not just the winner: the rounds, the spread and the batch
+// each one dispatched are what say whether a pick was noise, a fair loss, or a
+// candidate measured under a handicap the winner did not carry.
+void report(int device_index, const std::vector<Candidate> &candidates)
 {
-    for (Candidate &c : candidates)
-        if (burst(*c.kernel, header, nonce, kWarmupSeconds) < 0.)
-            c.rate.push_back(-1.);
+    if (!opt_debug)
+        return;
 
-    for (int round = 0; round < kRounds; round++) {
-        for (size_t i = 0; i < candidates.size(); i++) {
-            Candidate &c = candidates[round % 2 ? candidates.size() - 1 - i : i];
-            c.rate.push_back(burst(*c.kernel, header, nonce, kRoundSeconds));
+    for (const Candidate &c : candidates) {
+        std::string rounds;
+        for (const double r : c.rate) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, " %.3f", r / 1e6);
+            rounds += buf;
         }
+        applog(LOG_DEBUG, "Tuning: device %d %s -- %.3f MH/s median, +/-%.1f%%, "
+                          "batch %u, rounds%s", device_index,
+               c.describe().c_str(), c.score() / 1e6, c.spread() * 100., c.batch,
+               rounds.c_str());
     }
+}
 
+// Say which won, from rounds somebody else measured.
+int pick(int device_index, const std::vector<Candidate> &candidates)
+{
     int best = -1;
     int fallback = -1;
     for (size_t i = 0; i < candidates.size(); i++) {
@@ -298,6 +310,75 @@ int race(int device_index, std::vector<Candidate> &candidates,
                          "varied by; keeping the default", device_index,
                winner.describe().c_str(), gain * 100., required * 100.);
     return fallback;
+}
+
+// Measure every candidate against every other, then say which won.
+//
+// Interleaved rather than one block each, with the order reversed every round:
+// a card that reads 20% faster cold than hot would otherwise favour whatever
+// was tried first. That is bias, not noise -- more samples do not remove it and
+// only ordering does.
+int race(int device_index, std::vector<Candidate> &candidates,
+         const uint32_t *header, uint64_t *nonce)
+{
+    for (Candidate &c : candidates) {
+        c.batch = c.kernel->preferred_batch();
+        if (burst(*c.kernel, header, nonce, kWarmupSeconds) < 0.)
+            c.rate.push_back(-1.);
+    }
+
+    for (int round = 0; round < kRounds; round++) {
+        for (size_t i = 0; i < candidates.size(); i++) {
+            Candidate &c = candidates[round % 2 ? candidates.size() - 1 - i : i];
+            c.rate.push_back(burst(*c.kernel, header, nonce, kRoundSeconds));
+        }
+    }
+
+    report(device_index, candidates);
+    return pick(device_index, candidates);
+}
+
+// The same race, one candidate on the device at a time.
+//
+// A kernel that owns memory per invocation gets a share of the card when
+// several are alive, and a share is not the regime it will mine in:
+// configurations indistinguishable at a fraction of the memory can span several
+// times at all of it, so an interleaved race of them ranks a regime that does
+// not ship.
+//
+// Order bias is what interleaving bought and this gives up, so the list is
+// walked once forwards and once backwards instead, and each candidate exists
+// only while it is being measured. Nothing holds the algorithm's shared state
+// either, so an algorithm with a scratchpad *and* a table would rebuild the
+// table twice per candidate; scrypt has no table, and one that had both would
+// need this to keep a kernel alive across the walk.
+int race_alone(int device_index, std::vector<Candidate> &candidates,
+               const std::function<bool(Candidate &)> &rebuild,
+               const uint32_t *header, uint64_t *nonce)
+{
+    for (int pass = 0; pass < 2; pass++)
+        for (size_t i = 0; i < candidates.size(); i++) {
+            Candidate &c =
+                candidates[pass ? candidates.size() - 1 - i : i];
+            if (c.score() < 0. && !c.rate.empty())
+                continue;       // already failed; do not pay to build it twice
+
+            if (!rebuild(c)) {
+                c.rate.push_back(-1.);
+                continue;
+            }
+            c.batch = c.kernel->preferred_batch();
+
+            if (burst(*c.kernel, header, nonce, kWarmupSeconds) < 0.)
+                c.rate.push_back(-1.);
+            for (int round = 0; round < kRounds; round++)
+                c.rate.push_back(burst(*c.kernel, header, nonce,
+                                       kRoundSeconds));
+            c.kernel.reset();
+        }
+
+    report(device_index, candidates);
+    return pick(device_index, candidates);
 }
 
 // Widths worth trying: whole subgroups, doubling, up to what the device allows.
@@ -341,6 +422,16 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
 
     const auto started = std::chrono::steady_clock::now();
 
+    // An algorithm that owns memory per invocation is raced one candidate at a
+    // time; race_alone() says why.
+    const bool alone = base.scratch_bytes != 0;
+
+    auto rebuild = [&](Candidate &c) {
+        c.kernel = build(backend, device_index, algo, c.spec, c.local, c.depth,
+                         1, answers, answer_count);
+        return c.kernel != nullptr;
+    };
+
     // Which kernel first, where the algorithm has more than one: a different
     // module is the coarsest axis, and the width that suits one need not suit
     // the other, so the passes below run on whichever wins. At the default
@@ -354,14 +445,17 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
         std::vector<Candidate> candidates;
         for (size_t i = 0; count > 1 && i < count; i++) {
             Candidate c;
-            c.kernel = build(backend, device_index, algo, variants[i], 0, 0,
-                             static_cast<uint32_t>(count), answers,
+            c.spec = variants[i];
+            c.kernel = build(backend, device_index, algo, c.spec, 0, 0,
+                             alone ? 1u : static_cast<uint32_t>(count), answers,
                              answer_count);
             if (!c.kernel)
                 continue;
             c.local = c.kernel->local_size();
             c.depth = c.kernel->queue_depth();
             c.variant = variants[i].variant;
+            if (alone)
+                c.kernel.reset();
 
             // The one the algorithm would have handed out unaided. A second
             // module has to beat it, not merely differ from it.
@@ -375,8 +469,10 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
                              "'%s'", device_index, info.name.c_str(),
                    static_cast<unsigned>(candidates.size()), algo.name());
 
-            const int best = race(device_index, candidates, header.data(),
-                                  &nonce);
+            const int best =
+                alone ? race_alone(device_index, candidates, rebuild,
+                                   header.data(), &nonce)
+                      : race(device_index, candidates, header.data(), &nonce);
             if (best >= 0)
                 chosen = specs[static_cast<size_t>(best)];
         }
@@ -392,105 +488,142 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
     // race() runs the candidates interleaved, so all of them are alive at once
     // and a kernel wanting memory per invocation has to be told how many that
     // is. The default is included: it must be measured on the same terms as
-    // what it is compared against.
+    // what it is compared against. Those kernels are exactly the ones raced one
+    // at a time, so there the share is the whole card.
     //
     // An upper bound, not a count -- widths may or may not contain the default,
     // and a width that fails to build leaves its share unclaimed.
     // Over-declaring costs a smaller batch during the sweep and nothing else.
-    const uint32_t width_share = static_cast<uint32_t>(widths.size()) + 1;
+    const uint32_t width_share =
+        alone ? 1u : static_cast<uint32_t>(widths.size()) + 1;
 
-    // The default first, everything else measured against it. Asking for no
-    // width and no depth gets exactly what this device would run untuned, read
-    // back off the kernel because the rule that picks it is the backend's.
-    std::vector<Candidate> candidates;
-    {
-        Candidate c;
-        c.kernel = build(backend, device_index, algo, chosen, 0, 0, width_share,
-                         answers, answer_count);
-        if (!c.kernel) {
-            // Two different failures, and the difference is worth printing: a
-            // device with room to run this kernel and none to hold a field of
-            // them is not a broken kernel and does not stop the run.
-            if (chosen.scratch_bytes && width_share > 1)
-                applog(LOG_WARNING, "Tuning: device %d cannot hold %u "
-                                    "candidates of '%s' at once, and a sweep is "
-                                    "candidates raced against each other; "
-                                    "mining untuned", device_index, width_share,
-                       algo.name());
-            else
-                applog(LOG_WARNING, "Tuning: device %d would not build its own "
-                                    "default; mining untuned", device_index);
-            return false;
+    // What the backend would run unaided, asked for by naming no width and no
+    // depth; both passes below measure against it. The rule that picks it is
+    // the backend's.
+    //
+    // Held past the first width pass rather than read and dropped: a build
+    // prepares the algorithm's shared state, which the backend keeps only while
+    // some kernel holds it, so releasing this early pays to rebuild a DAG-sized
+    // table. Raced alone the opposite holds -- what it keeps is the memory each
+    // candidate needs all of -- so there it goes at once.
+    std::unique_ptr<Kernel> probe = build(backend, device_index, algo, chosen,
+                                          0, 0, width_share, answers,
+                                          answer_count);
+    if (!probe) {
+        // Two different failures, and the difference is worth printing: a
+        // device with room to run this kernel and none to hold a field of them
+        // is not a broken kernel and does not stop the run.
+        if (chosen.scratch_bytes && width_share > 1)
+            applog(LOG_WARNING, "Tuning: device %d cannot hold %u candidates of "
+                                "'%s' at once, and a sweep is candidates raced "
+                                "against each other; mining untuned",
+                   device_index, width_share, algo.name());
+        else
+            applog(LOG_WARNING, "Tuning: device %d would not build its own "
+                                "default; mining untuned", device_index);
+        return false;
+    }
+
+    const uint32_t default_local = probe->local_size();
+    const uint32_t default_depth = probe->queue_depth();
+    if (alone)
+        probe.reset();
+
+    out->variant = chosen.variant ? chosen.variant : "";
+    out->local_size_x = default_local;
+    out->queue_depth = default_depth;
+
+    // One pass over the widths, all at one depth, the default width first
+    // because it is what the others are measured against.
+    auto width_pass = [&](uint32_t depth) {
+        std::vector<uint32_t> order{default_local};
+        for (const uint32_t local : widths)
+            if (local != default_local)
+                order.push_back(local);
+
+        std::vector<Candidate> candidates;
+        for (const uint32_t local : order) {
+            Candidate c;
+            c.spec = chosen;
+            c.local = local;
+            c.depth = depth;
+            c.is_default = local == default_local;
+            if (!alone) {
+                c.kernel = build(backend, device_index, algo, chosen, local,
+                                 depth, width_share, answers, answer_count);
+                if (!c.kernel)
+                    continue;   // build() said why; a width that will not build
+            }                   // is not a failure of the sweep
+            candidates.push_back(std::move(c));
         }
-        c.local = c.kernel->local_size();
-        c.depth = c.kernel->queue_depth();
-        c.is_default = true;
-        candidates.push_back(std::move(c));
-    }
 
-    const uint32_t default_local = candidates[0].local;
-    const uint32_t default_depth = candidates[0].depth;
+        applog(LOG_INFO, "Tuning: device %d (%s), %u workgroup size(s) at depth "
+                         "%u, about %.0f seconds", device_index,
+               info.name.c_str(), static_cast<unsigned>(candidates.size()),
+               depth, (alone ? 2 : 1) * candidates.size()
+                          * (kWarmupSeconds + kRounds * kRoundSeconds));
 
-    for (const uint32_t local : widths) {
-        if (local == default_local)
-            continue;
-        Candidate c;
-        c.kernel = build(backend, device_index, algo, chosen, local,
-                         default_depth, width_share, answers, answer_count);
-        if (!c.kernel)
-            continue;   // build() said why; a width that will not build is not
-        c.local = local;   // a failure of the sweep
-        c.depth = default_depth;
-        candidates.push_back(std::move(c));
-    }
+        const int best = alone ? race_alone(device_index, candidates, rebuild,
+                                            header.data(), &nonce)
+                               : race(device_index, candidates, header.data(),
+                                      &nonce);
+        if (best < 0)
+            return false;
 
-    applog(LOG_INFO, "Tuning: device %d (%s), %u workgroup size(s), about %.0f "
-                     "seconds", device_index, info.name.c_str(),
-           static_cast<unsigned>(candidates.size()),
-           candidates.size() * (kWarmupSeconds + kRounds * kRoundSeconds));
+        out->local_size_x = candidates[static_cast<size_t>(best)].local;
+        out->queue_depth = candidates[static_cast<size_t>(best)].depth;
+        out->rate = candidates[static_cast<size_t>(best)].score();
+        return true;
+    };
 
-    int winner = race(device_index, candidates, header.data(), &nonce);
-    if (winner < 0) {
+    const bool swept = width_pass(default_depth);
+    probe.reset();
+    if (!swept) {
         applog(LOG_WARNING, "Tuning: device %d failed every configuration; "
                             "mining untuned", device_index);
         return false;
     }
-
-    out->local_size_x = candidates[static_cast<size_t>(winner)].local;
-    out->queue_depth = candidates[static_cast<size_t>(winner)].depth;
-    out->rate = candidates[static_cast<size_t>(winner)].score();
-    out->variant = chosen.variant ? chosen.variant : "";
-
-    // Released before the depth pass builds anything: the winner is three
-    // numbers, and holding the kernels that produced them would make the two
-    // passes share the device as well.
-    candidates.clear();
 
     // The depth pass, at the width that just won. Skipped when --queue-depth
     // named one: that option exists to compare runs at a depth of the user's
     // choosing, and a tuner overruling it would make them the same run.
     if (opt_queue_depth <= 0) {
         const uint32_t depth_share =
-            static_cast<uint32_t>(queue_depths().size());
+            alone ? 1u : static_cast<uint32_t>(queue_depths().size());
 
         std::vector<Candidate> depths;
         for (const uint32_t depth : queue_depths()) {
             Candidate c;
-            c.kernel = build(backend, device_index, algo, chosen,
-                             out->local_size_x, depth, depth_share, answers,
-                             answer_count);
-            if (!c.kernel)
-                continue;
+            c.spec = chosen;
             c.local = out->local_size_x;
             c.depth = depth;
             c.is_default = depth == default_depth;
+            if (!alone) {
+                c.kernel = build(backend, device_index, algo, chosen,
+                                 out->local_size_x, depth, depth_share, answers,
+                                 answer_count);
+                if (!c.kernel)
+                    continue;
+            }
             depths.push_back(std::move(c));
         }
 
-        const int best = race(device_index, depths, header.data(), &nonce);
+        const uint32_t before = out->queue_depth;
+        const int best = alone ? race_alone(device_index, depths, rebuild,
+                                            header.data(), &nonce)
+                               : race(device_index, depths, header.data(),
+                                      &nonce);
         if (best >= 0) {
             out->queue_depth = depths[static_cast<size_t>(best)].depth;
             out->rate = depths[static_cast<size_t>(best)].score();
+
+            // The widths were told apart at the old depth. Where depth is the
+            // axis carrying the difference, that ranking was made in a regime
+            // the run will not use, so it is made again -- once: the same
+            // argument applies to the depth pass, and taking it does not
+            // terminate.
+            if (out->queue_depth != before)
+                width_pass(out->queue_depth);
         }
     }
 
@@ -511,14 +644,14 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
                          "a ranking, not a benchmark.",
                default_local, default_depth);
 
-    // A second reason the rate is not a benchmark, where there is a scratchpad:
-    // the candidates raced on a share of the device each, so all of them ran at
-    // a fraction of the batch a mining run gets. The *same* fraction, which is
-    // what keeps the ranking sound and the number unusable.
+    // Where there is a scratchpad the candidates were raced one at a time, so
+    // the batch each of them hashed is the batch a mining run gets. That is
+    // what makes the rate above comparable to one at all, and it is why this
+    // sweep took twice as long as an algorithm without a scratchpad.
     if (chosen.scratch_bytes)
-        applog(LOG_INFO, "Tuning: '%s' keeps %llu KiB per hash, so the "
-                         "candidates split the device's memory between them "
-                         "and each hashed a smaller batch than mining will.",
+        applog(LOG_INFO, "Tuning: '%s' keeps %llu KiB per hash, so its "
+                         "candidates were raced one at a time, each with the "
+                         "whole device rather than a share of it.",
                algo.name(),
                static_cast<unsigned long long>(chosen.scratch_bytes >> 10));
 

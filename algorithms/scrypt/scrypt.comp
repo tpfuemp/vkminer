@@ -55,8 +55,14 @@ layout(push_constant) uniform Push {
 // One scratchpad per invocation. Bound after the candidate buffer, which is the
 // order backends/backend.h states and the only thing tying this binding to what
 // the host allocated.
+//
+// Addressed in 16-byte quads rather than words: a word at a time costs four
+// times the memory transactions. A block is 32 words and every offset below is
+// a multiple of kBlockWords, so the word index is always a multiple of four and
+// the shift is exact -- a change to kBlockWords or to r would break that
+// silently, writing a neighbour's scratchpad rather than failing.
 layout(std430, set = 0, binding = 1) buffer Scratch {
-    uint word[];
+    uvec4 quad[];
 } scratch;
 
 void sha256_init(out uint state[8])
@@ -210,10 +216,11 @@ void pbkdf2_finish(uint ipad[8], uint opad[8], uint b[32], out uint digest[8])
 void romix(uint base, inout uint b0[16], inout uint b1[16])
 {
     for (uint i = 0u; i < kN; i++) {
-        uint o = base + i * kBlockWords;
-        for (uint k = 0u; k < 16u; k++) {
-            scratch.word[o + k] = b0[k];
-            scratch.word[o + 16u + k] = b1[k];
+        uint o = (base + i * kBlockWords) >> 2u;
+        for (uint k = 0u; k < 4u; k++) {
+            uint j = k * 4u;
+            scratch.quad[o + k] = uvec4(b0[j], b0[j + 1u], b0[j + 2u], b0[j + 3u]);
+            scratch.quad[o + 4u + k] = uvec4(b1[j], b1[j + 1u], b1[j + 2u], b1[j + 3u]);
         }
         block_mix(b0, b1);
     }
@@ -222,10 +229,13 @@ void romix(uint base, inout uint b0[16], inout uint b1[16])
         // Integerify: block 2r-1 read as a little-endian integer, which at
         // r = 1 is the second half and of which only the low word can matter.
         // N is a power of two, so the modulo is a mask.
-        uint o = base + (b1[0] & (kN - 1u)) * kBlockWords;
-        for (uint k = 0u; k < 16u; k++) {
-            b0[k] ^= scratch.word[o + k];
-            b1[k] ^= scratch.word[o + 16u + k];
+        uint o = (base + (b1[0] & (kN - 1u)) * kBlockWords) >> 2u;
+        for (uint k = 0u; k < 4u; k++) {
+            uint j = k * 4u;
+            uvec4 v0 = scratch.quad[o + k];
+            uvec4 v1 = scratch.quad[o + 4u + k];
+            b0[j] ^= v0.x; b0[j + 1u] ^= v0.y; b0[j + 2u] ^= v0.z; b0[j + 3u] ^= v0.w;
+            b1[j] ^= v1.x; b1[j + 1u] ^= v1.y; b1[j + 2u] ^= v1.z; b1[j + 3u] ^= v1.w;
         }
         block_mix(b0, b1);
     }
