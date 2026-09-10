@@ -189,6 +189,32 @@ char *opt_api_allow = NULL;
 int   opt_api_listen = 0;
 int   opt_api_remote = 0;
 
+/* The token is checked before a request is routed, so an unauthenticated
+ * client cannot learn which paths exist. NULL means no token, which is the
+ * default because the default bind address is loopback. */
+char *opt_api_token = NULL;
+
+/* One origin, verbatim, or NULL. Setting it also enables the OPTIONS
+ * preflight: a browser that is not told an origin cannot read a response it
+ * fetched successfully, which reads as a broken server. */
+char *opt_api_cors = NULL;
+
+/* Whether the run state -- pause, resume, stop -- may be changed from outside
+ * the process, and how long a change waits for the workers to stop dispatching
+ * before it gives up and leaves the miner mining. A dispatch cannot be
+ * cancelled, so the wait is never shorter than one of them plus a drain; the
+ * default is long enough for a slow device under other load, because a timeout
+ * that is too short refuses requests a device was going to answer. */
+bool  opt_api_control = false;
+int   opt_api_control_park_timeout = 30000;
+
+/* The shortest gap between two accepted pool changes. Not a rate limit on the
+ * API -- pause, resume and stop are never refused for being early -- but on
+ * how often the miner may be moved: a session takes a subscribe, an authorize
+ * and a first job to become worth anything, and a manager that can re-target
+ * faster than that mines nowhere. 0 turns it off. */
+int   opt_api_control_min_interval = 15;
+
 /* P2PKH is 25 bytes, P2SH 23, P2WPKH 22; the buffer is sized for the largest
  * and address_to_script writes however many it needs. */
 const int pk_buffer_size_max = 26;
@@ -296,6 +322,18 @@ Options:\n\
   -b, --api-bind=ADDR   IP:port to bind the monitoring API to\n\
                         (default: 127.0.0.1:4048, 0 disables it)\n\
       --api-remote      allow remote control through the API\n\
+      --api-mode=MODE   API protocol on the port; only 'http' works here\n\
+      --api-token=TOKEN require Authorization: Bearer TOKEN on every\n\
+                        route\n\
+      --api-cors=ORIGIN send Access-Control-Allow-Origin: ORIGIN, and\n\
+                        answer the OPTIONS preflight\n\
+      --api-control     allow the run state to be changed through the API\n\
+      --api-control-min-interval=S\n\
+                        shortest gap between two pool changes, in seconds\n\
+                        (default: 15, 0 for none)\n\
+      --api-control-park-timeout=MS\n\
+                        how long a change waits for the workers to stop\n\
+                        dispatching (default: 30000)\n\
 \n\
   -B, --background      run in the background as a daemon\n\
   -q, --quiet           reduce the log to errors and accepted shares\n\
@@ -335,7 +373,13 @@ static struct option const options[] = {
    { "algo",              1, NULL, 'a' },
    { "algo-dir",          1, NULL, 1043 },
    { "api-bind",          1, NULL, 'b' },
+   { "api-control",       0, NULL, 1056 },
+   { "api-control-min-interval", 1, NULL, 1058 },
+   { "api-control-park-timeout", 1, NULL, 1057 },
+   { "api-cors",          1, NULL, 1060 },
+   { "api-mode",          1, NULL, 1061 },
    { "api-remote",        0, NULL, 1030 },
+   { "api-token",         1, NULL, 1059 },
    { "backend",           1, NULL, 1044 },
    { "background",        0, NULL, 'B' },
    { "bell",              0, NULL, 1031 },
@@ -460,6 +504,61 @@ void parse_arg( int key, char *arg )
 
       case 1030: // api-remote
          opt_api_remote = 1;
+         break;
+
+      case 1059: // api-token
+         free( opt_api_token );
+         opt_api_token = strdup( arg );
+         /* Hidden for the same reason the pool password is: an argv string
+          * shows in ps output for the life of the process, and this one is
+          * the whole of the API's authentication. */
+         strhide( arg );
+         break;
+
+      case 1060: // api-cors
+         free( opt_api_cors );
+         opt_api_cors = strdup( arg );
+         break;
+
+      case 1061: // api-mode
+         /* Accepted so that a command line written for the sibling miners is
+          * understood rather than rejected as an unknown option, and refused
+          * loudly for the other two values rather than silently serving REST
+          * to something expecting a line protocol. Nothing is stored: one
+          * mode is legal and it is already the default. */
+         if ( strcmp( arg, "http" ) )
+         {
+            fprintf( stderr, "--api-mode=%s: this miner serves REST only; "
+                             "the line protocol is not implemented here\n", arg );
+            show_usage_and_exit( 1 );
+         }
+         break;
+
+      case 1056: // api-control
+         opt_api_control = true;
+         break;
+
+      case 1057: // api-control-park-timeout
+         v = atoi( arg );
+         /* The floor is a dispatch and a drain: under it every change would be
+          * rolled back before a worker could reach the top of its loop, which
+          * is a control API that never works rather than one that works
+          * slowly. The ceiling stops a typo hanging a request handler for an
+          * hour. */
+         if ( v < 250 || v > 600000 )
+            show_usage_and_exit( 1 );
+         opt_api_control_park_timeout = v;
+         break;
+
+      case 1058: // api-control-min-interval
+         v = atoi( arg );
+         /* Zero is a choice and not a mistake -- a test harness re-targets as
+          * fast as it can on purpose. The ceiling is an hour, past which the
+          * number is likelier to be milliseconds typed into a seconds option
+          * than an interval anyone wants. */
+         if ( v < 0 || v > 3600 )
+            show_usage_and_exit( 1 );
+         opt_api_control_min_interval = v;
          break;
 
       case 'B':  // background

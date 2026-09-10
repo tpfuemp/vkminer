@@ -14,6 +14,9 @@ extern "C" {
 
 #include "algorithms/progpow/progpow.h"
 #include "algorithms/registry.h"
+#include "api/api_control.h"
+#include "api/api_model.h"
+#include "api/api_server.h"
 #include "backends/backend.h"
 #include "replay.h"
 #include "scheduler/worker.h"
@@ -50,6 +53,16 @@ int work_thr_id = 0;
 int longpoll_thr_id = -1;
 int stratum_thr_id = -1;
 int api_thr_id = -1;
+
+// Set by the signal handler, read by main. Upstream logged and exited from
+// inside the handler; a handler runs on whichever thread the signal lands on,
+// so that deadlocks outright whenever that thread is already inside applog or
+// inside stdio -- which, in a miner that logs every job, is often. Setting a
+// flag is the only thing the handler is allowed to do.
+//
+// The API thread sets it too, for POST /api/v1/quit, which is why it is out
+// here rather than file-local.
+volatile sig_atomic_t g_shutdown = 0;
 }
 
 namespace {
@@ -68,13 +81,6 @@ void show_credits()
     std::printf("     Descended from cpuminer-opt by JayDDee, and from pooler's\n");
     std::printf("     cpuminer before it.\n\n");
 }
-
-// Set by the signal handler, read by main. Upstream logged and exited from
-// inside the handler; a handler runs on whichever thread the signal lands on,
-// so that deadlocks outright whenever that thread is already inside applog or
-// inside stdio -- which, in a miner that logs every job, is often. Setting a
-// flag is the only thing the handler is allowed to do.
-volatile sig_atomic_t g_shutdown = 0;
 
 #ifndef WIN32
 void signal_handler(int sig)
@@ -295,6 +301,11 @@ int main(int argc, char *argv[])
     // From here on there is a device to give back, and several of the ways out
     // of this process go through proper_exit rather than through main.
     set_exit_hook(release_devices);
+
+    // What the status API reports devices from. The list is the backend's own
+    // and is built once, so this is a pointer rather than a copy; it is handed
+    // over here, before anything can ask.
+    vkminer::model_set_devices(&g_backend->devices(), g_backend->name());
 
     if (opt_device_list) {
         print_device_list(g_backend->devices());
@@ -564,8 +575,23 @@ int main(int argc, char *argv[])
         applog(LOG_WARNING, "Long polling is not implemented yet; "
                             "use a stratum+tcp:// URL");
 
-    if (opt_api_enabled)
-        applog(LOG_WARNING, "The monitoring API is not implemented yet");
+    // Port 0 is how --api-bind spells "off", and it is what the option leaves
+    // behind when --api-bind was never given at all.
+    if (opt_api_enabled && opt_api_listen > 0) {
+        api_thr_id = opt_n_threads + 3;
+        thr = &thr_info[api_thr_id];
+        thr->id = api_thr_id;
+        // No queue: nothing hands this thread work. It reads miner state and
+        // answers sockets, and the only thing it sends back is g_shutdown.
+        if (thread_create(thr, api_thread)) {
+            applog(LOG_ERR, "API thread create failed");
+            return 1;
+        }
+    }
+
+    // The barrier has to know how many workers it is waiting for before any of
+    // them can reach it, and opt_n_threads is settled by here.
+    vkminer::control_init(opt_n_threads);
 
     // Hold the stats lock while starting the workers, so that none of them
     // reports a rate before the clocks those rates are measured against exist.
@@ -700,7 +726,11 @@ int main(int argc, char *argv[])
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
 
-    applog(LOG_INFO, "Signal %d received, exiting", static_cast<int>(g_shutdown));
+    if (g_shutdown == VKMINER_SHUTDOWN_API)
+        applog(LOG_INFO, "Exiting at the API's request");
+    else
+        applog(LOG_INFO, "Signal %d received, exiting",
+               static_cast<int>(g_shutdown));
     proper_exit(0);
     return 0;
 }

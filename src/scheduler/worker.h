@@ -37,4 +37,16 @@ int worker_exit_code();
 // evidence.
 void worker_candidate_counts(uint64_t *confirmed, uint64_t *rejected);
 
+// Which device a worker mines on, as an index into backend->devices(), or -1
+// before worker_set_backend has run. Two workers may answer the same: what a
+// worker is on a GPU is a queue to keep fed, so a reader comparing devices has
+// to fold the workers on each one together itself.
+int worker_device_index(int thr_id);
+
+// Dispatches this worker has completed, and how many of them came back after
+// the pool had replaced the job they were launched under. Zero and zero before
+// the first dispatch, which is not the same claim as none of them being late --
+// a caller with no batches yet has nothing to report a rate from.
+void worker_batch_counts(int thr_id, uint64_t *total, uint64_t *stale);
+
 #endif  // VKMINER_SCHEDULER_WORKER_H__

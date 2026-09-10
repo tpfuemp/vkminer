@@ -395,6 +395,20 @@ public:
     virtual std::unique_ptr<Kernel> create_kernel(int device_index,
                                                   const KernelSpec &spec) = 0;
 
+    // Keep the device's shared table alive with no kernel holding it, or stop
+    // keeping it. A worker that parks releases its kernel, and the table is
+    // owned by the kernels reading it -- so without this a pause frees a
+    // gigabyte of table and the resume spends seconds rebuilding it. The next
+    // kernel built on the device takes the table over, or, if it wants a
+    // different size of it, gets the pin dropped in its favour.
+    //
+    // A backend with nothing shared to hold does nothing.
+    virtual void retain_shared_state(int device_index, bool retain)
+    {
+        (void)device_index;
+        (void)retain;
+    }
+
     // Workers to start when the user did not say. One per device suits a GPU,
     // where a device is a queue to keep fed; a CPU backend wants one per core.
     virtual int preferred_workers(int device_count) const

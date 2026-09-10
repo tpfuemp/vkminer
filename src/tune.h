@@ -22,6 +22,7 @@
 
 #include "algorithms/algorithm.h"
 #include "backends/backend.h"
+#include "tune_cache.h"
 
 #include <vector>
 
@@ -40,6 +41,12 @@ void tune_devices(ComputeBackend &backend,
 // rather than having to know whether tuning happened.
 KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
                         const DeviceInfo &device);
+
+// What was settled for this device, if anything was. False on a device the
+// sweep never reached -- --no-tune, a backend with nothing to tune, or a run
+// that has not got there yet -- which is a different statement from a device
+// that was measured and came out at the defaults.
+bool device_tuning(int device_index, Tuning *out);
 
 }  // namespace vkminer
 

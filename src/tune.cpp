@@ -790,4 +790,15 @@ KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
     return spec;
 }
 
+bool device_tuning(int device_index, Tuning *out)
+{
+    const std::map<int, Tuning>::const_iterator found =
+        g_tuning.find(device_index);
+    if (found == g_tuning.end())
+        return false;
+
+    *out = found->second;
+    return true;
+}
+
 }  // namespace vkminer

@@ -11,6 +11,7 @@
 // notices.
 
 #include "algorithms/registry.h"
+#include "api/api_control.h"
 #include "backends/backend.h"
 #include "scheduler/candidate_log.h"
 #include "tune.h"
@@ -360,6 +361,10 @@ void worker_set_backend(vkminer::ComputeBackend *backend, const int *device_map)
 void worker_request_stop()
 {
     g_stop.store(true, std::memory_order_relaxed);
+
+    // A parked worker is not looking at that flag. Let it out first, or a
+    // paused miner is one that cannot be shut down.
+    vkminer::control_release_all();
 }
 
 int worker_count()
@@ -370,6 +375,24 @@ int worker_count()
 int worker_exit_code()
 {
     return g_fatal.load(std::memory_order_relaxed);
+}
+
+int worker_device_index(int thr_id)
+{
+    if (!g_worker_device || thr_id < 0 || thr_id >= opt_n_threads)
+        return -1;
+    return g_worker_device[thr_id];
+}
+
+void worker_batch_counts(int thr_id, uint64_t *total, uint64_t *stale)
+{
+    *total = 0;
+    *stale = 0;
+    if (!g_batches || thr_id < 0 || thr_id >= opt_n_threads)
+        return;
+
+    *total = g_batches[thr_id].total.load(std::memory_order_relaxed);
+    *stale = g_batches[thr_id].stale.load(std::memory_order_relaxed);
 }
 
 void worker_candidate_counts(uint64_t *confirmed, uint64_t *rejected)
@@ -489,6 +512,20 @@ extern "C" void *miner_thread(void *userdata)
             return;
         publish_hashrate(thr_id, window_hashes,
                          std::chrono::duration<double>(now - window_start).count());
+        window_start = now;
+        window_hashes = 0.;
+    };
+
+    // Publishes a zero without waiting for the window to close. A parked worker
+    // calls account() no more, so the rate it had while mining would otherwise
+    // stand for the length of the park -- an API that reports a paused miner
+    // hashing. The window's own hashes are published first so the run total
+    // keeps them.
+    auto publish_parked = [&]() {
+        const auto now = std::chrono::steady_clock::now();
+        publish_hashrate(thr_id, window_hashes,
+                         std::chrono::duration<double>(now - window_start).count());
+        publish_hashrate(thr_id, 0., 1.);
         window_start = now;
         window_hashes = 0.;
     };
@@ -674,6 +711,32 @@ extern "C" void *miner_thread(void *userdata)
     while (!g_stop.load(std::memory_order_relaxed)) {
         bool new_job = false;
 
+        // Above the question of where work comes from, and not beside the wait
+        // for a pool: a park is not a shortage of work. Under --benchmark that
+        // wait is never reached at all, and a run the API cannot pause is a
+        // device it cannot free.
+        if (vkminer::control_wants_park()) {
+            // Only once the pipeline is empty: a worker that counts itself
+            // parked while the device still holds a dispatch hands the barrier
+            // a device that is still writing.
+            drain();
+            work_restart[thr_id].restart = 0;
+
+            // The kernel goes because it is what holds the device's memory,
+            // and the shared table goes with it -- the kernels own it. So a
+            // park that will be resumed from pins the table first; the next
+            // kernel built on the device takes the pin over or drops it.
+            g_backend->retain_shared_state(
+                device_index, vkminer::control_park_retains_shared());
+            kernel.reset();
+            publish_parked();
+            vkminer::control_park(thr_id);
+
+            // Not necessarily permission to mine -- the loop asks again,
+            // because a park can be replaced by a stricter one.
+            continue;
+        }
+
         if (opt_benchmark) {
             // One synthetic job for the whole run: there is no pool to send a
             // second one, and restarting the range would remeasure the same
@@ -773,6 +836,12 @@ extern "C" void *miner_thread(void *userdata)
                 break;
             }
         }
+
+        // Resumed from a park, with the job the worker was mining before it.
+        // Nothing above rebuilds the kernel then, because nothing about the
+        // job changed -- and the park is what released it.
+        if (!kernel && !build_kernel())
+            break;
 
         // The header this worker mines is its own: same job as everyone else's,
         // different coinbase. Re-derived here rather than at the point it

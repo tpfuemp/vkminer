@@ -18,7 +18,7 @@
   "algo": "sha256d",
 
   "_comment_devices": [
-    "GPUs to use, by index as reported by 'vkminer --devices'.",
+    "GPUs to use, by index as reported by 'vkminer --device-list'.",
     "Omit or leave empty to use every device found."
   ],
 

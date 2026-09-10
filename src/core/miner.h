@@ -22,6 +22,7 @@
 
 #include <stdbool.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <sys/time.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -430,6 +431,14 @@ extern struct thr_info *thr_info;
 extern int longpoll_thr_id;
 extern int stratum_thr_id;
 extern int api_thr_id;
+/* Set by the signal handler and by POST /api/v1/quit, read by main's loop.
+   sig_atomic_t and volatile because a handler writes it; nothing else about
+   it is atomic, and nothing else needs to be. It holds the signal number that
+   asked for the exit, or the value below when the request came over the API
+   and no signal was involved -- outside the signal range so that the exit line
+   does not name one. */
+#define VKMINER_SHUTDOWN_API 0x7f
+extern volatile sig_atomic_t g_shutdown;
 extern struct work_restart *work_restart;
 extern double *thr_hashrates;
 extern double global_hashrate;
@@ -462,6 +471,20 @@ extern bool opt_api_enabled;
 extern char *opt_api_allow;
 extern int  opt_api_listen;
 extern int  opt_api_remote;
+extern char *opt_api_token;              /* Bearer token, NULL when none is set */
+extern char *opt_api_cors;               /* Access-Control-Allow-Origin, or NULL */
+extern bool opt_api_control;             /* run state changeable through the API */
+extern int  opt_api_control_park_timeout;/* ms a change waits for the workers */
+extern int  opt_api_control_min_interval;/* s between two accepted re-targets */
+
+/* The control API's half of a pool change, on the thread that owns the
+   connection. Implemented in src/api/api_control.cpp; every one of them is
+   false, and none of them does anything, while the API is off. */
+bool control_pool_apply( void );        /* takes a posted change, applies it */
+void control_pool_connected( void );    /* the ack: subscribed and authorized */
+bool control_pool_pending( void );      /* one is posted and not yet taken */
+bool control_switch_in_flight( void );  /* posted and not yet acked */
+bool control_holds_connection( void );  /* stopped: stay disconnected */
 
 /* Device selection. Nothing here interprets these; the backend does, once it
  * has enumerated what is actually present. */
@@ -498,6 +521,11 @@ extern struct work g_work;
 /* The one pool connection. There is no failover yet, so there is one. */
 extern struct stratum_ctx stratum;
 extern bool     stratum_down;
+
+/* When the current stratum session came up, and 0 while it is down. A session
+   age has to end with the session: a counter that kept climbing across an
+   outage would report a connection that has been solid for hours. */
+extern time_t   stratum_up_time;
 extern bool     stratum_need_reset;
 extern uint32_t stratum_errors;
 

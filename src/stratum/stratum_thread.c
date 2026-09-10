@@ -30,6 +30,7 @@
 
 struct stratum_ctx stratum;
 bool     stratum_down       = true;
+time_t   stratum_up_time    = 0;
 bool     stratum_need_reset = false;
 uint32_t stratum_errors     = 0;
 
@@ -373,10 +374,26 @@ out:
 //   get new message
 //   handle message
 
+/* Takes a posted pool change, if there is one, and points this thread's copy of
+   the url at what the control API just wrote. Kept apart from rpc_url in
+   general because a pool's own client.reconnect moves stratum.url and leaves
+   rpc_url alone: the two are synced when something changed one of them, not on
+   every connect. */
+static bool stratum_take_pool_change( struct stratum_ctx *sctx )
+{
+   if ( !control_pool_apply() )
+      return false;
+
+   free( sctx->url );
+   sctx->url = strdup( rpc_url );
+   return true;
+}
+
 void *stratum_thread(void *userdata )
 {
    struct thr_info *mythr = (struct thr_info *) userdata;
    char *s = NULL;
+   bool ready;
 
    stratum.url = (char*) tq_pop(mythr->q, NULL);
    if (!stratum.url)
@@ -392,12 +409,39 @@ void *stratum_thread(void *userdata )
    {
       int failures = 0;
 
+      /* Stopped on purpose. The connection goes and stays gone until the miner
+         is started again: nothing here is a fault, so nothing is counted and
+         nothing escalates. A pool change posted meanwhile is still recorded --
+         it is what the next start connects to. */
+      if ( unlikely( control_holds_connection() ) )
+      {
+         if ( stratum.curl )
+         {
+            stratum_down = true;
+            stratum_up_time = 0;
+            stratum_disconnect( &stratum );
+            restart_threads();
+            applog( LOG_BLUE, "Stratum connection closed" );
+         }
+         /* Cleared rather than carried across the stop: on the way back the
+            connect below is what re-opens this, and a reset would count. */
+         stratum_need_reset = false;
+         stratum_take_pool_change( &stratum );
+         sleep( 1 );
+         continue;
+      }
+
       if ( unlikely( stratum_need_reset ) )
       {
           stratum_need_reset = false;
           gettimeofday( &stratum_reset_time, NULL );
           stratum_down = true;
-          stratum_errors++;
+          stratum_up_time = 0;
+          /* A reset the control API asked for is not a pool fault. The count is
+             what says whether the pool has been dropping this miner, and a
+             deliberate re-target answers that question wrongly. */
+          if ( !control_switch_in_flight() )
+             stratum_errors++;
           stratum_disconnect( &stratum );
           if ( strcmp( stratum.url, rpc_url ) )
           {
@@ -415,16 +459,37 @@ void *stratum_thread(void *userdata )
       while ( !stratum.curl )
       {
          stratum_down = true;
+         stratum_up_time = 0;
          restart_threads();
          pthread_rwlock_wrlock( &g_work_lock );
          g_work_time = 0;
          pthread_rwlock_unlock( &g_work_lock );
+
+         /* Stopped while retrying: leave rather than open a connection the
+            miner has just been told not to have. The top of the loop is where
+            that is handled. */
+         if ( unlikely( control_holds_connection() ) )
+            break;
+
+         /* A pool change is taken here as well as below, because re-targeting
+            away from a pool that has stopped answering is exactly when one is
+            sent, and this loop is where the miner sits while that is true.
+            There is no reset after this one to carry it, so it is carried
+            here. */
+         stratum_take_pool_change( &stratum );
+
          if ( !stratum_connect( &stratum, stratum.url )
               || !stratum_subscribe( &stratum )
               || !stratum_authorize( &stratum, rpc_user, rpc_pass ) )
          {
             stratum_disconnect( &stratum );
-            if (opt_retries >= 0 && ++failures > opt_retries)
+            /* A re-target owns the choice of pool while it is in flight.
+               Giving up here would leave the miner mining for whoever it was
+               told to stop mining for, or -- with one pool, which is all this
+               miner has -- take the process down for a pool that was asked to
+               be left. */
+            if (opt_retries >= 0 && ++failures > opt_retries
+                && !control_switch_in_flight())
             {
                applog(LOG_ERR, "...terminating workio thread");
                tq_push(thr_info[work_thr_id].q, NULL);
@@ -438,6 +503,10 @@ void *stratum_thread(void *userdata )
          {
 // sometimes stratum connects but doesn't immediately send a job, wait for one.
             applog(LOG_BLUE,"Stratum connection established" );
+            stratum_up_time = time( NULL );
+            /* The ack. A re-target is finished when the pool it named has this
+               miner subscribed and authorized, not when the url changed. */
+            control_pool_connected();
             if ( stratum.new_job )   // prime first job
             {
                stratum_down = false;
@@ -446,8 +515,29 @@ void *stratum_thread(void *userdata )
          }
       }
 
-      // Wait for new message from server
-      if ( likely( stratum_socket_full( &stratum, opt_timeout ) ) )
+      /* A pool change is applied on this thread and no other: stratum_recv_line
+         reads the connection under no lock, and short_url points into the url
+         the next one is built from. */
+      if ( control_pool_apply() )
+      {
+         stratum_need_reset = true;
+         continue;         /* the reset at the top takes the url over and
+                              reconnects; taking it here would drop a
+                              connection that has just been established */
+      }
+
+      /* Wait for new message from server, in one-second slices rather than one
+         wait of opt_timeout: the same patience with a quiet pool, but a change
+         posted into that quiet is taken in a second instead of in minutes. */
+      ready = false;
+      for ( int waited = 0; waited < opt_timeout; waited++ )
+      {
+         ready = stratum_socket_full( &stratum, 1 );
+         if ( ready || control_pool_pending() || control_holds_connection() )
+            break;
+      }
+
+      if ( likely( ready ) )
       {
          if ( likely( s = stratum_recv_line( &stratum ) ) )
          {
@@ -459,6 +549,8 @@ void *stratum_thread(void *userdata )
          else
             stratum_need_reset = true;
       }
+      else if ( control_pool_pending() || control_holds_connection() )
+         continue;                  /* both are handled at the top */
       else
       {
          applog(LOG_ERR, "Stratum connection timeout");

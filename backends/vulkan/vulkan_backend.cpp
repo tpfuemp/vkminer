@@ -104,6 +104,7 @@ bool VulkanBackend::init()
     open_.resize(devices_.size());
     caches_.resize(devices_.size());
     shared_.resize(devices_.size());
+    pinned_.resize(devices_.size());
     return true;
 }
 
@@ -156,6 +157,16 @@ std::unique_ptr<Kernel> VulkanBackend::create_kernel(int device_index,
     if (spec.shared_bytes) {
         std::lock_guard<std::mutex> held(lazy_lock_);
         shared = shared_[device_index].lock();
+        if (shared && shared->bytes() != spec.shared_bytes &&
+            pinned_[device_index]) {
+            // A park is holding the old table for a resume that has instead
+            // come back as a different algorithm. Nothing is dispatching
+            // against it, so it is not a conflict, it is stale: let it go and
+            // ask again whether anything else still wants it.
+            pinned_[device_index].reset();
+            shared.reset();
+            shared = shared_[device_index].lock();
+        }
         if (shared && shared->bytes() != spec.shared_bytes) {
             // Two kernels wanting different sizes of the same thing on one
             // device. Nothing here can serve both -- the buffer is the one the
@@ -173,12 +184,28 @@ std::unique_ptr<Kernel> VulkanBackend::create_kernel(int device_index,
                 return nullptr;
             shared_[device_index] = shared;
         }
+
+        // The kernel being built owns it from here, so the pin has done its
+        // job. Left in place it would outlive the algorithm it was taken for.
+        pinned_[device_index].reset();
     }
 
     // Outside the lock: the driver synchronises the cache itself for
     // vkCreateComputePipelines, and building a pipeline is the slow part of
     // starting a worker.
     return make_vulkan_kernel(*dev, cache, spec, std::move(shared));
+}
+
+void VulkanBackend::retain_shared_state(int device_index, bool retain)
+{
+    if (device_index < 0 || device_index >= static_cast<int>(shared_.size()))
+        return;
+
+    std::lock_guard<std::mutex> held(lazy_lock_);
+    if (retain)
+        pinned_[device_index] = shared_[device_index].lock();
+    else
+        pinned_[device_index].reset();
 }
 
 uint64_t VulkanBackend::shared_state_bytes(int device_index)

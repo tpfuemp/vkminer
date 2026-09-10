@@ -1,6 +1,60 @@
 # vkminer -- a Vulkan compute cryptocurrency miner.
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# The run-state barrier: three threads' worth of agreement, and nothing else.
+# Fast, so no timeout beyond ctest's own -- the parks it waits for are a
+# millisecond apart and the ones it waits out are the timeout it sets itself.
+#
+# Built from the source rather than linked from vkminer_control, which now
+# comes with the option parser and the stratum thread attached. This test
+# defines the handful of globals it reads for itself, and the point of it is
+# that they are the only ones there are.
+add_executable(control_test control_test.cpp
+    "${CMAKE_SOURCE_DIR}/src/api/api_control.cpp")
+target_link_libraries(control_test PRIVATE
+    vkminer_jansson vkminer_curl vkminer_warnings Threads::Threads)
+target_include_directories(control_test PRIVATE
+    "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/src" "${CMAKE_SOURCE_DIR}/compat"
+    "${CMAKE_BINARY_DIR}/generated")
+add_test(NAME control_test COMMAND control_test)
+
+# The snapshot layer: what the API reports, before there is an API to report it
+# through. Same arrangement as the test above -- the sources are compiled in
+# rather than linked, and the miner state the collectors read is defined in the
+# test, so the list of globals they touch is asserted by the link.
+add_executable(api_model_test api_model_test.cpp
+    "${CMAKE_SOURCE_DIR}/src/api/api_model.cpp"
+    "${CMAKE_SOURCE_DIR}/src/api/api_control.cpp"
+    "${CMAKE_SOURCE_DIR}/backends/backend.cpp")
+target_link_libraries(api_model_test PRIVATE
+    vkminer_jansson vkminer_curl vkminer_warnings Threads::Threads)
+target_include_directories(api_model_test PRIVATE
+    "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/src" "${CMAKE_SOURCE_DIR}/compat"
+    "${CMAKE_BINARY_DIR}/generated")
+add_test(NAME api_model_test COMMAND api_model_test)
+
+# The HTTP transport's parser and router, with no socket and no miner: the
+# fixtures are buffers, which is what api_http_parse() was written as a pure
+# function for. Shared with the sibling miners, so a failure here is a failure
+# of the copy, not of anything vkminer wrote.
+add_executable(api_http_test api_http_test.c
+    "${CMAKE_SOURCE_DIR}/src/api/api_http.c")
+# Not linked against vkminer_warnings, for the same reason vkminer_api_shared
+# is not: the test is a copy kept in step with the miners this transport is
+# shared with, and -Werror here would mean editing a file whose whole value is
+# that it is the same file.
+target_link_libraries(api_http_test PRIVATE vkminer_jansson)
+target_include_directories(api_http_test PRIVATE
+    "${CMAKE_SOURCE_DIR}/src/api" "${CMAKE_SOURCE_DIR}/compat")
+# The fixtures are buffers, but api_http.c still writes its responses with
+# send(), so the winsock import library is needed even though this test never
+# opens a socket. The miner gets it from vkminer_inherited; nothing else here
+# links that, so it is named directly.
+if(WIN32)
+    target_link_libraries(api_http_test PRIVATE ws2_32)
+endif()
+add_test(NAME api_http_test COMMAND api_http_test)
+
 # First-party, so the project's warning flags apply here too.
 add_executable(sha256_kat sha256_kat.c)
 target_link_libraries(sha256_kat PRIVATE vkminer_sha256 vkminer_warnings)

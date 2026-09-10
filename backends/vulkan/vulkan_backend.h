@@ -50,6 +50,8 @@ public:
     // otherwise nothing to observe it by.
     uint64_t shared_state_bytes(int device_index);
 
+    void retain_shared_state(int device_index, bool retain) override;
+
 private:
     bool create_instance();
     void enumerate();
@@ -68,6 +70,12 @@ private:
     // algorithm frees the old table when the last kernel reading it goes,
     // rather than keeping gigabytes for a shader nobody will dispatch again.
     std::vector<std::weak_ptr<SharedState>> shared_;
+
+    // Except while every kernel that was reading it has been released on
+    // purpose. A parked worker asks for this so the table survives the park;
+    // it is dropped by the next kernel built on the device, whichever way that
+    // build goes.
+    std::vector<std::shared_ptr<SharedState>> pinned_;  // parallel to shared_
 
     // Both of those are filled in on first use, and first use can be a worker
     // thread. Two workers sharing a device would otherwise each see an empty

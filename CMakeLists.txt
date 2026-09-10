@@ -345,19 +345,55 @@ target_link_libraries(vkminer_tune_cache PUBLIC vkminer_jansson)
 target_link_libraries(vkminer_tune_cache PRIVATE
     vkminer_sha256 vkminer_paths vkminer_warnings)
 
+# ----------------------------------------------------------------- control
+#
+# The run-state barrier and the pool re-target. Its own library, but not an
+# independent one: it reads the pool globals and writes the log, and the
+# stratum thread calls back into it to carry a change out. The two archives
+# need each other, which cmake is told here so that it repeats them on the
+# link line rather than leaving whichever came second unresolved.
+add_library(vkminer_control STATIC src/api/api_control.cpp)
+target_include_directories(vkminer_control PUBLIC
+    src compat "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_link_libraries(vkminer_control PUBLIC
+    vkminer_jansson vkminer_curl vkminer_inherited Threads::Threads)
+target_link_libraries(vkminer_control PRIVATE vkminer_warnings)
+target_link_libraries(vkminer_inherited PUBLIC vkminer_control)
+
+# ------------------------------------------------------ shared API sources
+#
+# The HTTP transport and the Prometheus renderer are copies, kept byte-identical
+# with the miners this API contract is shared with. Deliberately not linked
+# against vkminer_warnings, for the reason the inherited C is not: a warning
+# fixed here is a divergence, and the flags are not the same in all three trees
+# anyway -- -Wformat=2 rejects %llu outright under mingw's printf attribute.
+# They call no miner symbol, so a separate archive costs nothing but the line.
+add_library(vkminer_api_shared STATIC
+    src/api/api_http.c
+    src/api/api_metrics.c)
+target_include_directories(vkminer_api_shared PUBLIC src/api)
+target_link_libraries(vkminer_api_shared PUBLIC vkminer_jansson)
+
 # ------------------------------------------------------------------- binary
 add_executable(vkminer
     src/main.cpp
+    src/api/api_model.cpp
+    src/api/api_routes.cpp
+    src/api/api_server.cpp
     src/replay.cpp
     src/self_test.cpp
     src/tune.cpp
     src/scheduler/candidate_log.cpp
     src/scheduler/worker.cpp)
 
-target_include_directories(vkminer PRIVATE src "${CMAKE_CURRENT_SOURCE_DIR}")
+# src/api as well as src: the shared API files include each other by bare name,
+# because they are byte-identical copies of files that sit at the repository
+# root in the miners they came from.
+target_include_directories(vkminer PRIVATE
+    src src/api "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer PRIVATE
-    vkminer_backends vkminer_tune_cache vkminer_warnings vkminer_inherited
-    vkminer_paths Threads::Threads)
+    vkminer_api_shared vkminer_backends vkminer_control vkminer_tune_cache
+    vkminer_warnings vkminer_inherited vkminer_paths Threads::Threads)
 target_compile_definitions(vkminer PRIVATE
     VKMINER_VERSION="${PROJECT_VERSION}-dev")
 
