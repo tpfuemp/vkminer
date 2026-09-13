@@ -115,6 +115,10 @@ vkminer::Tuning g_tuning;
 uint64_t g_below_target = 0;
 uint64_t g_wrong_digest = 0;
 
+// Indexed by device index, not by worker. Empty is every device holding
+// nothing, which is the state a test says nothing about.
+std::vector<uint64_t> g_shared_bytes;
+
 }  // namespace
 
 int worker_device_index(int thr_id)
@@ -132,6 +136,14 @@ void worker_batch_counts(int thr_id, uint64_t *total, uint64_t *stale)
         return;
     *total = g_worker_total[static_cast<size_t>(thr_id)];
     *stale = g_worker_stale[static_cast<size_t>(thr_id)];
+}
+
+uint64_t worker_shared_table_bytes(int device_index)
+{
+    if (device_index < 0 ||
+        device_index >= static_cast<int>(g_shared_bytes.size()))
+        return 0;
+    return g_shared_bytes[static_cast<size_t>(device_index)];
 }
 
 namespace vkminer {
@@ -333,6 +345,13 @@ void test_devices()
                70);
     expect_int("device 1 late", (long long)devices[1].vulkan.batches_late, 7);
 
+    // A device holding nothing reports no value, not a table of size zero.
+    expect_int("device 0 shared_table_bytes",
+               (long long)devices[0].vulkan.shared_table_bytes.value_or(0),
+               1123123200);
+    expect_empty("devices[].shared_table_bytes",
+                 devices[1].vulkan.shared_table_bytes);
+
     expect_text("device 0 name", devices[0].name, "Test Discrete 3060");
     expect_text("device 0 type", devices[0].type, "gpu");
     expect_text("device 0 api version", devices[0].vulkan.api_version,
@@ -527,6 +546,13 @@ void test_parked_reports_zero()
     expect_int("device 0 batches while paused",
                (long long)devices[0].vulkan.batches_total, 30);
 
+    // Nor does the table: a park keeps it, and only a stop gives the memory
+    // back. Reporting the size is what lets a caller see that instead of
+    // inferring it from the process.
+    expect_int("device 0 shared_table_bytes while paused",
+               (long long)devices[0].vulkan.shared_table_bytes.value_or(0),
+               1123123200);
+
     vkminer::HealthSnapshot health;
     vkminer::collect_health(&health);
     expect_false("health.mining while paused", health.mining);
@@ -576,6 +602,10 @@ void seed_miner_state()
     g_worker_device.assign({0, 0, 1, 1});
     g_worker_total.assign({10, 20, 30, 40});
     g_worker_stale.assign({1, 2, 3, 4});
+
+    // One device holding a table and one holding none, which is the pair the
+    // contract distinguishes: a size, and a `null` that is not a zero.
+    g_shared_bytes.assign({1123123200, 0});
 
     g_have_tuning = true;
     g_tuning.local_size_x = 256;

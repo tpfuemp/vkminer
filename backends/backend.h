@@ -175,6 +175,22 @@ struct KernelSpec {
     // interprets -- see Kernel::prepare_state.
     uint64_t shared_bytes = 0;
 
+    // The most that table could become while this kernel keeps running, for an
+    // algorithm whose table is resized by the work it is given rather than by
+    // the miner. Zero means it cannot grow and shared_bytes is the whole story.
+    //
+    // Only a pre-check reads this; nothing is allocated from it. It exists
+    // because the size that matters is the one after the *next* job, and a
+    // caller deciding whether to start this algorithm at all has no job yet --
+    // so the algorithm declares its worst case and is sized against that.
+    uint64_t shared_bytes_max = 0;
+
+    // What an operator would change to make that worst case a different number,
+    // named in a refusal so the message says what can be done about it. Null
+    // where nothing can: then the size is the work's and not a policy, and
+    // there is nothing to offer.
+    const char *size_override = nullptr;
+
     // Bindings the shader has for that table, where a device will not let it be
     // one: maxStorageBufferRange is 4 GiB-1 on a desktop GPU and 128 MiB on
     // lavapipe, so how many bindings a table needs is a property of the device
@@ -395,6 +411,29 @@ public:
     virtual std::unique_ptr<Kernel> create_kernel(int device_index,
                                                   const KernelSpec &spec) = 0;
 
+    // Whether create_kernel() would have the memory for `spec`, without
+    // allocating and without disturbing what is running. False writes the
+    // arithmetic into `why` -- the numbers, not "out of memory", so the caller
+    // can say which side an operator may change.
+    //
+    // Sized against KernelSpec::shared_bytes_max, and against the memory the
+    // device will have once what is merely *held* for a paused worker is let
+    // go: asking about the memory of the moment refuses every switch away from
+    // a large table, which is the switch this exists to allow.
+    //
+    // Must be the same arithmetic create_kernel() uses, or a device passes the
+    // check and then fails to start. True from a backend with nothing to run
+    // out of.
+    virtual bool would_fit(int device_index, const KernelSpec &spec, char *why,
+                           size_t why_bytes)
+    {
+        (void)device_index;
+        (void)spec;
+        (void)why;
+        (void)why_bytes;
+        return true;
+    }
+
     // Keep the device's shared table alive with no kernel holding it, or stop
     // keeping it. A worker that parks releases its kernel, and the table is
     // owned by the kernels reading it -- so without this a pause frees a
@@ -407,6 +446,18 @@ public:
     {
         (void)device_index;
         (void)retain;
+    }
+
+    // How many bytes of shared table this device is holding right now, 0 if
+    // none. A pause keeps the table, so the memory does not come back until a
+    // stop -- this is what lets a caller see that rather than infer it from
+    // the process's own footprint.
+    //
+    // A backend with nothing shared to hold answers 0.
+    virtual uint64_t shared_state_bytes(int device_index)
+    {
+        (void)device_index;
+        return 0;
     }
 
     // Workers to start when the user did not say. One per device suits a GPU,

@@ -144,6 +144,7 @@ char *opt_replay = NULL;
  * backend pick, which is the setting to mine with; an explicit value exists so
  * one binary can be run at two depths and the difference measured. */
 int opt_queue_depth = 0;
+int opt_progpow_max_epoch = 0;
 
 /* Invocations per workgroup, for the same reason: the tuner's other axis, and
  * two runs at two widths are the only way to check that tuning it is worth
@@ -271,6 +272,13 @@ Options:\n\
                         submit-and-wait. Higher keeps the device fed but costs\n\
                         N dispatches of latency on every job change. For\n\
                         measuring the difference, not for mining\n\
+      --progpow-max-epoch=N\n\
+                        the largest epoch a ProgPoW coin is assumed ever to\n\
+                        reach, overriding the figure built into this miner.\n\
+                        Only the check that decides whether a device has the\n\
+                        memory to be offered a coin reads it; it does not\n\
+                        change what is mined, and a wrong one shows up as a\n\
+                        coin refused or as a rebuild that runs out of memory\n\
       --workgroup=N     invocations per workgroup (vulkan only; default: let\n\
                         the backend choose). The tuner's other axis, named so\n\
                         that two runs can be compared at two widths\n\
@@ -405,6 +413,7 @@ static struct option const options[] = {
    { "no-stratum",        0, NULL, 1007 },
    { "no-tune",           0, NULL, 1048 },
    { "pass",              1, NULL, 'p' },
+   { "progpow-max-epoch", 1, NULL, 1062 },
    { "protocol",          0, NULL, 'P' },
    { "protocol-dump",     0, NULL, 'P' },
    { "proxy",             1, NULL, 'x' },
@@ -701,6 +710,17 @@ void parse_arg( int key, char *arg )
          if ( v < 1 || v > 16 )
             show_usage_and_exit( 1 );
          opt_queue_depth = v;
+         break;
+
+      case 1062: // progpow-max-epoch
+         v = atoi( arg );
+         /* An epoch is a few days of a chain, so the ceiling is centuries and
+          * is there to catch a block height pasted in where an epoch belongs --
+          * which would size every device against a dataset of petabytes and
+          * refuse the coin on all of them. */
+         if ( v < 1 || v > 100000 )
+            show_usage_and_exit( 1 );
+         opt_progpow_max_epoch = v;
          break;
 
       case 1054: // workgroup

@@ -17,6 +17,7 @@
 #include "backends/vulkan/vulkan_common.h"
 #include "backends/vulkan/vulkan_kernel.h"
 
+#include <cstdio>
 #include <cstring>
 #include <utility>
 #include <vector>
@@ -194,6 +195,84 @@ std::unique_ptr<Kernel> VulkanBackend::create_kernel(int device_index,
     // vkCreateComputePipelines, and building a pipeline is the slow part of
     // starting a worker.
     return make_vulkan_kernel(*dev, cache, spec, std::move(shared));
+}
+
+bool VulkanBackend::would_fit(int device_index, const KernelSpec &spec,
+                              char *why, size_t why_bytes)
+{
+    if (device_index < 0 || device_index >= static_cast<int>(devices_.size())) {
+        snprintf(why, why_bytes, "there is no device %d on this backend",
+                 device_index);
+        return false;
+    }
+
+    // Enumeration filled this in, so nothing is created to answer: a device the
+    // process has never opened can be asked about, and asking disturbs neither
+    // the kernels running on it nor the memory they hold.
+    const DeviceInfo &info = devices_[device_index];
+
+    // The table after the job that has not arrived yet, not the one this spec
+    // was filled in for -- see KernelSpec::shared_bytes_max. An algorithm whose
+    // table cannot grow declares nothing and is asked about what it stated.
+    const uint64_t table = spec.shared_bytes_max > spec.shared_bytes
+                         ? spec.shared_bytes_max : spec.shared_bytes;
+
+    if (table) {
+        // The size before the shape of it. Both can be wrong at once, and of
+        // the two refusals only this one names something an operator can
+        // change, so it has to be the one that gets printed.
+        const uint64_t budget = vulkan_table_budget(info);
+        if (table > budget) {
+            const size_t used =
+                snprintf(why, why_bytes, "'%s' would want %llu MiB of shared "
+                                         "state at its largest and this miner "
+                                         "will ask %s for at most %llu MiB of "
+                                         "its %llu MiB", spec.name,
+                         static_cast<unsigned long long>(table >> 20),
+                         info.name.c_str(),
+                         static_cast<unsigned long long>(budget >> 20),
+                         static_cast<unsigned long long>(info.memory >> 20));
+
+            // Offered only where the declaration is what made the table too
+            // large. A job states its own epoch and nothing stops a pool naming
+            // one past what the fork declares -- and then the size is the
+            // chain's, and the hint would name the one option that cannot help.
+            if (spec.size_override && table == spec.shared_bytes_max
+                && used < why_bytes)
+                snprintf(why + used, why_bytes - used,
+                         "; %s states a smaller worst case", spec.size_override);
+            return false;
+        }
+
+        uint64_t chunk = 0;
+        uint64_t count = 0;
+        if (!SharedState::plan(info, spec, table, &chunk, &count, why,
+                               why_bytes))
+            return false;
+
+        // What another worker is still dispatching against stays where it is.
+        // What is merely pinned does not count: a pin is a paused worker's
+        // claim and the first kernel built here drops it, and counting it would
+        // refuse every switch away from a large table.
+        std::lock_guard<std::mutex> held(lazy_lock_);
+        const long owners = shared_[device_index].use_count();
+        const long pinned = pinned_[device_index] ? 1 : 0;
+        const std::shared_ptr<SharedState> live = shared_[device_index].lock();
+        if (live && owners > pinned && live->bytes() != spec.shared_bytes) {
+            snprintf(why, why_bytes, "'%s' wants %llu MiB of shared state on a "
+                                     "device already holding %llu MiB of it",
+                     spec.name,
+                     static_cast<unsigned long long>(spec.shared_bytes >> 20),
+                     static_cast<unsigned long long>(live->bytes() >> 20));
+            return false;
+        }
+    }
+
+    // And the scratchpads, sized behind the largest that table could be rather
+    // than behind the one on the device now -- the same call the build makes,
+    // so a pass here and a failure there cannot be two different opinions.
+    KernelFit fit;
+    return vulkan_kernel_fit(info, spec, table, &fit, why, why_bytes);
 }
 
 void VulkanBackend::retain_shared_state(int device_index, bool retain)

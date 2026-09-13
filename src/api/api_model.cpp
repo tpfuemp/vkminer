@@ -225,6 +225,12 @@ void collect_devices(std::vector<DeviceSnapshot> *out)
             one.workers++;
         }
 
+        // Zero is a device holding no table, which the contract spells `null`
+        // and not a table of no size.
+        const uint64_t shared = worker_shared_table_bytes(info.index);
+        if (shared)
+            one.vulkan.shared_table_bytes = shared;
+
         Tuning tuning;
         if (device_tuning(info.index, &tuning)) {
             one.vulkan.tuned = true;

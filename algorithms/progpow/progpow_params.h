@@ -54,6 +54,15 @@ struct Params {
     uint32_t dag_epoch_mul;
     uint32_t dag_full_off;
 
+    // The largest seed epoch this fork is expected to mine, for sizing a device
+    // against a job that has not arrived: a pool serving several coins does not
+    // say what the next height will be.
+    //
+    // A dated policy, not a measurement -- roughly two years of chain, rounded
+    // up. Left to go stale it under-sizes the check and passes a switch the
+    // device has no room for. --progpow-max-epoch=N overrides it.
+    uint32_t max_epoch;
+
     uint32_t seal_seed[kSealSeedWords];
     uint32_t seal_final[kSealFinalWords];
 };

@@ -52,6 +52,10 @@ char *rpc_user = nullptr;
 char *rpc_pass = nullptr;
 bool  have_stratum = true;
 
+// Owned the same way, and read by the barrier for the same reason: it is half
+// of the profile a failed switch is put back to.
+char *opt_algo = nullptr;
+
 void applog(int prio, const char *fmt, ...)
 {
     va_list ap;
@@ -204,6 +208,30 @@ void expect_text(const char *what, const char *got, const char *want)
         fail("%s: '%s', expected '%s'", what, got, want);
 }
 
+// The far side of an algorithm change with the algorithm taken out of it. What
+// the barrier is entitled to assume is only this much: the hook either succeeds
+// having moved opt_algo, or fails having moved nothing at all -- and it is
+// called with the workers already parked, which is what the counts below check.
+std::atomic<bool> g_hook_accepts{true};
+std::atomic<int>  g_hook_calls{0};
+std::atomic<int>  g_hook_parked{-1};
+
+bool fake_switch(const char *algo, std::string *why)
+{
+    g_hook_calls.fetch_add(1, std::memory_order_relaxed);
+    g_hook_parked.store(vkminer::control_status().parked,
+                        std::memory_order_relaxed);
+
+    if (!g_hook_accepts.load(std::memory_order_relaxed)) {
+        *why = std::string("device 0: '") + algo +
+               " needs more memory than this device has";
+        return false;
+    }
+    std::free(opt_algo);
+    opt_algo = own(algo);
+    return true;
+}
+
 // Waits for a condition the workers have to reach on their own. Every use has a
 // deadline well beyond what the loop above needs, so a failure here is a
 // deadlock and not a slow machine.
@@ -248,6 +276,8 @@ int main(int argc, char **argv)
     short_url = rpc_url + sizeof("stratum+tcp://") - 1;
     rpc_user = own("first");
     rpc_pass = own("x");
+    opt_algo = own("scrypt");
+    vkminer::control_set_switch_hook(fake_switch);
 
     std::vector<FakeWorker> workers(kWorkers);
     for (int i = 0; i < kWorkers; i++)
@@ -498,6 +528,16 @@ int main(int argc, char **argv)
                  ControlState::kPaused);
     expect_int("parked after a throttled pool change", st.parked, kWorkers);
 
+    // The reason is prose, and a client is told never to parse it; the seconds
+    // are the field it reads instead. The interval here is an hour, so a
+    // throttle reporting a second or two is reading the wrong clock.
+    if (st.retry_after_s <= 0)
+        fail("a throttled pool change reported no retry_after_s");
+    if (st.retry_after_s > 3600)
+        fail("retry_after_s is longer than the interval it is measured against");
+    if (st.ready_for_switch)
+        fail("ready_for_switch is true while retry_after_s is nonzero");
+
     // The run-state verbs are not throttled, and do not start the clock either.
     // A stop that answers "too soon" is not a stop, and a miner that has been
     // paused and resumed has not been moved anywhere.
@@ -533,6 +573,177 @@ int main(int argc, char **argv)
                  ControlState::kPaused);
     expect_int("parked after a pool change with the interval off", st.parked,
                kWorkers);
+
+    // --- the algorithm change ---------------------------------------------
+    //
+    // The pool half of this is the section above. What is added is a name that
+    // can only be judged on the far side of the park, by the thing fake_switch
+    // stands in for -- and the order that judgement happens in: a refusal that
+    // had already moved the pool would leave the miner mining the algorithm it
+    // was for a pool that wants the other one.
+    const int calls_before = g_hook_calls.load();
+
+    expect_result("an empty algorithm",
+                  vkminer::control_algo_request(
+                      "", "stratum+tcp://sixth.example:7777", "", "", 100,
+                      &complaint),
+                  ControlResult::kInvalid);
+    expect_result("an algorithm with a url this miner cannot mine over",
+                  vkminer::control_algo_request(
+                      "kawpow", "http://pool.example:3333", "", "", 100,
+                      &complaint),
+                  ControlResult::kInvalid);
+    expect_int("times the hook was asked about a refused request",
+               g_hook_calls.load(), calls_before);
+    expect_int("epoch after refused algorithm requests",
+               (long long)vkminer::control_status().epoch, 11);
+    expect_text("opt_algo after refused algorithm requests", opt_algo, "scrypt");
+
+    // Refused by the far side, which is the answer a device without the memory
+    // for the new algorithm's table produces. Nothing moves: not the algorithm,
+    // not the pool, not the epoch -- and the miner is left running.
+    g_hook_accepts.store(false);
+    complaint.clear();
+    expect_result("an algorithm this device cannot hold",
+                  vkminer::control_algo_request(
+                      "meowpow", "stratum+tcp://sixth.example:7777", "", "",
+                      5000, &complaint),
+                  ControlResult::kInvalid);
+    if (complaint.empty())
+        fail("a refused algorithm change gave no reason");
+    st = vkminer::control_status();
+    expect_int("epoch after a refused algorithm change", (long long)st.epoch, 11);
+    expect_text("opt_algo after a refused algorithm change", opt_algo, "scrypt");
+    expect_text("rpc_url after a refused algorithm change", rpc_url,
+                "stratum+tcp://fifth.example:6666");
+    expect_state("after a refused algorithm change", st.state,
+                 ControlState::kPaused);
+    if (st.last_error.empty())
+        fail("a refused algorithm change left no last_error");
+    if (!wait_for([&]() {
+            return vkminer::control_status().parked == kWorkers;
+        }, 2000))
+        fail("a refused algorithm change left the workers out of their park");
+    g_hook_accepts.store(true);
+
+    // Taken. The hook runs with every worker parked -- it is about to free the
+    // memory they were mining out of -- and the algorithm and the pool move
+    // together, because the dialect is chosen from the algorithm before the
+    // socket opens.
+    g_hook_parked.store(-1);
+    expect_result("an algorithm change",
+                  vkminer::control_algo_request(
+                      "kawpow", "stratum+tcp://sixth.example:7777", "sixth", "z",
+                      5000, &complaint),
+                  ControlResult::kOk);
+    st = vkminer::control_status();
+    expect_int("epoch after an algorithm change", (long long)st.epoch, 12);
+    expect_text("opt_algo after an algorithm change", opt_algo, "kawpow");
+    expect_text("rpc_url after an algorithm change", rpc_url,
+                "stratum+tcp://sixth.example:7777");
+    expect_text("rpc_user after an algorithm change", rpc_user, "sixth");
+    expect_int("workers parked while the hook ran", g_hook_parked.load(),
+               kWorkers);
+    expect_state("after an algorithm change", st.state, ControlState::kPaused);
+
+    // --- a build that failed on the far side of one -----------------------
+    //
+    // The worker has given up the old algorithm's device state by the time it
+    // finds out, so there is nothing for it to carry on with. Recoverable
+    // because there is a profile behind it, and posted rather than waited on:
+    // the caller is a mining thread whose own park is part of what the restore
+    // needs, so what proves it happened is the state it leaves behind.
+    if (!vkminer::control_switch_recoverable())
+        fail("a switch with a profile behind it is not recoverable");
+
+    vkminer::control_switch_failed("device 0 has no kernel for 'kawpow'");
+    if (!wait_for([&]() {
+            return std::strcmp(opt_algo, "scrypt") == 0 &&
+                   vkminer::control_status().state == ControlState::kPaused;
+        }, 5000))
+        fail("a failed build did not put the previous algorithm back");
+    st = vkminer::control_status();
+    expect_int("epoch after a restore", (long long)st.epoch, 13);
+    expect_text("rpc_url after a restore", rpc_url,
+                "stratum+tcp://fifth.example:6666");
+    expect_text("rpc_user after a restore", rpc_user, "second");
+    if (st.last_error.empty())
+        fail("a restore cleared the reason the switch failed");
+
+    // And the restore is not itself recoverable, which is what stops a card
+    // that will build neither profile from switching between them for the life
+    // of the process.
+    if (vkminer::control_switch_recoverable())
+        fail("a restore is recoverable, so a failure under one would flap");
+
+    // --- a whole profile: pool, algorithm and run state as one change -----
+    //
+    // The workers park once, what they were mining for is replaced on the far
+    // side of that park, and the state they are released into is the one the
+    // profile asked for. Two changes and one epoch: there is no moment at
+    // which a manager can observe the new pool under the old run state.
+    const ControlState running = ControlState::kRunning;
+    const ControlState paused = ControlState::kPaused;
+
+    expect_result("a pool change that also starts the miner",
+                  vkminer::control_pool_request(
+                      "stratum+tcp://seventh.example:8888", "seventh", "z",
+                      5000, &complaint, &running),
+                  ControlResult::kOk);
+    st = vkminer::control_status();
+    expect_int("epoch after a pool change that also started the miner",
+               (long long)st.epoch, 14);
+    expect_state("after a pool change that also started the miner", st.state,
+                 ControlState::kRunning);
+    expect_text("rpc_url after a pool change that also started the miner",
+                rpc_url, "stratum+tcp://seventh.example:8888");
+    if (!wait_for([&]() { return vkminer::control_status().parked == 0; }, 5000))
+        fail("a profile that started the miner left the workers parked");
+
+    // Refused at its algorithm step, with a run-state change in it as well.
+    // The refusal comes from the far side before anything has been moved, and
+    // what it leaves behind is the whole pre-call profile -- algorithm, pool
+    // and run state, and an epoch that did not advance. A half-switched miner
+    // is never an outcome.
+    g_hook_accepts.store(false);
+    complaint.clear();
+    expect_result("a profile whose algorithm the device refuses",
+                  vkminer::control_algo_request(
+                      "meowpow", "stratum+tcp://eighth.example:9999", "eighth",
+                      "z", 5000, &complaint, &paused),
+                  ControlResult::kInvalid);
+    st = vkminer::control_status();
+    expect_int("epoch after a refused profile", (long long)st.epoch, 14);
+    expect_text("opt_algo after a refused profile", opt_algo, "scrypt");
+    expect_text("rpc_url after a refused profile", rpc_url,
+                "stratum+tcp://seventh.example:8888");
+    expect_text("rpc_user after a refused profile", rpc_user, "seventh");
+    expect_state("after a refused profile", st.state, ControlState::kRunning);
+    if (!wait_for([&]() { return vkminer::control_status().parked == 0; }, 5000))
+        fail("a refused profile left the workers out of the state it found");
+    g_hook_accepts.store(true);
+
+    // And accepted: algorithm, pool and run state all move, and between them
+    // they spend one epoch rather than three.
+    g_hook_parked.store(-1);
+    expect_result("a profile that changes algorithm, pool and run state",
+                  vkminer::control_algo_request(
+                      "kawpow", "stratum+tcp://eighth.example:9999", "eighth",
+                      "z", 5000, &complaint, &paused),
+                  ControlResult::kOk);
+    st = vkminer::control_status();
+    expect_int("epoch after a whole profile", (long long)st.epoch, 15);
+    expect_text("opt_algo after a whole profile", opt_algo, "kawpow");
+    expect_text("rpc_url after a whole profile", rpc_url,
+                "stratum+tcp://eighth.example:9999");
+    expect_text("rpc_user after a whole profile", rpc_user, "eighth");
+    expect_int("workers parked while the profile's hook ran",
+               g_hook_parked.load(), kWorkers);
+    expect_state("after a whole profile", st.state, ControlState::kPaused);
+    if (!wait_for([&]() {
+            return vkminer::control_status().parked == kWorkers;
+        }, 5000))
+        fail("a profile that paused the miner did not park the workers");
 
     // --- shutting down a paused miner -------------------------------------
     //

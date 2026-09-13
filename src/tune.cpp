@@ -20,7 +20,9 @@ extern "C" {
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace vkminer {
@@ -54,9 +56,37 @@ constexpr uint32_t kUnreachableTarget[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
 constexpr int kMaxSolutions = 8;
 
-// Written once before any worker exists and only read after, which is what
-// makes a bare map safe and would stop being true if anything re-tuned midrun.
-std::map<int, Tuning> g_tuning;
+// What each device was measured at, per algorithm.
+//
+// Keyed by algorithm as well as device because tuned_kernel() applies a stored
+// width and depth without checking what they were measured on: keyed by device
+// alone it would build the new algorithm at the old one's numbers, and scrypt's
+// depth cliff between 2 and 3 is 6x.
+//
+// Behind a lock because a switch re-tunes while parked workers are about to
+// read this.
+std::map<std::pair<int, std::string>, Tuning> g_tuning;
+std::mutex g_tuning_lock;
+
+void remember_tuning(int index, const char *algo_name, const Tuning &tuning)
+{
+    std::lock_guard<std::mutex> held(g_tuning_lock);
+    g_tuning[std::make_pair(index, std::string(algo_name ? algo_name : ""))] =
+        tuning;
+}
+
+bool recall_tuning(int index, const char *algo_name, Tuning *out)
+{
+    std::lock_guard<std::mutex> held(g_tuning_lock);
+    const std::map<std::pair<int, std::string>, Tuning>::const_iterator found =
+        g_tuning.find(
+            std::make_pair(index, std::string(algo_name ? algo_name : "")));
+
+    if (found == g_tuning.end())
+        return false;
+    *out = found->second;
+    return true;
+}
 
 // The header as struct work carries it, from a published vector: one host-order
 // word per big-endian read of the wire, nonce word cleared because it is
@@ -709,14 +739,14 @@ void tune_devices(ComputeBackend &backend,
                    opt_queue_depth > 0 ? static_cast<uint32_t>(opt_queue_depth)
                                        : tuning.queue_depth,
                    tuning.rate / 1e6);
-            g_tuning[index] = tuning;
+            remember_tuning(index, algo->name(), tuning);
             continue;
         }
 
         if (!sweep(backend, index, *algo, base, answers, answer_count, &tuning))
             continue;
 
-        g_tuning[index] = tuning;
+        remember_tuning(index, algo->name(), tuning);
 
         // Used for this run but not filed, because part of it was not measured:
         // --workgroup and --queue-depth each skip a pass. The key says nothing
@@ -760,12 +790,12 @@ KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
         }
     }
 
-    const std::map<int, Tuning>::const_iterator found =
-        g_tuning.find(device_index);
-    if (found == g_tuning.end())
+    // This algorithm's entry and no other's. A worker that has just been
+    // switched asks for the one it is about to mine, not the one the device was
+    // last measured on.
+    Tuning tuning;
+    if (!recall_tuning(device_index, algo.name(), &tuning))
         return spec;
-
-    const Tuning &tuning = found->second;
 
     // A named kernel is looked up, not trusted: the entry may name one this
     // build no longer offers. Not finding it leaves the algorithm's own choice
@@ -792,12 +822,11 @@ KernelSpec tuned_kernel(const Algorithm &algo, int device_index,
 
 bool device_tuning(int device_index, Tuning *out)
 {
-    const std::map<int, Tuning>::const_iterator found =
-        g_tuning.find(device_index);
-    if (found == g_tuning.end())
+    // For the algorithm the miner is on right now, which is what an API asking
+    // "how is this device set up" means by the question.
+    if (!recall_tuning(device_index, opt_algo, out))
         return false;
 
-    *out = found->second;
     return true;
 }
 

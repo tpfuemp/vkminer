@@ -42,9 +42,13 @@ struct ControlStatus {
 
     // The anti-flap interval, and where this miner is in it. `last_switch_age_s`
     // is -1 until something has been switched; `ready_for_switch` is what a
-    // manager polls to avoid asking for a re-target that will be refused.
+    // manager polls to avoid asking for a re-target that will be refused, and
+    // `retry_after_s` is how long that refusal has left to run -- 0 exactly when
+    // ready_for_switch is true, and otherwise rounded up, so a caller that waits
+    // it out is not refused a second time.
     int  min_interval_s = 0;
     int  last_switch_age_s = -1;
+    int  retry_after_s = 0;
     bool ready_for_switch = true;
 
     // Seconds since the miner entered `state`. Counted from control_init, so a
@@ -137,10 +141,65 @@ void control_release_all();
 // answered, and then it stands and the miner goes on trying; last_error says
 // which. A pool is never put back: that would be a second switch, to one
 // nobody asked for.
+//
+// `want` is the run state to leave the miner in, or null to come back to the
+// one the workers were parked out of. It is what makes a pool change and a
+// run-state change one change: one settle, one epoch, and no moment at which a
+// manager can observe the new pool under the old run state.
 ControlResult control_pool_request(const std::string &url,
                                    const std::string &user,
                                    const std::string &pass, unsigned wait_ms,
-                                   std::string *why);
+                                   std::string *why,
+                                   const ControlState *want = nullptr);
+
+/* -------------------------------------------------- the algorithm change --
+ *
+ * An algorithm and a pool are one change and arrive together. The Stratum this
+ * miner speaks is chosen from the algorithm before the socket opens and cannot
+ * be revised by a method that arrives later, so a switch that kept its
+ * connection would be reading the new algorithm's jobs through the old one's
+ * parser. The session is dropped and re-opened instead.
+ */
+
+// What has to happen on the far side of the park, while every worker is parked
+// and before the new socket opens: the old algorithm's shared table dropped,
+// the new one's memory checked against the device, its self-test run, and the
+// device tuned for it. Registered by main, and run on the stratum thread with
+// no lock held -- on a DAG algorithm it takes seconds and a manager is polling
+// meanwhile.
+//
+// Returning false, with a reason and having changed nothing, refuses the
+// switch: the barrier rolls back and the miner goes on mining what it was.
+typedef bool (*ControlSwitchHook)(const char *algo, std::string *why);
+
+void control_set_switch_hook(ControlSwitchHook hook);
+
+// Asks the miner to mine a different algorithm, for a different pool.
+//
+// The answers are the pool request's, and so is the epoch it spends: what is
+// added is that the workers rebind to the new algorithm as they leave the park,
+// and that the far side may refuse before anything has changed -- an algorithm
+// this build does not have, or one whose dataset will not fit the device.
+ControlResult control_algo_request(const std::string &algo,
+                                   const std::string &url,
+                                   const std::string &user,
+                                   const std::string &pass, unsigned wait_ms,
+                                   std::string *why,
+                                   const ControlState *want = nullptr);
+
+// Whether a build that has just failed can be answered by putting the previous
+// profile back rather than by ending the run.
+//
+// False at startup, where there is nothing to go back to and a device that will
+// not build is a miner that should not start. False again while a restore is
+// the thing in force, which is what stops a card that will build neither
+// profile from switching between them for the life of the process.
+bool control_switch_recoverable();
+
+// Puts the previous profile back, after a rebuild failed on the far side of a
+// switch. Posted and not waited on: the caller is a mining thread, and its own
+// park is part of what this needs in order to complete.
+void control_switch_failed(const std::string &why);
 
 /* --------------------------------------------- what the stratum thread calls
  *

@@ -8,6 +8,7 @@
 #include "backends/vulkan/vulkan_pipeline.h"
 
 #include <chrono>
+#include <cstdio>
 
 namespace vkminer {
 
@@ -48,13 +49,11 @@ uint64_t floor_pow2(uint64_t n)
 
 }  // namespace
 
-std::shared_ptr<SharedState> SharedState::create(VulkanDevice &device,
-                                                 const KernelSpec &spec,
-                                                 VkPipelineCache cache)
+bool SharedState::plan(const DeviceInfo &info, const KernelSpec &spec,
+                       uint64_t bytes, uint64_t *chunk_bytes, uint64_t *count,
+                       char *why, size_t why_bytes)
 {
-    const DeviceInfo &info = device.info();
-    const uint64_t    bytes = spec.shared_bytes;
-    const char       *name  = spec.name;
+    const char *name = spec.name;
 
     // The most one binding can be, which is two device limits and not one:
     // they are different numbers and a device can pass one and fail the other.
@@ -68,8 +67,8 @@ std::shared_ptr<SharedState> SharedState::create(VulkanDevice &device,
     if (info.max_binding_range && info.max_binding_range < most)
         most = info.max_binding_range;
     if (!most) {
-        applog(LOG_ERR, "Vulkan: '%s' asked for no shared state", name);
-        return nullptr;
+        snprintf(why, why_bytes, "'%s' asked for no shared state", name);
+        return false;
     }
 
     // Where the whole table fits in one binding it is one buffer, exactly the
@@ -90,7 +89,7 @@ std::shared_ptr<SharedState> SharedState::create(VulkanDevice &device,
     if (chunk < bytes)
         chunk = floor_pow2(chunk);
 
-    const uint64_t count = (bytes + chunk - 1) / chunk;
+    const uint64_t pieces = (bytes + chunk - 1) / chunk;
 
     // Every piece a whole number of 16-byte quads, the short last one included.
     // shared_table.glsl declares these bindings as `uvec4 quad[]`, so a piece
@@ -99,12 +98,12 @@ std::shared_ptr<SharedState> SharedState::create(VulkanDevice &device,
     // arithmetic that rounds: rounding would silently make a table's tail
     // unreadable, and every size here is a power of two or the table itself.
     if ((bytes % 16) || (chunk % 16)) {
-        applog(LOG_ERR, "Vulkan: '%s' asked for %llu bytes of shared state in "
-                        "pieces of %llu, and a piece has to be a whole number "
-                        "of 16 bytes", name,
-               static_cast<unsigned long long>(bytes),
-               static_cast<unsigned long long>(chunk));
-        return nullptr;
+        snprintf(why, why_bytes, "'%s' asked for %llu bytes of shared state in "
+                                 "pieces of %llu, and a piece has to be a whole "
+                                 "number of 16 bytes", name,
+                 static_cast<unsigned long long>(bytes),
+                 static_cast<unsigned long long>(chunk));
+        return false;
     }
 
     // How many bindings the shader has for it. Zero and one both mean the one
@@ -112,18 +111,45 @@ std::shared_ptr<SharedState> SharedState::create(VulkanDevice &device,
     // between several is not in those shaders at all.
     const uint64_t declared = spec.shared_chunks ? spec.shared_chunks : 1;
     if (declared > kMaxSharedChunks) {
-        applog(LOG_ERR, "Vulkan: '%s' declares %llu bindings for its shared "
-                        "state and a shader may have %u", name,
-               static_cast<unsigned long long>(declared), kMaxSharedChunks);
-        return nullptr;
+        snprintf(why, why_bytes, "'%s' declares %llu bindings for its shared "
+                                 "state and a shader may have %u", name,
+                 static_cast<unsigned long long>(declared), kMaxSharedChunks);
+        return false;
     }
-    if (count > declared) {
-        applog(LOG_ERR, "Vulkan: '%s' wants %llu MiB of shared state, a shader "
-                        "on %s can address %llu MiB in one binding, and it "
-                        "declares %llu of them", name,
-               static_cast<unsigned long long>(bytes >> 20), info.name.c_str(),
-               static_cast<unsigned long long>(chunk >> 20),
-               static_cast<unsigned long long>(declared));
+    if (pieces > declared) {
+        snprintf(why, why_bytes, "'%s' wants %llu MiB of shared state, a shader "
+                                 "on %s can address %llu MiB in one binding, "
+                                 "and it declares %llu of them", name,
+                 static_cast<unsigned long long>(bytes >> 20),
+                 info.name.c_str(),
+                 static_cast<unsigned long long>(chunk >> 20),
+                 static_cast<unsigned long long>(declared));
+        return false;
+    }
+
+    if (chunk_bytes)
+        *chunk_bytes = chunk;
+    if (count)
+        *count = pieces;
+    return true;
+}
+
+std::shared_ptr<SharedState> SharedState::create(VulkanDevice &device,
+                                                 const KernelSpec &spec,
+                                                 VkPipelineCache cache)
+{
+    const DeviceInfo &info = device.info();
+    const uint64_t    bytes = spec.shared_bytes;
+    const char       *name  = spec.name;
+
+    // Every reason this device would not hold the table, worked out before a
+    // byte is allocated -- and by the same function that answers the question
+    // for a table nobody has asked for yet.
+    uint64_t chunk = 0;
+    uint64_t count = 0;
+    char     why[256];
+    if (!plan(info, spec, bytes, &chunk, &count, why, sizeof why)) {
+        applog(LOG_ERR, "Vulkan: %s", why);
         return nullptr;
     }
 

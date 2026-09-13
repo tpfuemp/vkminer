@@ -179,9 +179,18 @@ struct share_stats_t
    char   job_id[32];
 };
 
-#define s_stats_size 8
+/* Deep enough that a wrap means something is wrong rather than that the card is
+ * fast. At eight slots a low pool difficulty destroyed an entry before its
+ * share's reply came back, and the only symptom was a result line missing its
+ * difficulty, job and elapsed time. Any fixed ring can still fill, so the wrap
+ * is reported too, below. */
+#define s_stats_size 64
 static struct share_stats_t share_stats[ s_stats_size ] = {{0}};
 static int s_put_ptr = 0;
+
+/* Pending entries destroyed by a wrap, and when that was last said out loud. */
+static uint32_t overwritten_stats = 0;
+static time_t   last_overwrite_warning = 0;
 
 /* Ids 1..3 belong to subscribe, authorize and extranonce.subscribe, and the
  * response handler ignores anything below 4 for that reason. Shares take every
@@ -677,8 +686,28 @@ static bool workio_submit_work(struct workio_cmd *wc, CURL *curl)
    int failures = 0;
 
    /* submit solution to bitcoin via JSON-RPC */
-   while (!submit_upstream_work(curl, wc->u.work))
+   while ( true )
    {
+      /* The session this share was found on, against the one that is up now.
+         They differ after a reconnect or a pool change, and then the job id
+         the share names was never issued on the socket it would leave by: the
+         pool rejects it, and that reject is counted against a miner which did
+         nothing wrong. Re-checked on every pass, because the retry below
+         sleeps and a reconnect is exactly what happens during that sleep. */
+      if ( have_stratum && wc->u.work->session != stratum_session )
+      {
+         applog( LOG_WARNING,
+                 "Share for job %s was found on a connection that has since "
+                 "closed; dropped rather than sent to a pool that never "
+                 "issued it",
+                 wc->u.work->job_id ? wc->u.work->job_id : "?" );
+         stale_share_count++;
+         return true;
+      }
+
+      if ( submit_upstream_work( curl, wc->u.work ) )
+         return true;
+
 	if (unlikely((opt_retries >= 0) && (++failures > opt_retries)))
         {
 	   applog(LOG_ERR, "...terminating workio thread");
@@ -689,7 +718,6 @@ static bool workio_submit_work(struct workio_cmd *wc, CURL *curl)
 	    applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
         sleep(opt_fail_pause);
    }
-   return true;
 }
 
 void *workio_thread(void *userdata)
@@ -770,6 +798,26 @@ static void update_submit_stats( struct work *work, const void *hash )
    (void)hash;
 
    pthread_mutex_lock( &stats_lock );
+
+   /* The slot being written still belongs to a share whose reply has not
+      arrived, and writing here destroys it. Said here because the reply can
+      only report the symptom. Rate limited: the regime that overruns a ring
+      this deep produces the overwrites in bursts. */
+   if ( unlikely( share_stats[ s_put_ptr ].submit_time.tv_sec ) )
+   {
+      struct timeval now;
+      gettimeofday( &now, NULL );
+      overwritten_stats++;
+      if ( now.tv_sec - last_overwrite_warning >= 10 )
+      {
+         last_overwrite_warning = now.tv_sec;
+         applog( LOG_WARNING, "More than %d shares are in flight: %u pending "
+                 "stats entr%s overwritten, and those shares' result lines "
+                 "will be missing their difficulty, job and elapsed time",
+                 s_stats_size, overwritten_stats,
+                 overwritten_stats == 1 ? "y was" : "ies were" );
+      }
+   }
 
    submitted_share_count++;
    share_stats[ s_put_ptr ].share_count = submitted_share_count;

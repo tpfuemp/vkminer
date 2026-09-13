@@ -194,14 +194,54 @@ if(Python3_Interpreter_FOUND)
         --miner "$<TARGET_FILE:vkminer>" --backend null --seconds 10)
     set_tests_properties(dialect PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
+    # A pool reply split across two writes, with a gap longer than the one
+    # second stratum_recv_line gives the tail. The connection has to survive it:
+    # a redial refuses every share found before the drop, since the new session
+    # never issued their job ids.
+    #
+    # Needs no device; the read path is what is under test.
+    add_test(NAME splitline COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/splitline_test.py"
+        --miner "$<TARGET_FILE:vkminer>" --backend null)
+    set_tests_properties(splitline PROPERTIES TIMEOUT 300)
+
+    # A ProgPoW pool whose seed hash is not the epoch its own height says,
+    # reported once and deduped over later jobs. The zero arm is the trap: all
+    # zeros is epoch 0's real seed hash *and* what an unfilled field looks like,
+    # so a dedupe whose sentinel is a zeroed buffer goes silent on the likeliest
+    # real pool bug.
+    #
+    # Needs no device: the check runs as a notify is parsed.
+    add_test(NAME seed_mismatch COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/seed_mismatch_test.py"
+        --miner "$<TARGET_FILE:vkminer>" --backend null)
+    set_tests_properties(seed_mismatch PROPERTIES TIMEOUT 300)
+
+    # The control API over HTTP: the bodies a route refuses, its privilege and
+    # flag gates, and the profile it declines to half-apply. Nothing else in the
+    # suite reaches those -- control_test calls the request functions directly,
+    # behind the route.
+    #
+    # Needs no GPU and no credentials. Five miners start and stop in sequence,
+    # which is where the half-minute goes rather than any one assertion.
+    add_test(NAME control_api COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/control_test.py"
+        --miner "$<TARGET_FILE:vkminer>" --backend null)
+    set_tests_properties(control_api
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
     # A job id is not unique. Pools that switch between coins re-send one, and
     # the miner has to come back to it with a coinbase it has not used before or
     # it re-submits nonces it already sent. This pool re-sends a job on purpose
     # and fails on any repeated submission.
     #
-    # Needs a real device, unlike the reconnect test: the assertion is about
-    # shares, and the null backend produces none. SKIPs where there is none, and
-    # where the device is too slow to submit enough of them to conclude.
+    # Runs wherever shares are produced. The difficulty is an opening bid and
+    # vardiff tightens it, so the CPU backend submits hundreds inside a phase
+    # and a fast card is held to a rate rather than flooding -- it is registered
+    # on the device because that is the configuration worth asserting on, not
+    # because it is the only one that works. The null backend still produces
+    # nothing. SKIPs where nothing connects, and where too few shares arrive to
+    # conclude.
     if(TARGET vkminer_shaders)
         add_test(NAME duplicate_test COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/duplicate_test.py"
@@ -223,6 +263,34 @@ if(Python3_Interpreter_FOUND)
             --miner "$<TARGET_FILE:vkminer>" --backend vulkan --devices 0)
         set_tests_properties(submit_id_test
             PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS slow)
+
+        # A kernel that hashes wrongly has to be refused by the self-test the
+        # switch runs, with nothing submitted anywhere -- not discovered later
+        # as a reject rate on a pool. The bad shader is built by the test from
+        # the shipped one, with its length padding changed by a digit, and
+        # reaches the miner through --algo-dir; neither the tree nor the build
+        # directory is written to.
+        #
+        # Needs a device: that self-test is skipped on the null backend, which
+        # is the whole of what this proves. SKIPs where glslc is not installed,
+        # because then the wrong shader cannot be built and the good one would
+        # pass every assertion for the wrong reason.
+        add_test(NAME switch_selftest COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/switch_selftest_test.py"
+            --miner "$<TARGET_FILE:vkminer>")
+        set_tests_properties(switch_selftest
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
+        # A job whose dataset does not fit the device, arriving the two ways it
+        # can: at a switch, where there is a profile to fall back to and the
+        # miner has to end up running on it with last_error saying why, and at
+        # startup, where there is none and the process has to exit non-zero.
+        # Costs an allocation attempt rather than a dataset build.
+        add_test(NAME oversize_dataset COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/oversize_dataset_test.py"
+            --miner "$<TARGET_FILE:vkminer>")
+        set_tests_properties(oversize_dataset
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
     endif()
 endif()
 
@@ -306,6 +374,30 @@ if(VKMINER_SHARED_STATE_SPV)
         set_tests_properties(dag_test PROPERTIES SKIP_RETURN_CODE 77
                                                  TIMEOUT 900)
     endif()
+
+    # Whether a device has room, asked before anything is built on it. Reuses
+    # the shader above because nothing here dispatches: what is being tested is
+    # the decision, and the decision is made from a spec and a device's limits.
+    #
+    # Cheap for a device test -- two small tables and a handful of pipelines --
+    # so it is not labelled slow. Half of it needs no device at all: the
+    # declared worst-case epochs are checked before the backend is opened, so a
+    # machine that SKIPs the rest still fails on a fork that declares nothing.
+    add_executable(would_fit_test would_fit_test.cpp)
+    target_link_libraries(would_fit_test PRIVATE
+        vkminer_backends vkminer_warnings Threads::Threads)
+    target_compile_definitions(would_fit_test PRIVATE
+        SHARED_STATE_SPV="${VKMINER_SHARED_STATE_SPV}")
+    add_dependencies(would_fit_test vkminer_shader_shared_state)
+
+    add_custom_command(TARGET would_fit_test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${VKMINER_SHARED_STATE_SPV}"
+                "$<TARGET_FILE_DIR:would_fit_test>")
+
+    add_test(NAME would_fit_test COMMAND would_fit_test)
+    set_tests_properties(would_fit_test PROPERTIES SKIP_RETURN_CODE 77
+                                                   TIMEOUT 300)
 endif()
 
 # The shader against the scalar reference, over a nonce range. Needs the

@@ -46,10 +46,14 @@ SERVER = os.path.join(HERE, "stratum_server.py")
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 SESSION = re.compile(r"SERVER session #\d+ took (\d+) share\(s\)")
-# The height as the job lines carry it: "New Block 102, Tx 0, ...". The comma
-# is load-bearing -- without it this also matches the time-to-find line, where
-# "Block 4s" is four seconds rather than block four.
-BLOCK = re.compile(r"Block (\d+),")
+# The height as the job lines carry it: "New Block 102, Tx 0, ...". Both the
+# comma and the Tx are load-bearing. Without the comma this also matches the
+# time-to-find line, where "Block 4s" is four seconds rather than block four.
+# Without the Tx it matches the result line a share prints, which states the
+# height of the share rather than of a job -- and states zero whenever that
+# share's pending entry was overwritten before the pool's reply arrived, which
+# a fast device does in bursts. Neither is the pool moving the height.
+BLOCK = re.compile(r"Block (\d+), Tx")
 
 # The prefix stratum_server.py hands out in this dialect, and the height its
 # first job is at. Duplicated here rather than imported, so that a server that
@@ -70,13 +74,40 @@ class Fail(Exception):
     pass
 
 
-def run_case(opts, server_args, algo, miner_args, seconds):
+# The logs of the case running now, for save_logs() to write out if it fails.
+LAST = {}
+
+
+def save_logs(opts):
+    """Writes the failing case's two logs where they can be read afterwards.
+
+    Otherwise they are gone by the time the message is printed -- the pool's is
+    a temporary file and the miner's is a pipe -- and the only way to see what
+    the miner actually said is to run the whole case again, on a card that is
+    not always free to run it."""
+    if not LAST:
+        return
+    for which in ("miner", "pool"):
+        path = os.path.join(opts.log_dir, f"dialect-{LAST['name']}-{which}.log")
+        try:
+            with open(path, "w") as fh:
+                fh.write(LAST[which])
+        except OSError as ex:
+            print(f"     (could not write {path}: {ex})")
+            continue
+        print(f"     {which} log: {path}")
+
+
+def run_case(name, opts, server_args, algo, miner_args, seconds):
     """Starts the pool, runs the miner to its own time limit, returns both logs.
 
     The server logs to a file rather than a pipe for the reason reconnect_test.py
     gives: nothing reads a pipe until the miner has exited, and a pool blocked
     inside its own print has stopped answering the miner it is being used to
     test."""
+    # Cleared before the case rather than after it, so that a case killed at the
+    # timeout below leaves nothing behind to be read as its own.
+    LAST.clear()
     f = tempfile.TemporaryFile(mode="w+")
     srv = subprocess.Popen([sys.executable, SERVER] + server_args,
                            stdout=f, stderr=subprocess.STDOUT, text=True)
@@ -101,7 +132,9 @@ def run_case(opts, server_args, algo, miner_args, seconds):
     f.seek(0)
     server_log = f.read()
     f.close()
-    return ANSI.sub("", miner.stdout), server_log, miner.returncode
+    miner_log = ANSI.sub("", miner.stdout)
+    LAST.update(name=name, miner=miner_log, pool=server_log)
+    return miner_log, server_log, miner.returncode
 
 
 def check(name, miner_log, server_log, rc, wants, unwanted):
@@ -134,7 +167,7 @@ def case_progpow(opts):
     and the jobs after it state none of their own."""
     port = free_port()
     miner_log, server_log, rc = run_case(
-        opts,
+        "progpow", opts,
         ["--port", str(port), "--dialect", "progpow", "--drops", "0",
          "--job-interval", "4", "--share-target", str(opts.share_target)],
         "kawpow", ["-o", f"stratum+tcp://127.0.0.1:{port}"], opts.seconds)
@@ -164,7 +197,7 @@ def case_job_target(opts):
     and on a device a different program to compile for every job."""
     port = free_port()
     miner_log, server_log, rc = run_case(
-        opts,
+        "job_target", opts,
         ["--port", str(port), "--dialect", "progpow", "--drops", "0",
          "--job-interval", "4", "--target-in-job", "--height-step", "3",
          "--share-target", str(opts.share_target)],
@@ -197,7 +230,7 @@ def case_set_target(opts):
     algorithm said it would be."""
     port = free_port()
     miner_log, server_log, rc = run_case(
-        opts,
+        "set_target", opts,
         ["--port", str(port), "--set-target-first", "--drops", "0",
          "--diff", "0.001", "--job-interval", "4"],
         "sha256d", ["-o", f"stratum+tcp://127.0.0.1:{port}"], 14)
@@ -238,6 +271,9 @@ def main():
     p.add_argument("--require-shares", action="store_true",
                    help="fail if no share was submitted; for a run on a device, "
                         "where the submit path is reachable")
+    p.add_argument("--log-dir", default=tempfile.gettempdir(),
+                   help="where the failing case's miner and pool logs are "
+                        "written; a passing run writes nothing")
     p.add_argument("--case", default="all",
                    choices=["all", "progpow", "job_target", "set_target"])
     opts = p.parse_args()
@@ -257,10 +293,12 @@ def main():
             shares += fn(opts) or 0
     except Fail as e:
         print(f"FAIL {e}")
+        save_logs(opts)
         return 1
     except subprocess.TimeoutExpired:
         print("FAIL the miner had to be killed -- it never reached its "
               "own time limit")
+        save_logs(opts)
         return 1
 
     if opts.require_shares and not shares:

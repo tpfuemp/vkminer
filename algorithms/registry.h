@@ -27,6 +27,15 @@ bool algorithm_exists(const char *name);
 // they could have typed instead.
 std::string algorithm_names();
 
+// Everything the protocol client reads that only the algorithm can answer: the
+// scale a difficulty is quoted in, how many bits of the nonce belong to the
+// miner, and which Stratum the pool will be speaking.
+//
+// Call it before the socket opens: the dialect decides how a notify is read,
+// and a method arriving later cannot revise it. A runtime algorithm change
+// derives all of it again, which is why it is one function.
+void bind_protocol_settings(const char *name);
+
 }  // namespace vkminer
 
 #endif  // VKMINER_ALGORITHMS_REGISTRY_H__

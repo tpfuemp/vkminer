@@ -49,4 +49,12 @@ int worker_device_index(int thr_id);
 // a caller with no batches yet has nothing to report a rate from.
 void worker_batch_counts(int thr_id, uint64_t *total, uint64_t *stale);
 
+// Bytes of epoch-scoped table the backend is holding on `device_index`, which
+// is an index into backend->devices() and not a worker id. Zero before
+// worker_set_backend has run, and on a device holding nothing.
+//
+// A park keeps the table, so this stays non-zero across one; only a stop gives
+// the memory back.
+uint64_t worker_shared_table_bytes(int device_index);
+
 #endif  // VKMINER_SCHEDULER_WORKER_H__

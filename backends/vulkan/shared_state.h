@@ -43,6 +43,18 @@ public:
                                                const KernelSpec &spec,
                                                VkPipelineCache cache);
 
+    // How this device would cut a table of `bytes` up: the piece size into
+    // `chunk_bytes`, the number of pieces into `count`. False writes why into
+    // `why` and logs nothing -- create() logs it, a pre-check reports it.
+    //
+    // Takes `bytes` rather than spec.shared_bytes so the same rules can be
+    // asked about a table that does not exist yet -- the size after the next
+    // job, which is what a switch has to leave room for. Allocates nothing and
+    // needs no logical device.
+    static bool plan(const DeviceInfo &info, const KernelSpec &spec,
+                     uint64_t bytes, uint64_t *chunk_bytes, uint64_t *count,
+                     char *why, size_t why_bytes);
+
     ~SharedState();
 
     SharedState(const SharedState &) = delete;

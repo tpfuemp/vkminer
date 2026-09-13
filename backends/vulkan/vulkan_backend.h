@@ -27,6 +27,8 @@ public:
     const std::vector<DeviceInfo> &devices() const override { return devices_; }
     std::unique_ptr<Kernel> create_kernel(int device_index,
                                           const KernelSpec &spec) override;
+    bool would_fit(int device_index, const KernelSpec &spec, char *why,
+                   size_t why_bytes) override;
 
     // A Vulkan device of kind Cpu is a software rasterizer, which is a
     // different thing from the CPU backend's one device and needs saying so.
@@ -45,10 +47,11 @@ public:
     VkInstance instance() const { return instance_; }
 
     // How much shared state is alive on `device_index`, and zero when none is.
-    // Here for the tests: that four kernels share one table rather than
+    // Here for the tests -- that four kernels share one table rather than
     // allocating four is the whole of what the state is for, and there is
-    // otherwise nothing to observe it by.
-    uint64_t shared_state_bytes(int device_index);
+    // otherwise nothing to observe it by -- and for the status API, which
+    // reports what a pause is still holding.
+    uint64_t shared_state_bytes(int device_index) override;
 
     void retain_shared_state(int device_index, bool retain) override;
 

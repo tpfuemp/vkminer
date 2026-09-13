@@ -73,6 +73,67 @@ std::vector<int> g_device_map;
 // How long release_devices waits for the workers to let go of their devices.
 constexpr auto kStopGrace = std::chrono::seconds(5);
 
+// The far side of an algorithm change: everything that has to be true before
+// the new algorithm mines, done on the stratum thread while every worker is
+// parked and before the new socket opens.
+//
+// Every step that can refuse comes first, and nothing below opt_algo moving is
+// allowed to fail: that name is what the workers bind to and what the protocol
+// client is derived from, so once it moves the switch has happened.
+bool switch_algorithm(const char *algo_name, std::string *why)
+{
+    const std::unique_ptr<vkminer::Algorithm> algo =
+        vkminer::create_algorithm(algo_name);
+    if (!algo) {
+        *why = std::string("no algorithm called '") +
+               (algo_name ? algo_name : "") + "'";
+        return false;
+    }
+
+    // The pins come off before the fit is asked about, not after: what the old
+    // algorithm's table holds is memory the new one's has to fit into, so a
+    // pre-check against a device still pinning a DAG would refuse a switch that
+    // had the room all along.
+    for (const int dev : g_device_map)
+        g_backend->retain_shared_state(dev, false);
+
+    // Asked at the epoch this fork is declared to reach rather than the one it
+    // is at today: a table that fits now and not in six weeks is a miner that
+    // stops mining in six weeks, at a moment nobody chose. Allocates nothing,
+    // and the miner is still on the old profile when it answers.
+    for (const int dev : g_device_map) {
+        const size_t slot = static_cast<size_t>(dev);
+        char refusal[256] = {0};
+        if (!g_backend->would_fit(dev, algo->kernel(g_backend->devices()[slot]),
+                                  refusal, sizeof refusal)) {
+            *why = std::string("device ") + std::to_string(dev) + ": " + refusal;
+            return false;
+        }
+    }
+
+    // For the reason the startup one exists: shares from a build that hashes
+    // wrongly cost this miner the pool's trust, and nothing about having mined
+    // one algorithm correctly says anything about the next one's shaders.
+    if (std::strcmp(g_backend->name(), "null") != 0 &&
+        !vkminer::self_test(*g_backend, g_device_map, algo_name)) {
+        *why = std::string("'") + algo_name + "' fails its self-test on this "
+               "build, so its shares would be rejected";
+        return false;
+    }
+
+    // Owned the way the option parser owns it, and replaced the same way.
+    free(opt_algo);
+    opt_algo = strdup(algo_name);
+    vkminer::bind_protocol_settings(opt_algo);
+
+    // Measured for this algorithm rather than inherited from the last one:
+    // either the entry a previous switch left behind, or a sweep now. Which is
+    // why the hook runs with no lock held -- on a DAG algorithm it is seconds.
+    if (std::strcmp(g_backend->name(), "vulkan") == 0)
+        vkminer::tune_devices(*g_backend, g_device_map, opt_algo);
+    return true;
+}
+
 void show_credits()
 {
     std::printf("\n         **********  %s %s  **********\n",
@@ -328,34 +389,9 @@ int main(int argc, char *argv[])
     }
 
     // Everything the protocol client needs to know that only the algorithm can
-    // answer. Set once, before anything can read it: the algorithm cannot
-    // change for the life of the process, and a rule applied to some packets
-    // and not others is worse than a wrong one applied to all of them.
-    {
-        const std::unique_ptr<vkminer::Algorithm> algo =
-            vkminer::create_algorithm(opt_algo);
-
-        // Difficulty is printed in the scale the pool quotes and compared in
-        // the scale the algorithm defines.
-        opt_target_factor = algo->target_factor();
-        if (opt_target_factor != 1.)
-            applog(LOG_INFO, "'%s' quotes difficulty %g times the Bitcoin "
-                             "scale, so a stratum difficulty here is not one "
-                             "of sha256d's", opt_algo, opt_target_factor);
-
-        // And which Stratum the pool will be speaking, which is decided here
-        // and nowhere else -- see StratumDialect. A method arriving later
-        // cannot revise it.
-        opt_nonce_bits = algo->nonce_bits();
-        if (algo->stratum_dialect() == vkminer::StratumDialect::kProgPow) {
-            opt_stratum_dialect = STRATUM_PROGPOW;
-            progpow_seed_hash_agrees = progpow_seed_hash_check;
-            applog(LOG_INFO, "'%s' speaks the ProgPoW stratum: the pool sends "
-                             "a header hash rather than a coinbase, and keeps "
-                             "the top %u bits of the nonce",
-                   opt_algo, 64 - opt_nonce_bits);
-        }
-    }
+    // answer, derived before anything can read it. A rule applied to some
+    // packets and not others is worse than a wrong one applied to all of them.
+    vkminer::bind_protocol_settings(opt_algo);
 
     // A typo here would otherwise mean "use the built-in shaders after all",
     // reported once per worker and easy to read past. --algo-dir is only ever
@@ -592,6 +628,11 @@ int main(int argc, char *argv[])
     // The barrier has to know how many workers it is waiting for before any of
     // them can reach it, and opt_n_threads is settled by here.
     vkminer::control_init(opt_n_threads);
+
+    // Registered rather than called: the barrier holds no opinion about
+    // algorithms, backends or self-tests, and the test that links it does so
+    // against none of them.
+    vkminer::control_set_switch_hook(switch_algorithm);
 
     // Hold the stats lock while starting the workers, so that none of them
     // reports a rate before the clocks those rates are measured against exist.

@@ -740,6 +740,24 @@ private:
         spec.shared_chunk_bytes =
             host_dag_ ? chunk_floor(spec.shared_bytes / 4) : 0;
 
+        // The same table at the largest epoch this fork is declared to reach.
+        // Whether a device can be given this algorithm at all is decided before
+        // any job says which epoch it will really be -- so the question is
+        // asked about the largest one, and the answer holds until the
+        // declaration goes stale rather than until the next block.
+        //
+        // A test's table is the length the test asked for and does not grow, so
+        // it declares nothing and is sized against what it stated.
+        if (!host_dag_) {
+            const uint32_t declared =
+                opt_progpow_max_epoch > 0
+                    ? static_cast<uint32_t>(opt_progpow_max_epoch)
+                    : params_.max_epoch;
+            spec.shared_bytes_max =
+                progpow::dag_bytes(progpow::epochs_for(params_, declared).full);
+            spec.size_override = "--progpow-max-epoch";
+        }
+
 #ifdef VKMINER_HAVE_SHADERS
         ShaderModule &module = subgroup    ? spec_sub_module_
                              : specialized ? spec_module_

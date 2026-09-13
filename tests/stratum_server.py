@@ -21,12 +21,12 @@
 # height, a 256-bit target pushed with mining.set_target, and a five-field
 # submit with a mix hash in it. That job is served the way the dialect's own
 # trap is set -- the target arrives before the first notify, which is the order
-# that made a sibling port read its jobs as some other dialect's.
+# that gets a job read as some other dialect's.
 #
-# Every event goes to stdout as `SERVER <event> <detail>` so a driver can assert
-# on the sequence rather than on timing. Shares are sampled, with a total per
-# session, because their number depends on the device and a log whose length
-# does is a log nobody can be required to read.
+# Every event goes to stdout as `[hh:mm:ss.mmm] SERVER <event> <detail>` so a
+# driver can assert on the sequence rather than on timing. Shares are sampled,
+# with a total per session, because their number depends on the device and a log
+# whose length does is a log nobody can be required to read.
 
 import argparse
 import json
@@ -80,7 +80,15 @@ PROGPOW_TARGET = "0000ffff" + "0" * 56
 
 
 def log(event, detail=""):
-    print(f"SERVER {event} {detail}".rstrip(), flush=True)
+    # The time in front, because the miner's log has one and without it the two
+    # cannot be laid side by side. A job the miner reads seconds after it was
+    # sent and a job the pool sent seconds late produce the same miner log, and
+    # only these timestamps tell them apart. Every driver matches on the SERVER
+    # word or later, so nothing reads the line from its start.
+    now = time.time()
+    stamp = time.strftime("%H:%M:%S", time.localtime(now))
+    print(f"[{stamp}.{int(now % 1 * 1000):03d}] SERVER {event} {detail}".rstrip(),
+          flush=True)
 
 
 class Client:
@@ -196,7 +204,12 @@ class Client:
             # is mined at whatever the last mining.set_target said. That is the
             # arrangement the dialect gets wrong most easily and the one a pool
             # which pushes a target actually runs.
-            height = PROGPOW_HEIGHT + (self.jobs - 1) * self.opts.height_step
+            # The seed stays the vector's whatever the height says, so a
+            # --base-height large enough to move the epoch serves a job the
+            # miner complains about the seed of before it ever weighs the
+            # dataset. That complaint is expected, not the thing under test.
+            height = (self.opts.base_height
+                      + (self.jobs - 1) * self.opts.height_step)
             target = f"{self.target:064x}" if self.opts.target_in_job else ""
             self.send({
                 "id": None,
@@ -249,8 +262,15 @@ class Client:
         if job_id not in self.job_ids:
             return f"job {job_id!r}, which this pool never sent"
         if nonce[2:6] != PROGPOW_PREFIX:
+            # Two faults arrive here and the prefix is what is checked first, so
+            # say which one it was. A nonce partitioning that did not survive a
+            # switch walks the wrong range of a job this pool did send; a share
+            # found under another profile and sent after the dialect moved
+            # carries a header this pool has never issued.
+            whose = ("" if header[2:] == PROGPOW_HEADER
+                     else ", and on a header hash it never sent")
             return (f"nonce {nonce} is outside the prefix "
-                    f"0x{PROGPOW_PREFIX} this pool assigned")
+                    f"0x{PROGPOW_PREFIX} this pool assigned{whose}")
         if header[2:] != PROGPOW_HEADER:
             return f"header hash {header} belongs to no job this pool sent"
         if int(mix[2:], 16) == 0:
@@ -353,6 +373,14 @@ def serve_one(conn, addr, opts, session):
     log("connect", f"#{session} from {addr[0]}")
     try:
         serve_session(c, opts, session)
+    except OSError as ex:
+        # A miner hanging up while the pool is still answering it. Every send in
+        # here can raise that, and unguarded it walks out of the accept loop and
+        # ends the process -- so one abrupt disconnect leaves nothing listening
+        # and every later connection fails against a pool that is not there.
+        # From the miner's own log that is indistinguishable from a miner that
+        # never came back, which is the wrong half of the test to be reading.
+        log("gone", f"{ex.__class__.__name__} while answering")
     finally:
         at = (f"target {c.target:064x}" if c.progpow
               else f"difficulty {c.diff:g}")
@@ -443,6 +471,13 @@ def main():
     p.add_argument("--height-step", type=int, default=0,
                    help="how far the block height moves per job; 3 crosses a "
                         "ProgPoW period, which is a new program to compile")
+    p.add_argument("--base-height", type=int, default=PROGPOW_HEIGHT,
+                   help="the block height of the first ProgPoW job; the "
+                        "default is the published vector's own. Raising it "
+                        "moves the epoch, which is how a job needing a "
+                        "dataset larger than the device is served. The seed "
+                        "is not recomputed, so the miner also logs that the "
+                        "seed and the height disagree")
     p.add_argument("--set-target-first", action="store_true",
                    help="push a mining.set_target before the first Bitcoin "
                         "job, which must not change how that job is read")

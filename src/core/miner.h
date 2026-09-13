@@ -251,6 +251,12 @@ struct work
     * so the request builder and the pending-stats entry agree on it. */
    uint32_t submit_id;
 
+   /* The stratum session this job was issued on. A share found under one
+    * connection means nothing on the next -- the job id it names was never
+    * issued there -- so it is dropped at submit rather than sent to be
+    * rejected against this miner's accept rate. */
+   uint32_t session;
+
    /* ---- STRATUM_PROGPOW only; zero on a Bitcoin job ------------------- */
 
    /* The pool's share of the nonce, already sitting at the top of the 64-bit
@@ -501,6 +507,7 @@ extern bool opt_self_test;     /* run the known-answer vectors and exit */
 extern char *opt_backend;      /* backend name, NULL means the default */
 extern char *opt_algo_dir;     /* where to load shaders from */
 extern int  opt_queue_depth;   /* dispatches in flight per device, 0 = backend's */
+extern int  opt_progpow_max_epoch; /* worst-case epoch to size against, 0 = the fork's */
 extern bool opt_retune;        /* sweep even where a tuning is already known */
 extern bool opt_no_tune;       /* do not sweep, and do not read one either */
 extern uint32_t submitted_share_count;
@@ -528,6 +535,11 @@ extern bool     stratum_down;
 extern time_t   stratum_up_time;
 extern bool     stratum_need_reset;
 extern uint32_t stratum_errors;
+
+/* Counted up as each connection is established, and stamped into every job it
+   issues, so a share can be told whether the session it was found on still
+   exists. */
+extern uint32_t stratum_session;
 
 /* Session-wide hash counters, fed by the backends. */
 extern double  total_hashes;

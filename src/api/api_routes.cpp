@@ -288,6 +288,7 @@ json_t *device_json(const vkminer::DeviceSnapshot &d)
     json_object_set_new(vk, "kernel", or_null(v.kernel));
     json_object_set_new(vk, "batches_total", u64(v.batches_total));
     json_object_set_new(vk, "batches_late", u64(v.batches_late));
+    json_object_set_new(vk, "shared_table_bytes", or_null(v.shared_table_bytes));
     json_object_set_new(o, "vulkan", vk);
     return o;
 }
@@ -527,6 +528,42 @@ int control_http_status(vkminer::ControlResult rc)
     return 500;
 }
 
+// The uniform error envelope has no slot for a number, and the contract puts
+// the retry delay in a field because a client may not read it out of a message.
+// So a 429, and only a 429, builds its own body here -- which works because the
+// serve loop keeps any body a handler supplies at >= 400.
+//
+// Every other status falls through to the transport, and so does a 429 whose
+// body will not allocate: a refusal missing the field beats no refusal at all.
+int control_error(int http, const char *msg, json_t **out)
+{
+    if (http != 429)
+        return http;
+
+    const vkminer::ControlStatus st = vkminer::control_status();
+    json_t *root = envelope();
+    json_t *err = json_object();
+    if (!root || !err) {
+        json_decref(root);
+        json_decref(err);
+        return http;
+    }
+
+    // Read a moment after the refusal decided it, so the interval may have run
+    // out in between and left this at zero. The contract promises at least one
+    // second, and a caller told to come back in no time has been told nothing.
+    const int wait = st.retry_after_s > 0 ? st.retry_after_s : 1;
+
+    json_object_set_new(err, "code", json_string(api_http_error_code(http)));
+    json_object_set_new(err, "message",
+                        json_string(msg && *msg ? msg : "too many requests"));
+    json_object_set_new(err, "status", json_integer(http));
+    json_object_set_new(err, "retry_after_s", json_integer(wait));
+    json_object_set_new(root, "error", err);
+    *out = root;
+    return http;
+}
+
 // The name of the offending key, or NULL if every one of them is known. An
 // object this refuses is one a client believes was understood.
 const char *unknown_key(json_t *o, const char *const *known, size_t count)
@@ -634,7 +671,7 @@ int control_verb(const api_request *req, vkminer::ControlState want,
     if (http >= 400) {
         snprintf(e, n, "%s",
                  why.empty() ? "the run state was not changed" : why.c_str());
-        return http;
+        return control_error(http, e, out);
     }
     return control_result_respond(http, out, e, n);
 }
@@ -1159,7 +1196,7 @@ static int h_pools_url(const api_request *req, void *ctx, json_t **out,
         else
             snprintf(e, n, "%s",
                      why.empty() ? "the pool was not changed" : why.c_str());
-        return control_http_status(rc);
+        return control_error(control_http_status(rc), e, out);
     }
 
     json_t *res = json_object();
@@ -1248,23 +1285,18 @@ static int h_control_stop(const api_request *req, void *ctx, json_t **out,
 
 // POST /api/v1/control/profile -- a whole profile, applied or refused whole.
 //
-// Of the contract's four legal bodies -- algo+pool, pool alone, params alone,
-// run alone -- this miner carries out three and refuses two shapes:
+// Every legal body reaches here: algo+pool, pool alone, run alone, and those
+// combined. One park and one epoch carry all of it, so a step that fails leaves
+// none of the rest moved.
 //
-// An `algo` naming anything but the running algorithm is 501: the algorithm is
-// chosen before the tuner sweeps and before the first worker exists, so there
-// is no runtime switch to attempt. 409 would claim one was tried and rolled
-// back, 400 would blame the request. Naming the algorithm already running is
-// not a change and is accepted.
+// `params` is a difference rather than a gap: this miner's tunables are
+// per-device measurements taken by the sweep, not request fields. An empty
+// object is a no-op; any key inside it is named and refused.
 //
-// A pool and a run-state change in one body is 501 as well, a deviation rather
-// than a gap: here each goes through the barrier separately, two parks and two
-// epochs, so one call risks the half-switched miner section 7.4 forbids. A
-// `run` naming the current state is not a change, so {algo, pool, run} still
-// applies in one call.
-//
-// Unknown fields are refused rather than ignored: the alternative lets a
-// manager believe something it sent was applied.
+// An `algo` without a `pool` is 400: mining one algorithm against a pool
+// selling another is 100% rejected shares with every other metric healthy.
+// Unknown fields are refused for the same reason -- ignoring one lets a manager
+// believe something it sent was applied.
 static int h_control_profile(const api_request *req, void *ctx, json_t **out,
                              char *e, size_t n)
 {
@@ -1373,42 +1405,42 @@ static int h_control_profile(const api_request *req, void *ctx, json_t **out,
     vkminer::ControlSnapshot cur;
     vkminer::collect_control(&cur);
 
-    // The state table's `switching` row is 409 for every verb, and answering
-    // it here keeps a mutation in flight from reading as one of the refusals
-    // below -- which would tell a manager to stop retrying something that will
-    // work in a second.
+    // The state table's `switching` row is 409 for every verb. The barrier
+    // would answer this one too, and in the same terms; asking here is what
+    // keeps the message the state table's rather than the mutex's.
     if (cur.state == "switching") {
         snprintf(e, n, "another change is already in progress");
         return 409;
     }
-    if (has_algo && algo != cur.algo) {
-        snprintf(e, n, "this miner cannot change algorithm without a restart; "
-                       "it is mining %s", cur.algo.c_str());
-        return 501;
-    }
 
-    const char *want_state = run ? "running" : "paused";
-    const bool run_change = has_run && cur.state != want_state;
-    if (has_pool && run_change) {
-        snprintf(e, n, "this miner applies a pool re-target and a run-state "
-                       "change one at a time; send them as two requests");
-        return 501;
-    }
+    // One pass of the barrier for all of it: the workers park once, algorithm
+    // and pool move on the far side of that park, and the run state is what
+    // they are released into. A failure at any step rolls all three back.
+    const vkminer::ControlState want = run ? vkminer::ControlState::kRunning
+                                           : vkminer::ControlState::kPaused;
+    const vkminer::ControlState *target = has_run ? &want : nullptr;
 
     std::string why;
     vkminer::ControlResult rc = vkminer::ControlResult::kOk;
-    if (has_pool)
-        rc = vkminer::control_pool_request(url, user, pass, wait_ms, &why);
+
+    // An `algo` naming what is already running goes the pool's way instead.
+    // Both are the same barrier; the algorithm path additionally drops every
+    // device's shared table and rebuilds it, which on a ProgPoW fork is
+    // gigabytes and seconds spent arriving where the miner already was.
+    if (has_pool && has_algo && algo != cur.algo)
+        rc = vkminer::control_algo_request(algo, url, user, pass, wait_ms, &why,
+                                           target);
+    else if (has_pool)
+        rc = vkminer::control_pool_request(url, user, pass, wait_ms, &why,
+                                           target);
     else if (has_run)
-        rc = vkminer::control_request(run ? vkminer::ControlState::kRunning
-                                          : vkminer::ControlState::kPaused,
-                                      wait_ms, &why);
+        rc = vkminer::control_request(want, wait_ms, &why);
 
     const int http = control_http_status(rc);
     if (http >= 400) {
         snprintf(e, n, "%s",
                  why.empty() ? "the profile was not applied" : why.c_str());
-        return http;
+        return control_error(http, e, out);
     }
 
     // The resulting state rather than an ok flag, both times: the contract

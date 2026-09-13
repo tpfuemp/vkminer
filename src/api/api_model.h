@@ -131,6 +131,11 @@ struct VulkanSnapshot {
     // H-5's evidence, summed over every worker on this device.
     uint64_t batches_total = 0;
     uint64_t batches_late = 0;
+
+    // The epoch-scoped table this device is holding, which a pause keeps and
+    // only a stop gives back. Empty on a device holding none rather than 0 --
+    // a table of no size is not a state this has.
+    std::optional<uint64_t> shared_table_bytes;
 };
 
 struct DeviceSnapshot {

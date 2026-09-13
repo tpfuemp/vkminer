@@ -12,6 +12,10 @@
 #include <cstring>
 #include <string>
 
+extern "C" {
+#include "core/miner.h"
+}
+
 namespace vkminer {
 namespace {
 
@@ -116,6 +120,39 @@ std::unique_ptr<Algorithm> create_algorithm(const char *name)
 bool algorithm_exists(const char *name)
 {
     return find(name) != nullptr;
+}
+
+void bind_protocol_settings(const char *name)
+{
+    const std::unique_ptr<Algorithm> algo = create_algorithm(name);
+
+    if (!algo)
+        return;
+
+    // Difficulty is printed in the scale the pool quotes and compared in the
+    // scale the algorithm defines.
+    opt_target_factor = algo->target_factor();
+    if (opt_target_factor != 1.)
+        applog(LOG_INFO, "'%s' quotes difficulty %g times the Bitcoin scale, "
+                         "so a stratum difficulty here is not one of "
+                         "sha256d's", name, opt_target_factor);
+
+    opt_nonce_bits = algo->nonce_bits();
+    if (algo->stratum_dialect() == StratumDialect::kProgPow) {
+        opt_stratum_dialect = STRATUM_PROGPOW;
+        progpow_seed_hash_agrees = progpow_seed_hash_check;
+        applog(LOG_INFO, "'%s' speaks the ProgPoW stratum: the pool sends a "
+                         "header hash rather than a coinbase, and keeps the "
+                         "top %u bits of the nonce",
+               name, 64 - opt_nonce_bits);
+    } else {
+        // Put back rather than left alone. Only a switch reaches this with the
+        // other dialect in force, and a miner that moved off a ProgPoW fork
+        // still reading a notify as a header hash would mine headers no pool
+        // sent -- which reads as a rejected-share storm, not as a stale flag.
+        opt_stratum_dialect = STRATUM_BITCOIN;
+        progpow_seed_hash_agrees = nullptr;
+    }
 }
 
 std::string algorithm_names()

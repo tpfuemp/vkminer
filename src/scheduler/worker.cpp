@@ -395,6 +395,13 @@ void worker_batch_counts(int thr_id, uint64_t *total, uint64_t *stale)
     *stale = g_batches[thr_id].stale.load(std::memory_order_relaxed);
 }
 
+uint64_t worker_shared_table_bytes(int device_index)
+{
+    if (!g_backend || device_index < 0)
+        return 0;
+    return g_backend->shared_state_bytes(device_index);
+}
+
 void worker_candidate_counts(uint64_t *confirmed, uint64_t *rejected)
 {
     if (confirmed)
@@ -414,12 +421,12 @@ extern "C" void *miner_thread(void *userdata)
     // One instance per worker rather than one shared between them. An
     // algorithm holds no per-job state, so sharing would work today; a worker
     // that owns its own cannot be the thing that stops being true.
-    std::unique_ptr<vkminer::Algorithm> algo = vkminer::create_algorithm(opt_algo);
-    if (!algo) {
-        applog(LOG_ERR, "Worker %d: no algorithm called '%s'", thr_id, opt_algo);
-        fail_run(1);
-        return nullptr;
-    }
+    //
+    // Created by bind_algo() below rather than here, because the control API
+    // can change what opt_algo names: what a worker holds for its whole life is
+    // the pointer, not what it points at.
+    std::unique_ptr<vkminer::Algorithm> algo;
+    std::string bound_algo;
 
     // How many of us are on this card, which matters only to a kernel wanting
     // memory per invocation: two workers each sizing a scratchpad as though
@@ -435,6 +442,36 @@ extern "C" void *miner_thread(void *userdata)
     std::unique_ptr<vkminer::Kernel> kernel;
     size_t depth = 1;
 
+    // Set by a build that failed on the far side of a switch, where the answer
+    // is the previous profile rather than the end of the run: it tells "this
+    // worker is finished" from "this worker has a park to go and sit in".
+    bool switch_failed = false;
+
+    // What a build that did not happen does about itself, whether the device
+    // said the table was too large or the build came back empty. Fatal rather
+    // than one worker quietly leaving: with more than one device that is how a
+    // GPU that failed to open would show up, the miner carrying on at half its
+    // hashrate with one line in the scrollback.
+    //
+    // Unless there is a profile to go back to. A switch that reached here has
+    // already given up the old algorithm's device state, so this worker is not
+    // refusing the new algorithm so much as left with nothing to mine.
+    auto give_up = [&](const std::string &why) -> bool {
+        if (vkminer::control_switch_recoverable()) {
+            vkminer::control_switch_failed(why);
+
+            // The restore arrives as a park and the loop above walks into it.
+            // A moment's wait first: a restore that could not be posted --
+            // another mutation was already in flight -- leaves this worker
+            // retrying a build that will fail again.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            switch_failed = true;
+            return false;
+        }
+        fail_run(1);
+        return false;
+    };
+
     // The algorithm chooses what to run from what the device can do; the
     // backend reads the result without asking what it computes. Through the
     // tuning, which is neither's business: where this device was measured, its
@@ -449,18 +486,25 @@ extern "C" void *miner_thread(void *userdata)
             *algo, device_index, g_backend->devices()[device_index]);
         spec.concurrent_kernels = sharing;
 
+        // Asked here and not left to the build: a driver is free to satisfy a
+        // request larger than the device by paging it, which wedges a worker in
+        // a table it cannot hold while the miner reports that it is running.
+        // The switch asked this of the largest epoch the fork *declares*; a job
+        // states its own, and nothing stops a pool naming one past that.
+        char why[256];
+        if (!g_backend->would_fit(device_index, spec, why, sizeof why)) {
+            applog(LOG_ERR, "Worker %d: %s", thr_id, why);
+            return give_up(why);
+        }
+
         kernel = g_backend->create_kernel(device_index, spec);
         if (!kernel) {
-            // Fatal rather than one worker quietly leaving. With more than one
-            // device this is how a GPU that failed to open would show up: the
-            // miner carrying on at half its hashrate with one line in the
-            // scrollback, which is exactly the failure nobody notices for a
-            // week.
             applog(LOG_ERR, "Worker %d: backend '%s' has no kernel for '%s' on "
                             "device %d", thr_id, g_backend->name(), opt_algo,
                    device_index);
-            fail_run(1);
-            return false;
+            return give_up(
+                std::string("device ") + std::to_string(device_index) +
+                " has no kernel for '" + (opt_algo ? opt_algo : "") + "'");
         }
         depth = std::max<uint32_t>(1, kernel->queue_depth());
         return true;
@@ -475,17 +519,20 @@ extern "C" void *miner_thread(void *userdata)
     // seconds of a device, and a fresh coinbase on the same job is what covers
     // that. Anything wider needs none -- and the dialect that is wider has no
     // coinbase, so rolling one would build a header the pool never sent.
-    const uint32_t walk_bits = std::min<uint32_t>(algo->nonce_bits(), 64);
-    const bool roll_xnonce2 = walk_bits <= 32;
-    const uint64_t space = walk_bits >= 64 ? ~UINT64_C(0)
-                                           : UINT64_C(1) << walk_bits;
-    const uint64_t range = space / static_cast<uint64_t>(opt_n_threads);
-    const uint64_t first_nonce = range * static_cast<uint64_t>(thr_id);
-    const uint64_t end_nonce = first_nonce + range - kRangeMargin;
+    //
+    // None of them const, and all derived in one place: a switch between a
+    // 32-bit nonce and ProgPoW's 48 changes every one, and a worker that moved
+    // some of them would walk a range the pool never handed it.
+    uint32_t walk_bits = 0;
+    bool     roll_xnonce2 = false;
+    uint64_t space = 0;
+    uint64_t range = 0;
+    uint64_t first_nonce = 0;
+    uint64_t end_nonce = 0;
 
     struct work work;
     memset(&work, 0, sizeof work);
-    uint64_t nonce = first_nonce;
+    uint64_t nonce = 0;  // and the rest of it, from bind_algo below
     bool have_job = false;
     auto last_report = std::chrono::steady_clock::now();
 
@@ -498,6 +545,40 @@ extern "C" void *miner_thread(void *userdata)
     // restart.
     uint64_t xnonce2 = static_cast<uint64_t>(thr_id);
     bool xnonce2_armed = false;
+
+    // Binds this worker to whatever opt_algo names now, and re-derives
+    // everything that follows from it. Called before the loop and again on the
+    // far side of every park, which is where an algorithm change lands.
+    auto bind_algo = [&]() -> bool {
+        algo = vkminer::create_algorithm(opt_algo);
+        if (!algo) {
+            applog(LOG_ERR, "Worker %d: no algorithm called '%s'", thr_id,
+                   opt_algo);
+            return false;
+        }
+        bound_algo = opt_algo ? opt_algo : "";
+
+        walk_bits = std::min<uint32_t>(algo->nonce_bits(), 64);
+        roll_xnonce2 = walk_bits <= 32;
+        space = walk_bits >= 64 ? ~UINT64_C(0) : UINT64_C(1) << walk_bits;
+        range = space / static_cast<uint64_t>(opt_n_threads);
+        first_nonce = range * static_cast<uint64_t>(thr_id);
+        end_nonce = first_nonce + range - kRangeMargin;
+
+        // Where in that range this worker starts, and the two facts that were
+        // true of the job it is no longer mining. The coinbase especially: the
+        // extranonce2 it armed belongs to a session that has been dropped, and
+        // arming is what the first job on the new one will ask for again.
+        nonce = first_nonce;
+        have_job = false;
+        xnonce2_armed = false;
+        return true;
+    };
+
+    if (!bind_algo()) {
+        fail_run(1);
+        return nullptr;
+    }
 
     // The rate window. `account` is called with the hashes a dispatch covered,
     // and with none for time the worker spent waiting rather than hashing --
@@ -708,7 +789,15 @@ extern "C" void *miner_thread(void *userdata)
             reap();
     };
 
+    // When this worker last came round the loop. The park check is the first
+    // thing below, so the previous iteration's length is the longest a park
+    // request can have gone unnoticed.
+    auto loop_top = std::chrono::steady_clock::now();
+
     while (!g_stop.load(std::memory_order_relaxed)) {
+        const auto prev_top = loop_top;
+        loop_top = std::chrono::steady_clock::now();
+
         bool new_job = false;
 
         // Above the question of where work comes from, and not beside the wait
@@ -716,11 +805,14 @@ extern "C" void *miner_thread(void *userdata)
         // wait is never reached at all, and a run the API cannot pause is a
         // device it cannot free.
         if (vkminer::control_wants_park()) {
+            const unsigned held = (unsigned) inflight.size();
+
             // Only once the pipeline is empty: a worker that counts itself
             // parked while the device still holds a dispatch hands the barrier
             // a device that is still writing.
             drain();
             work_restart[thr_id].restart = 0;
+            const auto drained = std::chrono::steady_clock::now();
 
             // The kernel goes because it is what holds the device's memory,
             // and the shared table goes with it -- the kernels own it. So a
@@ -729,8 +821,36 @@ extern "C" void *miner_thread(void *userdata)
             g_backend->retain_shared_state(
                 device_index, vkminer::control_park_retains_shared());
             kernel.reset();
+            const auto torn_down = std::chrono::steady_clock::now();
+
+            // Three numbers rather than one, because a park that answers in
+            // seconds is a different fault in each: a dispatch the device had
+            // not finished, one it had not been asked for yet, or a driver
+            // taking its time over the teardown.
+            if (opt_debug) {
+                const std::chrono::duration<double, std::milli>
+                    noticed = loop_top - prev_top,
+                    emptied = drained - loop_top,
+                    teardown = torn_down - drained;
+                applog(LOG_DEBUG,
+                       "Worker %d: parking -- noticed after %.1f ms, drained "
+                       "%u dispatch(es) in %.1f ms, kernel torn down in "
+                       "%.1f ms",
+                       thr_id, noticed.count(), held, emptied.count(),
+                       teardown.count());
+            }
+
             publish_parked();
             vkminer::control_park(thr_id);
+
+            // What opt_algo names may not be what this worker is bound to any
+            // more. Nothing here can refuse it: the far side checked the
+            // memory, ran the self-test and tuned the device before releasing
+            // the park, so a name that fails to resolve now is a bug.
+            if (bound_algo != (opt_algo ? opt_algo : "") && !bind_algo()) {
+                fail_run(1);
+                break;
+            }
 
             // Not necessarily permission to mine -- the loop asks again,
             // because a park can be replaced by a stricter one.
@@ -803,8 +923,15 @@ extern "C" void *miner_thread(void *userdata)
                                        "device state; rebuilding the kernel",
                            thr_id);
                 }
-                if (!build_kernel())
+                if (!build_kernel()) {
+                    // A build that asked for the previous profile back has a
+                    // park waiting for it, not the end of the run.
+                    if (switch_failed) {
+                        switch_failed = false;
+                        continue;
+                    }
                     break;
+                }
             }
 
             // Advanced, never restarted: a job id is not unique. A pool
@@ -840,8 +967,13 @@ extern "C" void *miner_thread(void *userdata)
         // Resumed from a park, with the job the worker was mining before it.
         // Nothing above rebuilds the kernel then, because nothing about the
         // job changed -- and the park is what released it.
-        if (!kernel && !build_kernel())
+        if (!kernel && !build_kernel()) {
+            if (switch_failed) {
+                switch_failed = false;
+                continue;
+            }
             break;
+        }
 
         // The header this worker mines is its own: same job as everyone else's,
         // different coinbase. Re-derived here rather than at the point it

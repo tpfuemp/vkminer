@@ -156,13 +156,32 @@ char *stratum_recv_line(struct stratum_ctx *sctx)
 
 #if LIBCURL_VERSION_NUM >= 0x071802
 
-			CURLcode rc = curl_easy_recv(sctx->curl, s, RECVSIZE, (size_t *)&n);
+			/* One curl handle, two threads. This reads the connection while
+			   the workio thread writes shares down it through send_line, and
+			   an easy handle may not be in two calls at once. sock_lock is
+			   what connect, disconnect and send already take; this reader was
+			   the one path that did not, and a share flood is what makes the
+			   overlap frequent enough to lose the connection. Held across the
+			   call alone: curl_easy_recv answers CURLE_AGAIN instead of
+			   blocking, and every wait below is socket_full, outside it. */
+			CURLcode rc;
+			pthread_mutex_lock(&sctx->sock_lock);
+			rc = curl_easy_recv(sctx->curl, s, RECVSIZE, (size_t *)&n);
+			pthread_mutex_unlock(&sctx->sock_lock);
 			if (rc == CURLE_OK && !n) {
 				ret = false;
 				break;
 			}
 			if (rc != CURLE_OK) {
-				if (rc != CURLE_AGAIN || !socket_full(sctx->sock, 1)) {
+				/* A quiet second is not a broken connection. The tail of a
+				   line split across TCP segments can pause for longer than
+				   that, and the budget for a whole line is the 60 s this
+				   loop counts -- so wait a slice and go round again, and
+				   give up only when that budget is spent. socket_full is
+				   the wait as well as the test, so this cannot spin. */
+				if (rc != CURLE_AGAIN
+				    || (!socket_full(sctx->sock, 1)
+				        && time(NULL) - rstart >= 60)) {
 #else
 
          n = recv(sctx->sock, s, RECVSIZE, 0);
@@ -171,7 +190,9 @@ char *stratum_recv_line(struct stratum_ctx *sctx)
 				break;
 			}
 			if (n < 0) {
-				if (!socket_blocks() || !socket_full(sctx->sock, 1)) {
+				if (!socket_blocks()
+				    || (!socket_full(sctx->sock, 1)
+				        && time(NULL) - rstart >= 60)) {
 #endif
                ret = false;
 					break;
@@ -184,6 +205,16 @@ char *stratum_recv_line(struct stratum_ctx *sctx)
 			applog(LOG_WARNING, "stratum_recv_line failed");
 			goto out;
 		}
+	}
+
+	/* A whole line or nothing. The read above can run out of its budget
+	   still holding part of one, and strtok below splits on newlines: with
+	   none in the buffer it would hand that fragment up as though it were a
+	   complete message and drop the remainder with it. */
+	if (!strstr(sctx->sockbuf, "\n")) {
+		applog(LOG_WARNING,
+		       "stratum_recv_line timed out holding a partial message");
+		goto out;
 	}
 
 	buflen = (ssize_t) strlen(sctx->sockbuf);
@@ -736,8 +767,15 @@ static bool parse_uint_field( json_t *val, uint64_t *out )
 static bool stratum_progpow_notify( struct stratum_ctx *sctx, json_t *params )
 {
    /* The last seed hash complained about below, so that a pool this miner
-      disagrees with costs one line an epoch and not one a job.  */
+      disagrees with costs one line an epoch and not one a job.
+
+      The flag is not redundant, and leaving it out silenced the complaint
+      exactly where it was most needed. An all-zero buffer is not an empty
+      one: all zeros is epoch 0's real seed hash -- what a pool sends when it
+      has not filled the field in -- so a zero-initialised buffer read as "no
+      complaint yet" matches that seed and suppresses the first one.  */
    static unsigned char complained_about[32];
+   static bool have_complained = false;
 
    const char *job_id, *header_hash, *seed_hash, *target_hex;
    uint64_t height = 0, nbits = 0;
@@ -813,10 +851,12 @@ static bool stratum_progpow_notify( struct stratum_ctx *sctx, json_t *params )
       having to know how long an epoch is here.  */
    if ( progpow_seed_hash_agrees
         && !progpow_seed_hash_agrees( height, sctx->job.seed_hash )
-        && memcmp( complained_about, sctx->job.seed_hash,
-                   sizeof complained_about ) )
+        && ( !have_complained
+             || memcmp( complained_about, sctx->job.seed_hash,
+                        sizeof complained_about ) ) )
    {
       char seen[65];
+      have_complained = true;
       memcpy( complained_about, sctx->job.seed_hash,
               sizeof complained_about );
       bin2hex( seen, (char*) sctx->job.seed_hash, 32 );

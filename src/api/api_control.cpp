@@ -79,6 +79,10 @@ struct PoolRequest {
     std::string user;
     std::string pass;
 
+    // The algorithm to mine there, empty for a plain re-target. A pool change
+    // that carries one is the change this whole barrier exists for.
+    std::string algo;
+
     // Written under g_lock and read outside it, because the stratum thread asks
     // whether to stop waiting on a quiet socket and a socket wait that can be
     // held up by a control caller is one a control caller can hang.
@@ -87,6 +91,11 @@ struct PoolRequest {
     bool applied = false;  // taken: rpc_url names the pool that was asked for
     bool done = false;     // answered, one way or the other
     bool ok = false;       // and this is which
+
+    // Refused by the far side before anything changed, which is a different
+    // answer from a change that was made and did not work out: the first is
+    // the request's fault and the second is the pool's.
+    bool refused = false;
 };
 
 PoolRequest g_pool;
@@ -95,6 +104,25 @@ PoolRequest g_pool;
 // and must not be committed as one, so the two are told apart here rather than
 // inferred from a state that looks identical either side.
 bool g_pool_switch = false;
+
+// What the far side of the park does about an algorithm. This file is compiled
+// without the registry, the backend or the self-test: a barrier that could
+// build a kernel would be one nobody could test without a device.
+ControlSwitchHook g_switch_hook = nullptr;
+
+// The profile to go back to when a rebuild fails after a switch, captured
+// before the switch rather than after -- afterwards the globals describe the
+// profile that did not work.
+std::string g_prev_algo;
+std::string g_prev_url;
+std::string g_prev_user;
+std::string g_prev_pass;
+bool        g_can_restore = false;
+
+// Whether what is in force now is itself a restore. A rebuild that fails under
+// one has nowhere left to go, and saying so is what stops a device that will
+// build neither profile from moving between them for the life of the process.
+bool g_restore_in_force = false;
 
 std::atomic<bool> g_in_flight{false};
 std::atomic<bool> g_hold_connection{false};
@@ -273,7 +301,12 @@ bool settle_locked()
     g_epoch++;
     g_switches++;
     g_mutating = false;
-    g_last_error.clear();
+
+    // Kept across a restore, and only across a restore: it is the reason the
+    // miner is back on the previous profile, and a manager reading state after
+    // the change has landed is exactly who needs it.
+    if (!g_restore_in_force)
+        g_last_error.clear();
 
     // The terms of the state being landed in, which for a re-target is the one
     // the workers were parked out of: they are what releases them.
@@ -346,6 +379,109 @@ void expire_locked()
                             ? pool_not_taken() : park_timed_out());
     else
         rollback_locked(park_timed_out());
+}
+
+// Posts a pool change, with or without an algorithm, and asks for the park it
+// needs. Shared by the two requests and the restore: three callers arranging
+// the same eight fields is three chances to leave one out.
+void post_pool_locked(const std::string &url, const std::string &user,
+                      const std::string &pass, const std::string &algo,
+                      bool restore, const ControlState *want)
+{
+    if (!algo.empty() && !restore) {
+        g_prev_algo = opt_algo ? opt_algo : "";
+        g_prev_url = rpc_url ? rpc_url : "";
+        g_prev_user = rpc_user ? rpc_user : "";
+        g_prev_pass = rpc_pass ? rpc_pass : "";
+        g_can_restore = !g_prev_algo.empty() && !g_prev_url.empty();
+    }
+    g_restore_in_force = restore;
+
+    // The state either side is the same one unless a caller named another: a
+    // change of pool or algorithm is a change to what the miner works on, not
+    // to whether it is working. So there is no verb to be a no-op of, and every
+    // request costs an epoch -- a run state named as well lands in this same
+    // settle, which is what makes the two one change.
+    g_last_switch = std::chrono::steady_clock::now();
+    g_ever_switched = true;
+    g_previous = g_state;
+    g_pending = want ? *want : g_state;
+    set_state_locked(ControlState::kSwitching);
+    g_mutating = true;
+    g_pool_switch = true;
+    if (!restore)
+        g_last_error.clear();
+    g_deadline = std::chrono::steady_clock::now() +
+                 std::chrono::milliseconds(park_timeout_ms());
+
+    g_pool.url = url;
+    g_pool.user = user;
+    g_pool.pass = pass;
+    g_pool.algo = algo;
+    g_pool.pending.store(false, std::memory_order_relaxed);
+    g_pool.applied = false;
+    g_pool.done = false;
+    g_pool.ok = false;
+    g_pool.refused = false;
+
+    // Parked on the terms of the state they are already in: a re-target does
+    // not change the algorithm, so whatever a worker was keeping it keeps. An
+    // algorithm change leaves a table that is no use -- but the switch hook is
+    // what drops it, once the workers are in and nothing is reading it.
+    g_retain_shared.store(g_previous != ControlState::kStopped,
+                          std::memory_order_relaxed);
+    g_park_requested.store(true, std::memory_order_relaxed);
+
+    // Given up here rather than at the settle, for the profile that starts a
+    // stopped miner on a new pool: this barrier waits for a subscribe, and the
+    // stratum thread will not open a socket while the hold is on -- so holding
+    // it to the settle waits for an ack the miner is itself forbidding.
+    g_hold_connection.store(g_pending == ControlState::kStopped,
+                            std::memory_order_relaxed);
+
+    // Anyone already parked is parked on the previous verb's terms and is not
+    // counted towards this park until it has come round and read these.
+    g_park_gen++;
+    g_parked_gen = 0;
+    g_cv.notify_all();
+}
+
+// Waits out a posted change and says how it ended. The two requests answer
+// identically because they are the same barrier.
+ControlResult wait_for_pool_locked(std::unique_lock<std::mutex> &held,
+                                   unsigned wait_ms, std::string *why)
+{
+    std::chrono::steady_clock::time_point answer_by =
+        wait_ms ? std::chrono::steady_clock::now() +
+                      std::chrono::milliseconds(wait_ms)
+                : g_deadline;
+    if (answer_by > g_deadline)
+        answer_by = g_deadline;
+
+    while (g_state == ControlState::kSwitching && !settle_locked() &&
+           std::chrono::steady_clock::now() < answer_by)
+        g_cv.wait_until(held, answer_by);
+
+    if (g_state != ControlState::kSwitching) {
+        if (g_pool.ok)
+            return ControlResult::kOk;
+        if (why)
+            *why = g_last_error;
+
+        // Refused by the far side, having changed nothing -- an algorithm this
+        // build does not have, or a dataset the device cannot hold. A bad
+        // request and not a slow one; "timeout" would be retried forever.
+        return g_pool.refused ? ControlResult::kInvalid : ControlResult::kTimeout;
+    }
+
+    if (std::chrono::steady_clock::now() >= g_deadline) {
+        expire_locked();
+        if (why)
+            *why = g_last_error;
+        return ControlResult::kTimeout;
+    }
+
+    return ControlResult::kAccepted;
 }
 
 }  // namespace
@@ -508,7 +644,7 @@ ControlResult control_request(ControlState want, unsigned wait_ms,
 ControlResult control_pool_request(const std::string &url,
                                    const std::string &user,
                                    const std::string &pass, unsigned wait_ms,
-                                   std::string *why)
+                                   std::string *why, const ControlState *want)
 {
     std::string complaint;
 
@@ -549,72 +685,110 @@ ControlResult control_pool_request(const std::string &url,
         return ControlResult::kThrottled;
     }
 
-    // The state either side of this is the same one: a re-target changes who
-    // the miner works for, not what it is doing. So there is no verb to be a
-    // no-op of, and every request costs an epoch.
-    g_last_switch = std::chrono::steady_clock::now();
-    g_ever_switched = true;
-    g_previous = g_state;
-    g_pending = g_state;
-    set_state_locked(ControlState::kSwitching);
-    g_mutating = true;
-    g_pool_switch = true;
-    g_last_error.clear();
-    g_deadline = std::chrono::steady_clock::now() +
-                 std::chrono::milliseconds(park_timeout_ms());
+    post_pool_locked(url, user, pass, std::string(), false, want);
+    return wait_for_pool_locked(held, wait_ms, why);
+}
 
-    g_pool.url = url;
-    g_pool.user = user;
-    g_pool.pass = pass;
-    g_pool.pending.store(false, std::memory_order_relaxed);
-    g_pool.applied = false;
-    g_pool.done = false;
-    g_pool.ok = false;
+void control_set_switch_hook(ControlSwitchHook hook)
+{
+    std::lock_guard<std::mutex> held(g_lock);
+    g_switch_hook = hook;
+}
 
-    // Parked on the terms of the state they are already in: the algorithm is
-    // not changing, so whatever a worker was keeping it goes on keeping.
-    g_retain_shared.store(g_previous != ControlState::kStopped,
-                          std::memory_order_relaxed);
-    g_park_requested.store(true, std::memory_order_relaxed);
+ControlResult control_algo_request(const std::string &algo,
+                                   const std::string &url,
+                                   const std::string &user,
+                                   const std::string &pass, unsigned wait_ms,
+                                   std::string *why, const ControlState *want)
+{
+    std::string complaint;
 
-    // Anyone already parked is parked on the previous verb's terms and is not
-    // counted towards this park until it has come round and read these.
-    g_park_gen++;
-    g_parked_gen = 0;
-    g_cv.notify_all();
+    if (why)
+        why->clear();
 
-    std::chrono::steady_clock::time_point answer_by =
-        wait_ms ? std::chrono::steady_clock::now() +
-                      std::chrono::milliseconds(wait_ms)
-                : g_deadline;
-    if (answer_by > g_deadline)
-        answer_by = g_deadline;
-
-    while (g_state == ControlState::kSwitching && !settle_locked() &&
-           std::chrono::steady_clock::now() < answer_by)
-        g_cv.wait_until(held, answer_by);
-
-    if (g_state != ControlState::kSwitching) {
-        if (g_pool.ok)
-            return ControlResult::kOk;
+    if (!control_enabled()) {
         if (why)
-            *why = g_last_error;
-        return ControlResult::kTimeout;
+            *why = "the control API is not enabled";
+        return ControlResult::kDisabled;
+    }
+    if (algo.empty()) {
+        if (why)
+            *why = "no algorithm was named";
+        return ControlResult::kInvalid;
     }
 
-    if (std::chrono::steady_clock::now() >= g_deadline) {
-        expire_locked();
+    // A pool is not optional here. The dialect is derived from the algorithm
+    // before the socket opens, so the connection this miner is holding was
+    // built to speak for the algorithm it is leaving.
+    if (!pool_url_usable(url, &complaint)) {
         if (why)
-            *why = g_last_error;
-        return ControlResult::kTimeout;
+            *why = complaint;
+        return ControlResult::kInvalid;
     }
 
-    return ControlResult::kAccepted;
+    // Whether the name resolves is the switch hook's to answer: the registry is
+    // deliberately not linked into this file. It refuses before anything has
+    // changed, so the answer is the same one turn later.
+
+    std::unique_lock<std::mutex> held(g_lock);
+
+    settle_locked();
+    expire_locked();
+
+    if (g_mutating) {
+        if (why)
+            *why = "another change is already in progress";
+        return ControlResult::kBusy;
+    }
+
+    const int retry_in = retry_after_s_locked();
+    if (retry_in) {
+        if (why)
+            *why = "the miner was switched less than " +
+                   std::to_string(min_interval_s()) + " s ago, retry in " +
+                   std::to_string(retry_in) + " s";
+        return ControlResult::kThrottled;
+    }
+
+    post_pool_locked(url, user, pass, algo, false, want);
+    return wait_for_pool_locked(held, wait_ms, why);
+}
+
+bool control_switch_recoverable()
+{
+    std::lock_guard<std::mutex> held(g_lock);
+    return g_can_restore && !g_restore_in_force;
+}
+
+void control_switch_failed(const std::string &why)
+{
+    std::lock_guard<std::mutex> held(g_lock);
+
+    settle_locked();
+    expire_locked();
+
+    // Nothing to go back to, or the thing to go back to is what just failed.
+    // Either way this is not recoverable and the caller has already been told
+    // as much; recording why is all that is left to do.
+    if (!g_can_restore || g_restore_in_force || g_mutating) {
+        g_last_error = why;
+        return;
+    }
+
+    applog(LOG_WARNING, "control: %s -- going back to '%s'", why.c_str(),
+           g_prev_algo.c_str());
+
+    // Back to the profile, not to a run state: a restore puts right what the
+    // failed switch changed, and the miner is doing whatever it was doing.
+    post_pool_locked(g_prev_url, g_prev_user, g_prev_pass, g_prev_algo, true,
+                     nullptr);
+    g_last_error = why;
 }
 
 bool control_pool_apply()
 {
-    std::string url, user, pass;
+    std::string       url, user, pass, algo;
+    ControlSwitchHook hook = nullptr;
 
     {
         std::lock_guard<std::mutex> held(g_lock);
@@ -624,15 +798,43 @@ bool control_pool_apply()
         url = g_pool.url;
         user = g_pool.user;
         pass = g_pool.pass;
+        algo = g_pool.algo;
+        hook = g_switch_hook;
+
+        // Taken in the same breath as the pending flag is cleared, and not once
+        // the work below is done: settle_locked() reads both, and a moment in
+        // which the change is neither pending nor applied posts it twice.
         g_pool.pending.store(false, std::memory_order_relaxed);
         g_pool.applied = true;
     }
 
+    // The algorithm first and outside the lock: on a DAG algorithm this drops a
+    // table, sizes another, self-tests and tunes -- seconds, during which a
+    // polling caller must not be stuck on a mutex. Every worker is parked.
+    if (!algo.empty()) {
+        std::string refusal;
+
+        if (!hook)
+            refusal = "this miner cannot change algorithm at runtime";
+        else if (!hook(algo.c_str(), &refusal) && refusal.empty())
+            refusal = "the switch was refused";
+
+        if (!refusal.empty() || !hook) {
+            std::lock_guard<std::mutex> held(g_lock);
+
+            // Nothing was changed, so there is nothing to put back: the pool
+            // below was never touched. Rolled back rather than settled, because
+            // a refusal is not a switch that happened badly.
+            g_pool.refused = true;
+            rollback_locked(refusal);
+            return false;
+        }
+    }
+
     // Freeing what the whole process has been reading all session is safe here
     // and nowhere else: report_summary_log() prints rpc_url from a mining
-    // thread, and every one of them is parked at the barrier for exactly as
-    // long as this takes. Anything that moves this call out from between the
-    // park and the commit is a use-after-free on a live miner.
+    // thread, and every one is parked at the barrier for as long as this takes.
+    // Moving it out from between the park and the commit is a use-after-free.
     char *replaced = rpc_url;
     rpc_url = dup_string(url);
     short_url = rpc_url + scheme_length(url);
@@ -705,7 +907,8 @@ ControlStatus control_status()
     out.state_age_s = static_cast<int>(
         std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::steady_clock::now() - g_state_since).count());
-    out.ready_for_switch = retry_after_s_locked() == 0;
+    out.retry_after_s = retry_after_s_locked();
+    out.ready_for_switch = out.retry_after_s == 0;
     if (g_ever_switched)
         out.last_switch_age_s = static_cast<int>(
             std::chrono::duration_cast<std::chrono::seconds>(

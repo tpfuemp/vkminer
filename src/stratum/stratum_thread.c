@@ -33,6 +33,7 @@ bool     stratum_down       = true;
 time_t   stratum_up_time    = 0;
 bool     stratum_need_reset = false;
 uint32_t stratum_errors     = 0;
+uint32_t stratum_session    = 0;
 
 static struct timeval stratum_reset_time = {0};
 static struct timeval stratum_keepalive_timer = {0};
@@ -206,6 +207,11 @@ static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
    /* A dispatch already in flight cannot be recalled, so results are matched
     * against the epoch they were launched under rather than prevented. */
    g_work->job_epoch++;
+
+   /* And the connection it came from, for the same reason one step out: a
+      share outlives the dispatch that found it, and can outlive the session
+      that issued its job. */
+   g_work->session = stratum_session;
 
    g_work_time = time(NULL);
    restart_threads();
@@ -504,6 +510,11 @@ void *stratum_thread(void *userdata )
 // sometimes stratum connects but doesn't immediately send a job, wait for one.
             applog(LOG_BLUE,"Stratum connection established" );
             stratum_up_time = time( NULL );
+            /* A new session begins where the age does: subscribed and
+               authorized, not merely connected. Every job issued from here
+               is stamped with this, and a share carrying an older one is a
+               share for a job this pool has never heard of. */
+            stratum_session++;
             /* The ack. A re-target is finished when the pool it named has this
                miner subscribed and authorized, not when the url changed. */
             control_pool_connected();

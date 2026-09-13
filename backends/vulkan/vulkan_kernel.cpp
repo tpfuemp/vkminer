@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <numeric>
 #include <string>
@@ -141,17 +142,22 @@ public:
 
         const DeviceInfo &info = device.info();
 
-        // The spec first: a caller that named a depth wants that one and no
-        // other, which is how the tuner runs one kernel at several. Then the
-        // option, validated where it is parsed, so all that is left here is
-        // whether it was given.
-        //
-        // Everything below sizes off depth_, so depth 1 is one of each
-        // resource -- the submit-and-wait loop this had before it was
-        // pipelined, from the same binary.
-        depth_ = spec.queue_depth              ? spec.queue_depth
-               : opt_queue_depth > 0           ? static_cast<uint32_t>(opt_queue_depth)
-                                               : kDefaultDepth;
+        // The width, the depth, and how many hashes the scratchpads have room
+        // for, all worked out in one place -- see vulkan_kernel_fit. What is
+        // sized here against the table this kernel was handed is sized before
+        // the build against the largest that table could become.
+        KernelFit fit;
+        char why[256];
+        if (!vulkan_kernel_fit(info, spec, shared_ ? shared_->bytes() : 0, &fit,
+                               why, sizeof why)) {
+            applog(LOG_ERR, "Vulkan: %s", why);
+            return false;
+        }
+
+        // Depth 1 is one of each resource below -- the submit-and-wait loop
+        // this had before it was pipelined, from the same binary.
+        depth_ = fit.depth;
+        lanes_ = fit.lanes;
 
         ComputePipelineDesc desc;
         desc.spirv = spec.spirv;
@@ -181,48 +187,7 @@ public:
             return false;
         }
         desc.push_constant_bytes = push_bytes_;
-        // The width by the same rule as the depth: the spec, then the option,
-        // then this device's default.
-        desc.local_size_x = spec.local_size_x  ? spec.local_size_x
-                          : opt_workgroup > 0  ? static_cast<uint32_t>(opt_workgroup)
-                                               : choose_local_size(info);
-
-        // A workgroup holds whole nonces or the lanes of the last one have
-        // nobody to exchange with. Rounded down rather than refused: the width
-        // is swept by the tuner and asked for on the command line, and this is
-        // the nearest number of invocations that arranges into whole hashes.
-        lanes_ = spec.lanes ? spec.lanes : 1;
-        if (info.max_invocations && lanes_ > info.max_invocations) {
-            applog(LOG_ERR, "Vulkan: '%s' wants %u invocations per hash and %s "
-                            "runs %u in a workgroup", name_, lanes_,
-                   info.name.c_str(), info.max_invocations);
-            return false;
-        }
-        if (lanes_ > 1) {
-            const uint32_t whole = desc.local_size_x
-                                 - desc.local_size_x % lanes_;
-            desc.local_size_x = whole ? whole : lanes_;
-        }
-
-        // And whole subgroups, for a kernel whose lanes exchange through them:
-        // a width that is a multiple of both is a multiple of their least
-        // common multiple, rounded down by the same argument as above.
-        //
-        // A device that will not say what its subgroup is cannot be asked for
-        // whole ones. The algorithm reads the same zero from DeviceInfo and
-        // does not offer such a kernel there, so a zero here is its bug.
-        if (spec.full_subgroups) {
-            const uint32_t step = std::lcm(lanes_, info.subgroup_size);
-            if (!step || (info.max_invocations && step > info.max_invocations)) {
-                applog(LOG_ERR, "Vulkan: '%s' wants whole subgroups and %s "
-                                "reports a subgroup of %u against %u "
-                                "invocations", name_, info.name.c_str(),
-                       info.subgroup_size, info.max_invocations);
-                return false;
-            }
-            const uint32_t whole = desc.local_size_x - desc.local_size_x % step;
-            desc.local_size_x = whole ? whole : step;
-        }
+        desc.local_size_x = fit.local_size_x;
         probe_best_ = opt_vk_probe_best;
         desc.probe_best = probe_best_;
         desc.sets = depth_;
@@ -258,11 +223,7 @@ public:
         cache_ = cache;
 
         local_ = desc.local_size_x;
-        // Nonces per workgroup, which is the unit a dispatch is counted in and
-        // the width only where an invocation is a hash.
-        per_group_ = local_ / lanes_;
-        if (!per_group_)
-            per_group_ = 1;
+        per_group_ = fit.per_group;
 
         // One result buffer per in-flight dispatch, not one shared: the host
         // reads a dispatch's results long after the next has started writing,
@@ -272,8 +233,16 @@ public:
         // variable in it.
         scratch_bytes_ = spec.scratch_bytes;
         concurrent_ = spec.concurrent_kernels ? spec.concurrent_kernels : 1;
-        if (scratch_bytes_ && !size_scratch(info))
-            return false;
+        max_batch_ = fit.max_batch;
+
+        if (scratch_bytes_)
+            applog(LOG_INFO, "Vulkan: '%s' takes %llu MiB of scratch on %s -- "
+                             "%u hashes in flight, %llu KiB each%s", name_,
+                   static_cast<unsigned long long>(
+                       (static_cast<uint64_t>(max_batch_) * fit.per_nonce) >> 20),
+                   info.name.c_str(), max_batch_,
+                   static_cast<unsigned long long>(scratch_bytes_ >> 10),
+                   concurrent_ > 1 ? ", sharing the device" : "");
 
         const VkDeviceSize bytes = kResultWords * sizeof(uint32_t);
         slot_.resize(depth_);
@@ -813,100 +782,6 @@ private:
         }
     }
 
-    // How many invocations this device can afford in flight at once. Sets
-    // max_batch_, within which the time-based tuning below then chooses, and
-    // fails rather than allocating something that will not run: a device
-    // without room should say so at startup and not mid-dispatch.
-    bool size_scratch(const DeviceInfo &info)
-    {
-        if (!info.memory) {
-            applog(LOG_ERR, "Vulkan: '%s' needs %llu bytes of scratch per hash "
-                            "and %s does not report how much memory it has",
-                   name_, static_cast<unsigned long long>(scratch_bytes_),
-                   info.name.c_str());
-            return false;
-        }
-
-        // Not the whole heap: the driver, the command buffers, the result
-        // buffers and -- on a device also driving a display -- a framebuffer
-        // this cannot see all live there. VK_EXT_memory_budget would give a
-        // real answer; this is the honest guess without it.
-        //
-        // A software rasterizer gets far less, because its "device memory" is
-        // the host's RAM and three quarters of that is a swapping machine. It
-        // is there to say whether the kernel is correct, which takes a few
-        // thousand invocations.
-        //
-        // Only a discrete card has memory of its own; every other kind reports
-        // the machine's RAM as device-local, where three quarters is not a slow
-        // allocation but a dead machine. Unknown kinds count as shared, because
-        // guessing wrong that way costs a reboot, not a failed build.
-        const bool soft = info.kind == DeviceKind::Cpu;
-        const bool shares_host_ram = info.kind != DeviceKind::DiscreteGpu;
-        const double share = soft ? 0.15 : shares_host_ram ? 0.25 : 0.75;
-        const uint64_t usable =
-            static_cast<uint64_t>(static_cast<double>(info.memory) * share);
-        const uint64_t ceiling =
-            soft ? (256ull << 20) : shares_host_ram ? (1ull << 30) : ~0ull;
-        uint64_t budget = usable < ceiling ? usable : ceiling;
-
-        // The shared table is already on the device and is not scratch: taken
-        // off the top, before the split, because there is one of it however
-        // many kernels are about to divide what is left.
-        const uint64_t shared = shared_ ? shared_->bytes() : 0;
-        if (shared >= budget) {
-            applog(LOG_ERR, "Vulkan: '%s' has %llu MiB of shared state on %s "
-                            "and no room left for scratch", name_,
-                   static_cast<unsigned long long>(shared >> 20),
-                   info.name.c_str());
-            return false;
-        }
-        budget -= shared;
-
-        // Split with whoever else the caller is about to build. Nothing here
-        // can see them, and a driver that over-commits lets them all succeed
-        // and then loses the device on the first dispatch that touches what it
-        // paged out.
-        budget /= concurrent_;
-
-        // Every dispatch in flight owns a full set of scratchpads, so the depth
-        // is a multiplier on the memory and not just on the latency. And where
-        // several invocations share a nonce they each want their own, so a
-        // nonce costs the scratch of all of its lanes.
-        const uint64_t per_invocation = scratch_bytes_ * depth_;
-        const uint64_t per_nonce = per_invocation * lanes_;
-        uint64_t fits = budget / (per_nonce ? per_nonce : 1);
-
-        if (fits > kMaxBatch)
-            fits = kMaxBatch;
-
-        // Below a workgroup there is nothing to dispatch: the device saying it
-        // cannot run this algorithm, which is a real answer.
-        if (fits < per_group_) {
-            applog(LOG_ERR, "Vulkan: '%s' needs %llu KiB per hash, and %s has "
-                            "room for %llu at a time -- fewer than the %u in a "
-                            "workgroup", name_,
-                   static_cast<unsigned long long>(scratch_bytes_ >> 10),
-                   info.name.c_str(), static_cast<unsigned long long>(fits),
-                   per_group_);
-            return false;
-        }
-
-        // Whole workgroups, so that the last one is not a partial dispatch that
-        // indexes scratch nobody allocated.
-        max_batch_ = static_cast<uint32_t>(fits / per_group_) * per_group_;
-
-        applog(LOG_INFO, "Vulkan: '%s' takes %llu MiB of scratch on %s -- "
-                         "%u hashes in flight, %llu KiB each%s",
-               name_,
-               static_cast<unsigned long long>(
-                   (static_cast<uint64_t>(max_batch_) * per_nonce) >> 20),
-               info.name.c_str(), max_batch_,
-               static_cast<unsigned long long>(scratch_bytes_ >> 10),
-               concurrent_ > 1 ? ", sharing the device" : "");
-        return true;
-    }
-
     void clamp_batch(const DeviceInfo &info)
     {
         // The floor is a count of invocations rather than of nonces, because
@@ -1080,6 +955,176 @@ std::unique_ptr<Kernel> make_vulkan_kernel(VulkanDevice &device,
     if (!kernel->init(device, cache, spec, std::move(shared)))
         return nullptr;
     return kernel;
+}
+
+uint64_t vulkan_table_budget(const DeviceInfo &info)
+{
+    // Nearly the whole card where the card has memory of its own: a 10743 MiB
+    // dataset on a 12 GiB device mines, so refusing it would report this
+    // miner's caution and not the device.
+    //
+    // A quarter of it where that memory is the machine's. The host copy, the
+    // staging buffer and everything else on the box come out of it too: a 3071
+    // MiB table reached 5.3 GB on an 8 GB shared-memory board, and the OOM
+    // killer took six unrelated processes and the desktop session with it.
+    const double share = info.kind == DeviceKind::DiscreteGpu ? 0.90 : 0.25;
+    return static_cast<uint64_t>(static_cast<double>(info.memory) * share);
+}
+
+uint64_t vulkan_scratch_budget(const DeviceInfo &info)
+{
+    // Not the whole heap: the driver, the command buffers, the result buffers
+    // and -- on a device also driving a display -- a framebuffer this cannot
+    // see all live there. VK_EXT_memory_budget would give a real answer; this
+    // is the honest guess without it.
+    //
+    // A software rasterizer gets far less, because its "device memory" is the
+    // host's RAM and three quarters of that is a swapping machine. It is there
+    // to say whether the kernel is correct, which takes a few thousand
+    // invocations.
+    //
+    // Only a discrete card has memory of its own; every other kind reports the
+    // machine's RAM as device-local, where three quarters is not a slow
+    // allocation but a dead machine. Unknown kinds count as shared, because
+    // guessing wrong that way costs a reboot, not a failed build.
+    const bool soft = info.kind == DeviceKind::Cpu;
+    const bool shares_host_ram = info.kind != DeviceKind::DiscreteGpu;
+    const double share = soft ? 0.15 : shares_host_ram ? 0.25 : 0.75;
+    const uint64_t usable =
+        static_cast<uint64_t>(static_cast<double>(info.memory) * share);
+    const uint64_t ceiling =
+        soft ? (256ull << 20) : shares_host_ram ? (1ull << 30) : ~0ull;
+    return usable < ceiling ? usable : ceiling;
+}
+
+bool vulkan_kernel_fit(const DeviceInfo &info, const KernelSpec &spec,
+                       uint64_t shared_bytes, KernelFit *out, char *why,
+                       size_t why_bytes)
+{
+    KernelFit fit;
+
+    // The spec first: a caller that named a depth wants that one and no other,
+    // which is how the tuner runs one kernel at several. Then the option,
+    // validated where it is parsed, so all that is left here is whether it was
+    // given.
+    fit.depth = spec.queue_depth              ? spec.queue_depth
+              : opt_queue_depth > 0           ? static_cast<uint32_t>(opt_queue_depth)
+                                              : kDefaultDepth;
+
+    // The width by the same rule: the spec, then the option, then this device's
+    // default.
+    fit.local_size_x = spec.local_size_x  ? spec.local_size_x
+                     : opt_workgroup > 0  ? static_cast<uint32_t>(opt_workgroup)
+                                          : choose_local_size(info);
+
+    // A workgroup holds whole nonces or the lanes of the last one have nobody
+    // to exchange with. Rounded down rather than refused: the width is swept by
+    // the tuner and asked for on the command line, and this is the nearest
+    // number of invocations that arranges into whole hashes.
+    fit.lanes = spec.lanes ? spec.lanes : 1;
+    if (info.max_invocations && fit.lanes > info.max_invocations) {
+        snprintf(why, why_bytes, "'%s' wants %u invocations per hash and %s "
+                                 "runs %u in a workgroup", spec.name, fit.lanes,
+                 info.name.c_str(), info.max_invocations);
+        return false;
+    }
+    if (fit.lanes > 1) {
+        const uint32_t whole = fit.local_size_x - fit.local_size_x % fit.lanes;
+        fit.local_size_x = whole ? whole : fit.lanes;
+    }
+
+    // And whole subgroups, for a kernel whose lanes exchange through them: a
+    // width that is a multiple of both is a multiple of their least common
+    // multiple, rounded down by the same argument as above.
+    //
+    // A device that will not say what its subgroup is cannot be asked for whole
+    // ones. The algorithm reads the same zero from DeviceInfo and does not offer
+    // such a kernel there, so a zero here is its bug.
+    if (spec.full_subgroups) {
+        const uint32_t step = std::lcm(fit.lanes, info.subgroup_size);
+        if (!step || (info.max_invocations && step > info.max_invocations)) {
+            snprintf(why, why_bytes, "'%s' wants whole subgroups and %s reports "
+                                     "a subgroup of %u against %u invocations",
+                     spec.name, info.name.c_str(), info.subgroup_size,
+                     info.max_invocations);
+            return false;
+        }
+        const uint32_t whole = fit.local_size_x - fit.local_size_x % step;
+        fit.local_size_x = whole ? whole : step;
+    }
+
+    // Nonces per workgroup, which is the unit a dispatch is counted in and the
+    // width only where an invocation is a hash.
+    fit.per_group = fit.local_size_x / fit.lanes;
+    if (!fit.per_group)
+        fit.per_group = 1;
+
+    // A kernel wanting no scratch has nothing left to work out: kMaxBatch and
+    // the time-based tuning, which is the path every compute-bound algorithm
+    // had before scratchpads existed.
+    if (!spec.scratch_bytes) {
+        fit.max_batch = kMaxBatch;
+        if (out)
+            *out = fit;
+        return true;
+    }
+
+    if (!info.memory) {
+        snprintf(why, why_bytes, "'%s' needs %llu bytes of scratch per hash and "
+                                 "%s does not report how much memory it has",
+                 spec.name,
+                 static_cast<unsigned long long>(spec.scratch_bytes),
+                 info.name.c_str());
+        return false;
+    }
+
+    const uint64_t budget = vulkan_scratch_budget(info);
+
+    // The shared table is already on the device and is not scratch: taken off
+    // the top, before the split, because there is one of it however many
+    // kernels are about to divide what is left.
+    if (shared_bytes >= budget) {
+        snprintf(why, why_bytes, "'%s' has %llu MiB of shared state on %s and "
+                                 "no room left for scratch", spec.name,
+                 static_cast<unsigned long long>(shared_bytes >> 20),
+                 info.name.c_str());
+        return false;
+    }
+    uint64_t left = budget - shared_bytes;
+
+    // Split with whoever else the caller is about to build. Nothing here can
+    // see them, and a driver that over-commits lets them all succeed and then
+    // loses the device on the first dispatch that touches what it paged out.
+    left /= spec.concurrent_kernels ? spec.concurrent_kernels : 1;
+
+    // Every dispatch in flight owns a full set of scratchpads, so the depth is
+    // a multiplier on the memory and not just on the latency. And where several
+    // invocations share a nonce they each want their own, so a nonce costs the
+    // scratch of all of its lanes.
+    fit.per_nonce = spec.scratch_bytes * fit.depth * fit.lanes;
+    uint64_t fits = left / (fit.per_nonce ? fit.per_nonce : 1);
+    if (fits > kMaxBatch)
+        fits = kMaxBatch;
+
+    // Below a workgroup there is nothing to dispatch: the device saying it
+    // cannot run this algorithm, which is a real answer.
+    if (fits < fit.per_group) {
+        snprintf(why, why_bytes, "'%s' needs %llu KiB per hash, and %s has room "
+                                 "for %llu at a time -- fewer than the %u in a "
+                                 "workgroup", spec.name,
+                 static_cast<unsigned long long>(spec.scratch_bytes >> 10),
+                 info.name.c_str(), static_cast<unsigned long long>(fits),
+                 fit.per_group);
+        return false;
+    }
+
+    // Whole workgroups, so that the last one is not a partial dispatch that
+    // indexes scratch nobody allocated.
+    fit.max_batch = static_cast<uint32_t>(fits / fit.per_group) * fit.per_group;
+
+    if (out)
+        *out = fit;
+    return true;
 }
 
 }  // namespace vkminer

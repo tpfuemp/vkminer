@@ -26,6 +26,7 @@ const Params kKawpow = {
     /* dagchange     */ 0,
     /* dag_epoch_mul */ 1,
     /* dag_full_off  */ 0,
+    /* max_epoch     */ 700,
     /* seal_seed     */ {                              // rAVENCOINKAWPOW
         0x00000072, 0x00000041, 0x00000056, 0x00000045, 0x0000004e,
         0x00000043, 0x0000004f, 0x00000049, 0x0000004e, 0x0000004b,
@@ -48,6 +49,7 @@ const Params kMeowpow = {
     /* dagchange     */ 110,
     /* dag_epoch_mul */ 4,
     /* dag_full_off  */ 0,
+    /* max_epoch     */ 400,
     /* seal_seed     */ {                              // MEOWCOINMEOWPOW
         0x0000004d, 0x00000045, 0x0000004f, 0x00000057, 0x00000043,
         0x0000004f, 0x00000049, 0x0000004e, 0x0000004d, 0x00000045,
@@ -70,6 +72,7 @@ const Params kEvrprogpow = {
     /* dagchange     */ 0,
     /* dag_epoch_mul */ 1,
     /* dag_full_off  */ 256,
+    /* max_epoch     */ 260,
     /* seal_seed     */ {                              // EVRMORE-PROGPOW
         0x00000045, 0x00000056, 0x00000052, 0x0000004d, 0x0000004f,
         0x00000052, 0x00000045, 0x0000002d, 0x00000050, 0x00000052,
@@ -98,6 +101,7 @@ const Params kFiropow = {
     /* dagchange     */ 0,
     /* dag_epoch_mul */ 1,
     /* dag_full_off  */ 64,
+    /* max_epoch     */ 1350,
     /* seal_seed     */ {                              // state[10] and state[18]
         0x00000001, 0, 0, 0, 0, 0, 0, 0, 0x80008081,
         0, 0, 0, 0, 0, 0,
@@ -123,6 +127,7 @@ const Params kMeraki = {
     /* dagchange     */ 0,
     /* dag_epoch_mul */ 1,
     /* dag_full_off  */ 0,
+    /* max_epoch     */ 80,
     /* seal_seed     */ {                              // rAVENCOINKAWPOW
         0x00000072, 0x00000041, 0x00000056, 0x00000045, 0x0000004e,
         0x00000043, 0x0000004f, 0x00000049, 0x0000004e, 0x0000004b,
