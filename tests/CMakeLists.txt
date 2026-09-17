@@ -27,11 +27,28 @@ add_executable(api_model_test api_model_test.cpp
     "${CMAKE_SOURCE_DIR}/src/api/api_control.cpp"
     "${CMAKE_SOURCE_DIR}/backends/backend.cpp")
 target_link_libraries(api_model_test PRIVATE
-    vkminer_jansson vkminer_curl vkminer_warnings Threads::Threads)
+    vkminer_jansson vkminer_curl vkminer_sensors vkminer_warnings
+    Threads::Threads)
 target_include_directories(api_model_test PRIVATE
     "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/src" "${CMAKE_SOURCE_DIR}/compat"
     "${CMAKE_BINARY_DIR}/generated")
 add_test(NAME api_model_test COMMAND api_model_test)
+
+# The sensor readings, against a sysfs tree the test writes. Linux only, for
+# the reason the reader is: hwmon is a kernel interface, and the Windows half
+# of that module is NVML, which cannot be tested without an NVIDIA card in the
+# machine. So what this covers is the half that can be checked anywhere -- the
+# units, the join and the silences -- and the half it does not cover is stated
+# rather than faked.
+if(NOT WIN32)
+    add_executable(sensors_test sensors_test.cpp
+        "${CMAKE_SOURCE_DIR}/backends/backend.cpp")
+    target_link_libraries(sensors_test PRIVATE
+        vkminer_sensors vkminer_warnings)
+    target_include_directories(sensors_test PRIVATE
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/src")
+    add_test(NAME sensors_test COMMAND sensors_test)
+endif()
 
 # The HTTP transport's parser and router, with no socket and no miner: the
 # fixtures are buffers, which is what api_http_parse() was written as a pure

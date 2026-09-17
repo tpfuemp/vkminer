@@ -147,8 +147,19 @@ struct DeviceSnapshot {
     uint32_t vendor_id = 0;
     uint32_t device_id = 0;
 
-    // Vulkan exposes no telemetry, so these stay empty rather than becoming
-    // zeroes a dashboard would plot as a cold, idle, unpowered card.
+    // Where the card sits on the bus, which is how the readings below were
+    // found. Empty where the driver would not say -- see backends/backend.h.
+    std::optional<int> bus_id;
+
+    // Whether a sensor source answered for this device at all: the difference
+    // between a card with no telemetry on this machine and one that has it and
+    // is momentarily not reporting a particular reading. Otherwise both are the
+    // same empty field.
+    bool monitoring = false;
+
+    // Read from NVML or hwmon, never from Vulkan, and joined to this device by
+    // the address above -- see src/core/sensors.h. Empty rather than zero,
+    // which would plot as a cold idle card.
     std::optional<double> temp_c;
     std::optional<int> fan_pct;
     std::optional<int> fan_rpm;

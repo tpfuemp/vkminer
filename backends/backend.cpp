@@ -36,4 +36,19 @@ std::string version_string(uint32_t version)
     return buf;
 }
 
+std::string pci_address(const DeviceInfo &info)
+{
+    if (!info.pci)
+        return std::string();
+
+    // Lower case, domain padded to four digits: the spelling Linux gives the
+    // directories under /sys/bus/pci/devices, and the one NVML documents for
+    // nvmlDeviceGetHandleByPciBusId. Both consumers read this string back, so
+    // the format is part of the interface rather than a display choice.
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%04x:%02x:%02x.%x", info.pci_domain,
+                  info.pci_bus, info.pci_device, info.pci_function);
+    return buf;
+}
+
 }  // namespace vkminer

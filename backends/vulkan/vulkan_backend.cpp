@@ -415,6 +415,14 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
     maintenance3.sType =
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
 
+    // Where the card sits on the bus, which is not a Vulkan concern and is
+    // queried anyway: it is the one name this device and a temperature sensor
+    // both answer to. Never core, so it is asked for only where the extension
+    // is advertised, and a device that does not advertise it simply reports no
+    // readings later rather than being joined to the wrong card's.
+    VkPhysicalDevicePCIBusInfoPropertiesEXT pci{};
+    pci.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT;
+
     VkPhysicalDeviceProperties2 props{};
     props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     props.pNext = &subgroup;
@@ -425,6 +433,16 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
         || has_extension(exts, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
     if (have_driver_props)
         maintenance3.pNext = &driver;
+
+    const bool have_pci_info =
+        has_extension(exts, VK_EXT_PCI_BUS_INFO_EXTENSION_NAME);
+    if (have_pci_info) {
+        // Onto the end of whichever chain the branch above built.
+        if (have_driver_props)
+            driver.pNext = &pci;
+        else
+            maintenance3.pNext = &pci;
+    }
 
     vkGetPhysicalDeviceProperties2(handle, &props);
 
@@ -485,6 +503,14 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
     out->api_version = base.apiVersion;
     out->driver_version = base.driverVersion;
     out->memory = local_bytes;
+
+    out->pci = have_pci_info;
+    if (have_pci_info) {
+        out->pci_domain = pci.pciDomain;
+        out->pci_bus = pci.pciBus;
+        out->pci_device = pci.pciDevice;
+        out->pci_function = pci.pciFunction;
+    }
 
     if (have_driver_props && driver.driverName[0]) {
         out->driver = driver.driverName;

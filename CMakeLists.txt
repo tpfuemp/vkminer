@@ -179,6 +179,22 @@ add_library(vkminer_paths STATIC src/core/paths.cpp)
 target_include_directories(vkminer_paths PUBLIC src)
 target_link_libraries(vkminer_paths PRIVATE vkminer_warnings)
 
+# ----------------------------------------------------------------- sensors
+#
+# Temperature, power, fan and clock. Its own library because nothing else in
+# the tree wants what it needs: it is the one place that opens a shared library
+# by name at run time, and so the one place that needs libdl.
+#
+# It links no vendor SDK and there is nothing to find at configure time. NVML is
+# opened by name if the machine happens to have it, which keeps the promise that
+# this builds against a Vulkan header set and nothing else.
+add_library(vkminer_sensors STATIC src/core/sensors.cpp)
+target_include_directories(vkminer_sensors PUBLIC src)
+target_link_libraries(vkminer_sensors PRIVATE vkminer_warnings)
+if(NOT WIN32)
+    target_link_libraries(vkminer_sensors PUBLIC ${CMAKE_DL_LIBS})
+endif()
+
 # ----------------------------------------------------- inherited C sources
 #
 # Deliberately not linked against vkminer_warnings. This is cpuminer-opt's
@@ -393,7 +409,8 @@ target_include_directories(vkminer PRIVATE
     src src/api "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer PRIVATE
     vkminer_api_shared vkminer_backends vkminer_control vkminer_tune_cache
-    vkminer_warnings vkminer_inherited vkminer_paths Threads::Threads)
+    vkminer_warnings vkminer_inherited vkminer_paths vkminer_sensors
+    Threads::Threads)
 target_compile_definitions(vkminer PRIVATE
     VKMINER_VERSION="${PROJECT_VERSION}-dev")
 

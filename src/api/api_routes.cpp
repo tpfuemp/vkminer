@@ -258,9 +258,10 @@ json_t *device_json(const vkminer::DeviceSnapshot &d)
 
     // The sub-object is shared with a CUDA miner, so most of it is a vendor
     // library's answers and stays null here. `monitoring` is the field that
-    // says so: false means nothing above it will ever be populated, which is a
-    // different statement from a card that is momentarily not reporting.
-    json_object_set_new(gpu, "bus_id", json_null());
+    // says which: false means nothing above it will ever be populated on this
+    // machine, which is a different statement from a card that is momentarily
+    // not reporting one attribute.
+    json_object_set_new(gpu, "bus_id", or_null(d.bus_id));
     json_object_set_new(gpu, "sm", json_null());
     json_object_set_new(gpu, "mem_bytes", u64(d.memory_bytes));
     json_object_set_new(gpu, "pstate", json_null());
@@ -272,7 +273,7 @@ json_t *device_json(const vkminer::DeviceSnapshot &d)
     json_object_set_new(gpu, "bios", json_null());
     json_object_set_new(gpu, "nvml_id", json_null());
     json_object_set_new(gpu, "nvapi_id", json_null());
-    json_object_set_new(gpu, "monitoring", json_false());
+    json_object_set_new(gpu, "monitoring", json_boolean(d.monitoring));
     json_object_set_new(o, "gpu", gpu);
 
     // No `cpu` sub-object beside it: a device carries exactly one typed

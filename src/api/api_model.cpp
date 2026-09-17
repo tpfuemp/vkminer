@@ -11,6 +11,7 @@
 
 #include "api/api_control.h"
 #include "core/miner.h"
+#include "core/sensors.h"
 #include "scheduler/candidate_log.h"
 #include "scheduler/worker.h"
 #include "tune.h"
@@ -242,6 +243,37 @@ void collect_devices(std::vector<DeviceSnapshot> *out)
                 one.vulkan.kernel = tuning.variant;
         }
 
+        // What the card is doing physically, from outside Vulkan entirely and
+        // joined to this device by its bus address -- which is why a device
+        // that would not report one, a software rasterizer included, keeps the
+        // empty fields it had before.
+        if (info.pci)
+            one.bus_id = static_cast<int>(info.pci_bus);
+
+        const DeviceSensors sensors = device_sensors(pci_address(info));
+        one.temp_c = sensors.temp_c;
+        one.fan_pct = sensors.fan_pct;
+        one.fan_rpm = sensors.fan_rpm;
+        one.clock_mhz = sensors.clock_mhz;
+        one.mem_clock_mhz = sensors.mem_clock_mhz;
+        one.power_mw = sensors.power_mw;
+        one.power_limit_mw = sensors.power_limit_mw;
+
+        // Any one reading is enough: a source that answered about this card is
+        // monitoring it, whichever attributes that particular driver publishes.
+        one.monitoring = sensors.temp_c || sensors.fan_pct || sensors.fan_rpm
+                      || sensors.clock_mhz || sensors.mem_clock_mhz
+                      || sensors.power_mw || sensors.power_limit_mw;
+
+        // kH/s per watt is hashes per millijoule, so the two thousands cancel
+        // and this is the plain ratio. Derived here rather than by whoever
+        // renders it, so that /status and /metrics cannot disagree about it --
+        // and only where both halves are real: a card reporting 0 mW is a
+        // driver declining to answer, not a card drawing nothing.
+        if (one.power_mw && *one.power_mw > 0 && one.hashrate_hs > 0.)
+            one.hashrate_per_watt_khs =
+                one.hashrate_hs / static_cast<double>(*one.power_mw);
+
         out->push_back(one);
     }
 }
@@ -254,6 +286,11 @@ void collect_system(SystemSnapshot *out)
         out->driver = (*g_devices)[0].driver;
 
     out->cpus = static_cast<int>(std::thread::hardware_concurrency());
+
+    // Rounded, because the field is an integer and the sensor's third decimal
+    // is not a fact about the processor.
+    if (const std::optional<double> temp = cpu_temperature_c())
+        out->cpu_temp_c = static_cast<int>(*temp + 0.5);
 }
 
 void collect_pool(int index, PoolSnapshot *out)

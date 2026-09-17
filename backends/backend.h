@@ -28,6 +28,12 @@ const char *device_kind_name(DeviceKind kind);
 // "1.3.255", from the packed form the version fields below use.
 std::string version_string(uint32_t version);
 
+struct DeviceInfo;
+
+// "0000:01:00.0", or empty where the device reported no bus address. The
+// spelling matters -- see the definition.
+std::string pci_address(const DeviceInfo &info);
+
 struct DeviceInfo {
     int         index = -1;   // as listed by --device-list, and as --devices selects
     std::string name;         // what the driver calls it
@@ -41,6 +47,18 @@ struct DeviceInfo {
     uint32_t device_id      = 0;
     uint32_t api_version    = 0;
     uint32_t driver_version = 0;
+
+    // Where the card sits on the bus. Nothing in this axis uses it; it is here
+    // because it is the only name a Vulkan device and a temperature sensor both
+    // know, vendor_id and device_id naming a *model* rather than a card. `pci`
+    // is false where the driver would not say -- every software rasterizer,
+    // among others -- so that the absence is not a 0000:00:00.0 that would read
+    // as a real address.
+    bool     pci          = false;
+    uint32_t pci_domain   = 0;
+    uint32_t pci_bus      = 0;
+    uint32_t pci_device   = 0;
+    uint32_t pci_function = 0;
 
     // What a kernel has to be built against. The scheduler sizes dispatches
     // from the limits; an algorithm picks a variant from the features.

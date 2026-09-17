@@ -360,8 +360,12 @@ void test_devices()
     expect_true("device 0 int64", devices[0].vulkan.int64);
     expect_false("device 1 int64", devices[1].vulkan.int64);
 
-    // Vulkan exposes none of these, so they are absent. A zero here is a card
-    // a dashboard would draw as cold, still and unpowered.
+    // These come from outside Vulkan and are joined to a device by its bus
+    // address. This one reports none -- as a software rasterizer does, and as
+    // any driver without VK_EXT_pci_bus_info does -- so there is nothing to
+    // join it to and the fields stay absent. A zero here is a card a dashboard
+    // would draw as cold, still and unpowered; a reading here would be this
+    // machine's own card answering for a device that does not exist.
     expect_empty("devices[].temp_c", devices[0].temp_c);
     expect_empty("devices[].fan_pct", devices[0].fan_pct);
     expect_empty("devices[].power_mw", devices[0].power_mw);

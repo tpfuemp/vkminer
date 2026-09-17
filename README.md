@@ -93,6 +93,9 @@ Two scripts wrap those, for the flags that are tedious to retype:
 On 64-bit ARM, build natively on the target. No cross-compilation is involved and no extra
 flags are needed.
 
+To install what you built, or to put it on another machine, see [INSTALL.md](INSTALL.md).
+`./package.sh` assembles a release archive from a build directory.
+
 ## Running
 
 List the GPUs vkminer can see, and check that the one you want is not a software
@@ -182,6 +185,22 @@ Two numbers a reader should not over-read. The rate printed by the sweep is a ra
 benchmark: it is taken in the first seconds of load, which on a thermally capped card are its
 best. And a candidate only displaces the default if it beats it by more than the sweep's own
 rounds disagreed with each other, so on a noisy device the tuner will decline to move at all.
+
+### Monitoring
+
+`--api-bind` serves a read-only JSON API and a Prometheus `/metrics` endpoint. Beside the
+hashrate and share counts it reports each card's temperature, power draw, fan and clocks.
+
+Vulkan exposes none of that -- it describes what a device can compute and says nothing about
+how hot it is -- so the readings are taken from whatever the machine has: NVIDIA's NVML where
+its driver is installed, and on Linux the kernel's `hwmon` tree, which is what covers AMD and
+Intel cards. Neither is a build dependency; NVML is opened by name at run time if it is there
+at all.
+
+A card is matched to its sensors by PCI address, which is the only name both sides know. A
+driver that does not report one -- a software rasterizer, for instance -- gets no readings,
+and each field then reads `null` rather than `0`: a zero would draw as a cold, idle,
+unpowered card. `gpu.monitoring` on each device says which of the two it is.
 
 ## Performance
 
