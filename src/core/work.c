@@ -502,8 +502,8 @@ int share_result( int result, uint32_t id, struct work *work,
      if ( reason )
         stale = strstr( reason, "job" ) || strstr( reason, "Job" );
      else if ( work )
-        stale =  work->data[ STD_NTIME_INDEX ]
-             != g_work.data[ STD_NTIME_INDEX ];
+        stale =  work->data[ opt_ntime_index ]
+             != g_work.data[ opt_ntime_index ];
      if ( stale )
      {
         stale_share_count++;
@@ -583,8 +583,8 @@ void std_le_build_stratum_request( char *req, struct work *work )
    unsigned char *xnonce2str;
    uint32_t ntime,       nonce;
    char     ntimestr[9], noncestr[9];
-   le32enc( &ntime, work->data[ STD_NTIME_INDEX ] );
-   le32enc( &nonce, work->data[ STD_NONCE_INDEX ] );
+   le32enc( &ntime, work->data[ opt_ntime_index ] );
+   le32enc( &nonce, work->data[ opt_nonce_index ] );
    bin2hex( ntimestr, (char*)(&ntime), sizeof(uint32_t) );
    bin2hex( noncestr, (char*)(&nonce), sizeof(uint32_t) );
    xnonce2str = abin2hex( work->xnonce2, work->xnonce2_len );

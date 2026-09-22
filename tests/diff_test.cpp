@@ -165,6 +165,35 @@ const unsigned char kHeader[80] = {
     0x42, 0xa1, 0x46, 0x95,
 };
 
+// And one for the algorithms whose header is not 80 bytes: LBRY block 1300000,
+// claimtrie root and all. A real header again, and for a second reason here --
+// an algorithm reads every word of the header it is given, so a constant that
+// stops short is read past the end of. Both sides then agree about whatever is
+// on the stack and the test passes, with a candidate count that moves between
+// runs as the only sign.
+const unsigned char kHeader112[112] = {
+    0x00, 0x00, 0x00, 0x20,
+    0x9d, 0x72, 0xc5, 0xdb, 0x07, 0xf6, 0xf5, 0xff,
+    0xae, 0xd5, 0x77, 0x6b, 0xac, 0x27, 0xb8, 0xcf,
+    0xdb, 0xe5, 0x7c, 0x45, 0xc5, 0xf7, 0xcc, 0x4e,
+    0x46, 0x5d, 0x24, 0xf3, 0x41, 0x11, 0xb3, 0x96,
+    0x83, 0xf2, 0x21, 0xb3, 0x48, 0xb7, 0x0f, 0x79,
+    0xa9, 0x10, 0x5d, 0x62, 0xba, 0x50, 0xdf, 0x94,
+    0xc6, 0xb0, 0x18, 0x20, 0x95, 0x9c, 0x88, 0x16,
+    0xa0, 0x94, 0xc6, 0x46, 0x35, 0x7e, 0x87, 0xcc,
+    0x1a, 0xed, 0x82, 0xca, 0x97, 0xbe, 0xd8, 0x7f,
+    0x5e, 0x85, 0x57, 0xff, 0x43, 0xa3, 0x8e, 0x33,
+    0x0b, 0xda, 0xcd, 0xca, 0xba, 0xd2, 0x7f, 0x49,
+    0xd4, 0xfa, 0x49, 0x3a, 0xe9, 0x04, 0xf5, 0x2e,
+    0x51, 0x23, 0xd2, 0x63,
+    0xef, 0xc8, 0x00, 0x1a,
+    0x59, 0xa3, 0xd0, 0x0e,
+};
+
+// Room for the longest of them, so that one array serves every algorithm and
+// the length that varies is how much of it gets filled.
+constexpr size_t kMaxHeaderWords = sizeof kHeader112 / 4;
+
 void print_hash(const char *label, const uint32_t hash[8])
 {
     // Most significant word first, which is how the comparison reads it and
@@ -493,9 +522,26 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     // read of the wire. The same conversion the miner makes on the way in, so
     // that what is under test is the shader and not this file's idea of a
     // header.
-    uint32_t header[20];
-    for (size_t i = 0; i < 20; i++)
-        header[i] = be32dec(kHeader + i * 4);
+    //
+    // Chosen by the algorithm's own header length rather than fixed at 80: a
+    // header shorter than the one the algorithm reads is a header partly made
+    // of whatever this function's frame held, and the reference reads the same
+    // bytes, so the disagreement this test looks for cannot arise from it.
+    const unsigned char *wire;
+    switch (algo.header_bytes()) {
+    case sizeof kHeader:    wire = kHeader;    break;
+    case sizeof kHeader112: wire = kHeader112; break;
+    default:
+        fail("%s reads a %u-byte header and this test has no constant that "
+             "long", algo.name(),
+             static_cast<unsigned>(algo.header_bytes()));
+        return false;
+    }
+
+    uint32_t header[kMaxHeaderWords];
+    const size_t words = algo.header_bytes() / 4;
+    for (size_t i = 0; i < words; i++)
+        header[i] = be32dec(wire + i * 4);
 
     const uint32_t chunk = chunk_for(*kernel);
 

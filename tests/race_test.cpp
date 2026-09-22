@@ -115,6 +115,11 @@ constexpr uint32_t kCrossNonces = 100000;
 // Block 125552's header, as it went over the wire. A real header rather than a
 // pattern, so the words the shader schedules are the shape of the thing it will
 // be given in earnest.
+//
+// An algorithm whose header is shorter takes the first n bytes, which is no
+// longer that block and does not need to be: this file asks whether a dispatch
+// returns the same answers twice, and any header produces answers. What it may
+// not do is make bytes up past the end -- see kHeaderLong.
 const unsigned char kHeader[80] = {
     0x01, 0x00, 0x00, 0x00,
     0x81, 0xcd, 0x02, 0xab, 0x7e, 0x56, 0x9e, 0x8b,
@@ -128,6 +133,34 @@ const unsigned char kHeader[80] = {
     0xc7, 0xf5, 0xd7, 0x4d,
     0xf2, 0xb9, 0x44, 0x1a,
     0x42, 0xa1, 0x46, 0x95,
+};
+
+// LBRY block 1300000's header, for the algorithms whose header is longer than
+// Bitcoin's. Also real, and for a sharper reason than the one above: the bytes
+// past 80 are a claimtrie root, and there is no padding this file could invent
+// that would be one. A header built by zero-filling would still race the same
+// way, but every digest in the run would be of something no chain ever hashed,
+// and a kernel that quietly stopped reading those words would look correct.
+//
+// Kept separate rather than used for everything, because eighty bytes of it
+// would be a prefix of a claimtrie header rather than block 125552.
+const unsigned char kHeaderLong[112] = {
+    0x00, 0x00, 0x00, 0x20,
+    0x9d, 0x72, 0xc5, 0xdb, 0x07, 0xf6, 0xf5, 0xff,
+    0xae, 0xd5, 0x77, 0x6b, 0xac, 0x27, 0xb8, 0xcf,
+    0xdb, 0xe5, 0x7c, 0x45, 0xc5, 0xf7, 0xcc, 0x4e,
+    0x46, 0x5d, 0x24, 0xf3, 0x41, 0x11, 0xb3, 0x96,
+    0x83, 0xf2, 0x21, 0xb3, 0x48, 0xb7, 0x0f, 0x79,
+    0xa9, 0x10, 0x5d, 0x62, 0xba, 0x50, 0xdf, 0x94,
+    0xc6, 0xb0, 0x18, 0x20, 0x95, 0x9c, 0x88, 0x16,
+    0xa0, 0x94, 0xc6, 0x46, 0x35, 0x7e, 0x87, 0xcc,
+    0x1a, 0xed, 0x82, 0xca, 0x97, 0xbe, 0xd8, 0x7f,
+    0x5e, 0x85, 0x57, 0xff, 0x43, 0xa3, 0x8e, 0x33,
+    0x0b, 0xda, 0xcd, 0xca, 0xba, 0xd2, 0x7f, 0x49,
+    0xd4, 0xfa, 0x49, 0x3a, 0xe9, 0x04, 0xf5, 0x2e,
+    0x51, 0x23, 0xd2, 0x63,
+    0xef, 0xc8, 0x00, 0x1a,
+    0x59, 0xa3, 0xd0, 0x0e,
 };
 
 // A target this batch size meets about kWantCandidates times. The digest words
@@ -407,9 +440,19 @@ bool run_kernel(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
 
     // struct work's spelling of the header: one host-order word per big-endian
     // read of the wire, which is the conversion the miner makes on the way in.
-    uint32_t header[20];
-    for (size_t i = 0; i < 20; i++)
-        header[i] = be32dec(kHeader + i * 4);
+    //
+    // Sized by the algorithm and not by either constant above. prepare() reads
+    // every word of it, so a fixed-length array here is read past its end by
+    // anything with a longer header -- and the bytes it finds there are stack,
+    // which is stable enough for the dispatch and the re-check to disagree
+    // about only sometimes. That reads as a failed race check.
+    const size_t words = algo.header_bytes() / 4;
+    const unsigned char *wire =
+        algo.header_bytes() > sizeof kHeader ? kHeaderLong : kHeader;
+
+    std::vector<uint32_t> header(words, 0);
+    for (size_t i = 0; i < words; i++)
+        header[i] = be32dec(wire + i * 4);
 
     // Once, not per dispatch: every dispatch below is the same header, which is
     // the whole point of the file, so the table and the program are the same
@@ -418,13 +461,13 @@ bool run_kernel(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
     // is a gigabyte written by a kernel -- so it is said before it starts.
     std::printf("     preparing the kernel for this header\n");
     std::fflush(stdout);
-    if (!kernel->prepare_state(algo.state_key(header)) ||
-        !kernel->prepare_program(algo.program_key(header))) {
+    if (!kernel->prepare_state(algo.state_key(header.data())) ||
+        !kernel->prepare_program(algo.program_key(header.data()))) {
         fail("the kernel could not prepare itself for this header");
         return false;
     }
 
-    warm_up(*kernel, header);
+    warm_up(*kernel, header.data());
 
     // Read once and used for every repetition. It must not be re-read inside
     // the loop: a dispatch that changed size partway through would make the
@@ -452,7 +495,7 @@ bool run_kernel(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
 
     while (collected < repetitions) {
         while (submitted < repetitions && inflight < depth) {
-            if (!kernel->dispatch(header, target, kNonceBase, batch)) {
+            if (!kernel->dispatch(header.data(), target, kNonceBase, batch)) {
                 fail("dispatch of %u nonces was refused with %u in flight",
                      batch, inflight);
                 return false;
@@ -472,7 +515,7 @@ bool run_kernel(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
         const std::vector<Candidate> results = sorted_results(got, n);
         char what[32];
         std::snprintf(what, sizeof what, "repetition %d", collected);
-        if (!all_real(algo, header, target, kNonceBase, batch, results, what))
+        if (!all_real(algo, header.data(), target, kNonceBase, batch, results, what))
             return false;
 
         if (collected == 0)
@@ -503,7 +546,7 @@ bool run_kernel(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
         const char *name = spec.variant && spec.variant[0] ? spec.variant : "";
         uint32_t cross_target[8];
         target_for(kCrossNonces, cross_target);
-        if (!cross_pass(*kernel, algo, header, cross_target, name, cross))
+        if (!cross_pass(*kernel, algo, header.data(), cross_target, name, cross))
             return false;
         std::printf("     %u nonces from 0x%s, target %08x, %u candidate(s)\n",
                     kCrossNonces, vkminer::nonce_hex(kNonceBase).c_str(),
@@ -639,6 +682,16 @@ int main(int argc, char *argv[])
         std::printf("FAIL no algorithm called '%s'\n", name);
         return 1;
     }
+    // The two headers above are all the wire bytes this file has. Refusing is
+    // the point: a run that padded a longer one would be racing digests of
+    // something no chain ever hashed, and would pass whatever it was told.
+    if (algo->header_bytes() > sizeof kHeaderLong) {
+        std::printf("FAIL '%s' reads a %u-byte header, and this test has no "
+                    "block that long to give it\n", algo->name(),
+                    static_cast<unsigned>(algo->header_bytes()));
+        return 1;
+    }
+
     if (kawpow)
         std::printf("%s: against %s\n", name,
                     device_dag ? "the whole of the epoch's DAG, generated on "

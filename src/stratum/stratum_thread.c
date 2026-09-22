@@ -72,14 +72,60 @@ void std_build_block_header( struct work* g_work, uint32_t version,
    g_work->data[31] = 0x00000280;
 }
 
+/* The same header with a 32-byte claimtrie root between the merkle root and
+ * ntime, which is LBRY's whole departure from Bitcoin's block header.
+ *
+ * The claim is laid the way prevhash is, le32dec per word, and for the same
+ * reason: both are chain hashes the pool read out of its node in display
+ * order, and Stratum sends such a hash word-swapped. The merkle root is the
+ * odd one out, be32dec, because the miner computed it here out of the coinbase
+ * it built, so it is already the header's own bytes. Laying the claim that way
+ * too mines a header no pool can rebuild: the share beats its target here and
+ * comes back rejected as low difficulty.
+ *
+ * The two trailing words are the SHA-256 padding for a 112-byte message rather
+ * than an 80-byte one. Nothing here hashes out of that buffer -- the shader
+ * pads for itself -- but a header that says it is 80 bytes long while being
+ * 112 is read by the next person and believed.  */
+void lbry_build_block_header( struct work* g_work, uint32_t version,
+       uint32_t *prevhash, uint32_t *merkle_tree, const uchar *claim,
+       uint32_t ntime, uint32_t nbits )
+{
+   int i;
+
+   memset( g_work->data, 0, sizeof(g_work->data) );
+   g_work->data[0] = version;
+
+   if ( have_stratum ) for ( i = 0; i < 8; i++ )
+         g_work->data[ 1+i ] = le32dec( prevhash + i );
+   else for (i = 0; i < 8; i++)
+         g_work->data[ 8-i ] = le32dec( prevhash + i );
+   for ( i = 0; i < 8; i++ )
+      g_work->data[ 9+i ] = be32dec( merkle_tree + i );
+   for ( i = 0; i < 8; i++ )
+      g_work->data[ LBRY_CLAIM_INDEX + i ] = le32dec( claim + i*4 );
+   g_work->data[ LBRY_NTIME_INDEX ] = ntime;
+   g_work->data[ LBRY_NBITS_INDEX ] = nbits;
+
+   g_work->data[28] = 0x80000000;
+   g_work->data[31] = 0x00000380;
+}
+
 void std_build_extraheader( struct work* g_work, struct stratum_ctx* sctx )
 {
    uchar merkle_tree[64] = { 0 };
 
    sha256d_gen_merkle_root( (char*)merkle_tree, sctx );
-   std_build_block_header( g_work, le32dec( sctx->job.version ),
-          (uint32_t*) sctx->job.prevhash, (uint32_t*) merkle_tree,
-          le32dec( sctx->job.ntime ), le32dec(sctx->job.nbits) );
+
+   if ( opt_stratum_dialect == STRATUM_LBRY )
+      lbry_build_block_header( g_work, le32dec( sctx->job.version ),
+             (uint32_t*) sctx->job.prevhash, (uint32_t*) merkle_tree,
+             sctx->job.extra,
+             le32dec( sctx->job.ntime ), le32dec( sctx->job.nbits ) );
+   else
+      std_build_block_header( g_work, le32dec( sctx->job.version ),
+             (uint32_t*) sctx->job.prevhash, (uint32_t*) merkle_tree,
+             le32dec( sctx->job.ntime ), le32dec(sctx->job.nbits) );
 }
 
 /* Rebuild `work` on the job it already holds, with `counter` as its
@@ -198,7 +244,7 @@ static void stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
       /* nbits_to_diff uses the Bitcoin difficulty-1 base; opt_target_factor
        * then converts to the pool's scale. It wants the exponent in the compact
        * word's low byte, which is where the standard header carries it. */
-      net_diff = nbits_to_diff( g_work->data[ STD_NBITS_INDEX ] )
+      net_diff = nbits_to_diff( g_work->data[ opt_nbits_index ] )
                * opt_target_factor;
 
       diff_to_hash( g_work->target, g_work->targetdiff );

@@ -74,7 +74,7 @@ add_test(NAME api_http_test COMMAND api_http_test)
 
 # First-party, so the project's warning flags apply here too.
 add_executable(sha256_kat sha256_kat.c)
-target_link_libraries(sha256_kat PRIVATE vkminer_sha256 vkminer_warnings)
+target_link_libraries(sha256_kat PRIVATE vkminer_hashes vkminer_warnings)
 add_test(NAME sha256_kat COMMAND sha256_kat)
 
 # The same question one level up: not whether SHA-256 is right, but whether the
@@ -202,10 +202,16 @@ if(Python3_Interpreter_FOUND)
     # dialect. stratum_kawpow_kat proves the parsing without a socket; this
     # proves the miner gets there with one.
     #
+    # The third dialect is lbry's, which is Bitcoin's with a claimtrie root in
+    # the job: one case reads it, and one serves a job without it, which the
+    # miner has to refuse rather than fill in -- a header with 32 zero bytes
+    # where a consensus value belongs mines perfectly and is rejected by every
+    # pool.
+    #
     # Runs on the null backend, so it needs no GPU and finds no shares; add
     # --backend vulkan --require-shares by hand for the submit path. Kept out of
     # the slow label because a dialect regression should show up in the fast
-    # suite, at the cost of half a minute.
+    # suite, at the cost of a minute.
     add_test(NAME dialect COMMAND ${Python3_EXECUTABLE}
         "${CMAKE_CURRENT_SOURCE_DIR}/dialect_test.py"
         --miner "$<TARGET_FILE:vkminer>" --backend null --seconds 10)
@@ -459,6 +465,21 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_sha3t32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # The first algorithm here whose header is not 80 bytes. Its chain of five
+    # hashes puts three conventions in one kernel -- SHA-2 big-endian either
+    # side of a little-endian RIPEMD-160 -- and a swap missed at one of those
+    # two boundaries is a digest that looks entirely reasonable, so a hundred
+    # thousand nonces against the host reference is what says otherwise.
+    add_test(NAME diff_test_lbry COMMAND diff_test lbry 100000)
+    set_tests_properties(diff_test_lbry
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # And its 2x32 module, for the reason sha3t's runs: SHA-512's lane is
+    # 64 bits, so the two shaders are the same text over two lane types.
+    add_test(NAME diff_test_lbry32 COMMAND diff_test lbry 100000 --no-int64)
+    set_tests_properties(diff_test_lbry32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a
@@ -570,6 +591,13 @@ if(TARGET vkminer_shaders)
     set_tests_properties(race_test_kawpow
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 LABELS slow)
 
+    # And for lbry, which carries the cross-kernel comparison of its two
+    # modules as sha3t's arm does -- and which is the only test here that
+    # dispatches a 112-byte header at full occupancy.
+    add_test(NAME race_test_lbry COMMAND race_test lbry 8)
+    set_tests_properties(race_test_lbry
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
     # The negative half of the known-answer test, perturbing the device rather
     # than the host reference. Cheap -- a couple of dozen single-nonce dispatches
     # -- so it is not labelled slow and runs on a software rasterizer too.
@@ -596,6 +624,18 @@ if(TARGET vkminer_shaders)
 
     add_test(NAME negative_kat_sha3t32 COMMAND negative_kat sha3t --no-int64)
     set_tests_properties(negative_kat_sha3t32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Both of lbry's, and here the perturbed word matters more than usual: a
+    # header word past 19 exists on no other algorithm in this suite, so these
+    # are the only runs in which a kernel that read the claimtrie root as
+    # padding would be caught.
+    add_test(NAME negative_kat_lbry COMMAND negative_kat lbry)
+    set_tests_properties(negative_kat_lbry
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_lbry32 COMMAND negative_kat lbry --no-int64)
+    set_tests_properties(negative_kat_lbry32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

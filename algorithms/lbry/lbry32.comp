@@ -1,0 +1,20 @@
+// lbry with each 64-bit SHA-512 lane held as two 32-bit words.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The only kernel every device without shaderInt64 can run -- and not merely a
+// debug path: on the 3060 sha3t's equivalent module is 28% faster than its
+// 64-bit one, because Ampere has no 64-bit integer ALU. Which of the two runs
+// is a measurement the tuner makes, not a conclusion drawn from a feature bit.
+//
+// `--no-int64` is how this gets tested on a device that does report the
+// feature: it withholds the feature at device creation, so a wrong module
+// choice is a validation error rather than a silent pass.
+//
+// The kernel is the same text lbry.comp compiles; the macro that file defines
+// and this one does not is the only difference.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "algorithms/lbry/lbry_kernel.glsl"

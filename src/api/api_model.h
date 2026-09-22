@@ -128,7 +128,9 @@ struct VulkanSnapshot {
     std::optional<uint32_t> queue_depth;
     std::optional<std::string> kernel;
 
-    // H-5's evidence, summed over every worker on this device.
+    // Whether the host is keeping the device fed: a batch counted late is one
+    // the host collected after the device had already finished it. Summed over
+    // every worker on this device.
     uint64_t batches_total = 0;
     uint64_t batches_late = 0;
 

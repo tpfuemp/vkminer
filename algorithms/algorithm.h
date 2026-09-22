@@ -41,6 +41,16 @@ enum class StratumDialect {
     // job_id, header hash, seed hash, share target, clean, height, nbits. The
     // pool has already hashed the header, so there is nothing to assemble.
     kProgPow,
+    // The one above with a 32-byte claimtrie root inserted after prevhash, and
+    // a header eight words longer to hold it. Everything else -- the coinbase,
+    // the merkle branch, the difficulty, the submit's five fields -- is
+    // Bitcoin's, which is why this is a dialect of it and not a third protocol.
+    //
+    // One value rather than three flags because three things move together and
+    // must not be settable apart: the notify gains a parameter, the header
+    // build gains eight words, and ntime, nbits and the nonce all shift by
+    // eight. Taking two of the three builds a header no node accepts.
+    kLbry,
 };
 
 class Algorithm {

@@ -872,6 +872,7 @@ static bool stratum_progpow_notify( struct stratum_ctx *sctx, json_t *params )
 static bool stratum_bitcoin_notify(struct stratum_ctx *sctx, json_t *params)
 {
 	const char *job_id, *prevhash, *coinb1, *coinb2, *version, *nbits, *stime;
+	const char *claim = NULL;
 	size_t coinb1_size, coinb2_size;
 	bool clean, ret = false;
 	int merkle_count, i, p = 0;
@@ -880,11 +881,38 @@ static bool stratum_bitcoin_notify(struct stratum_ctx *sctx, json_t *params)
 
    job_id = json_string_value(json_array_get(params, p++));
 	prevhash = json_string_value(json_array_get(params, p++));
+	/* LBRY inserts the claimtrie root here, so everything after it moves along
+	   by one. Which shape to read is the algorithm's answer, settled before the
+	   socket opened -- not something to infer from how many parameters arrived,
+	   because a pool that sent nine for a ten-parameter job would then be read
+	   as a Bitcoin job with a claim in place of the coinbase. */
+	if (opt_stratum_dialect == STRATUM_LBRY) {
+		claim = json_string_value(json_array_get(params, p++));
+
+		/* Checked here rather than with the rest below, because every field
+		   after it is read at an offset this one sets, so the errors further
+		   down would all name the wrong field. It is also the one field with
+		   no local substitute: mined as though it were zero, it builds a
+		   header no node accepts. */
+		if (!claim || strlen(claim) != 64) {
+			applog(LOG_ERR, "Stratum notify: job %s carries no claimtrie "
+			                "root, which '%s' cannot build a header without",
+			       job_id ? job_id : "(unnamed)", opt_algo);
+			goto out;
+		}
+	}
 	coinb1 = json_string_value(json_array_get(params, p++));
 	coinb2 = json_string_value(json_array_get(params, p++));
 	merkle_arr = json_array_get(params, p++);
-	if (!merkle_arr || !json_is_array(merkle_arr))
+	if (!merkle_arr || !json_is_array(merkle_arr)) {
+		/* Said out loud, because this is where a job of the wrong shape lands:
+		   the parameter is positional, so a job with one too few in front of
+		   it arrives here as a string. A miner that refuses a job in silence
+		   looks from its own log exactly like one the pool never sent to. */
+		applog(LOG_ERR, "Stratum notify: job %s has no merkle branch where "
+		                "one belongs", job_id ? job_id : "(unnamed)");
 		goto out;
+	}
 	merkle_count = (int) json_array_size(merkle_arr);
 	version = json_string_value(json_array_get(params, p++));
 	nbits = json_string_value(json_array_get(params, p++));
@@ -948,6 +976,8 @@ static bool stratum_bitcoin_notify(struct stratum_ctx *sctx, json_t *params)
 	free( sctx->job.job_id );
 	sctx->job.job_id = strdup( job_id );
 	hex2bin( sctx->job.prevhash, prevhash, 32 );
+	if ( claim )
+		hex2bin( sctx->job.extra, claim, 32 );
 
 	sctx->block_height = getblocheight( sctx );
 	hex2bin( sctx->job.nbits, nbits, 4 );
@@ -1249,8 +1279,14 @@ bool stratum_handle_method(struct stratum_ctx *sctx, const char *s)
 
 	if (!strcasecmp(method, "mining.notify")) {
 		ret = stratum_notify(sctx, params);
-      sctx->new_job = true;
-      goto out;
+
+		/* Only when the job was taken. A refused notify leaves sctx->job as it
+		   was, so flagging one here announces a job the miner does not have:
+		   a strdup of a null job id before the first accepted one, and after
+		   that the previous job regenerated under the new job's name. */
+		if (ret)
+			sctx->new_job = true;
+		goto out;
 	}
 	if (!strcasecmp(method, "mining.ping")) { // cgminer 4.7.1+
 		if (opt_debug) applog(LOG_DEBUG, "Pool ping");

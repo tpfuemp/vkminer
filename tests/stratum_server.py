@@ -16,7 +16,12 @@
 #
 #  python3 stratum_server.py --port 3333 --drop-after 8 --drops 2
 #
-# It speaks either dialect. --dialect progpow serves the job from
+# It speaks any of three dialects. --dialect lbry serves the same captured
+# Bitcoin job with a claimtrie root inserted after the prevhash, which is the
+# whole of that protocol's departure; --omit-claim leaves it out, which is the
+# job a pool would send an lbry miner by mistake and the one it has to refuse.
+#
+# --dialect progpow serves the job from
 # stratum_kawpow_kat.cpp instead: a header the pool has already hashed, a block
 # height, a 256-bit target pushed with mining.set_target, and a five-field
 # submit with a mix hash in it. That job is served the way the dialect's own
@@ -56,6 +61,19 @@ MERKLE_BRANCH = []
 VERSION = "00000000"
 NBITS = "1a008a57"
 NTIME = "6a725843"
+
+# --------------------------------------------------------------- lbry's shape
+#
+# The same job with one more parameter: the claimtrie root, between the prevhash
+# and coinb1. A miner that reads the job positionally and does not know about it
+# takes this for the coinbase, so serving it to the wrong algorithm is a real
+# case and --dialect chooses which is served.
+#
+# The value is LBRY block 1300000's, which stratum_header_kat.cpp assembles and
+# hashes. Nothing here checks it -- the claim is opaque to a pool too -- but a
+# real root means the header the miner builds is one a node would have
+# recognised, rather than one only this file could produce.
+CLAIM = "1aed82ca97bed87f5e8557ff43a38e330bdacdcabad27f49d4fa493ae904f52e"
 
 # ---------------------------------------------------------- the other dialect
 #
@@ -104,6 +122,7 @@ class Client:
         self.authorized = False
         self.diff = opts.diff
         self.progpow = opts.dialect == "progpow"
+        self.lbry = opts.dialect == "lbry"
         # The 256-bit target this dialect states outright, as a number so that
         # vardiff can move it. There is no difficulty in it to move instead.
         self.target = int(opts.target, 16)
@@ -221,12 +240,18 @@ class Client:
             return
 
         ntime = format(int(NTIME, 16) + self.jobs, "08x")
-        self.send({
-            "id": None,
-            "method": "mining.notify",
-            "params": [job_id, PREVHASH, COINB1, COINB2,
-                       MERKLE_BRANCH, VERSION, NBITS, ntime, clean],
-        })
+        params = [job_id, PREVHASH, COINB1, COINB2,
+                  MERKLE_BRANCH, VERSION, NBITS, ntime, clean]
+
+        # Inserted where the header puts it, which is also where the protocol
+        # puts it: straight after the prevhash, pushing everything after it
+        # along one. --omit-claim leaves it out while still calling itself the
+        # lbry dialect, which is a pool serving a Bitcoin job to a miner that
+        # cannot build a header from one.
+        if self.lbry and not self.opts.omit_claim:
+            params.insert(2, CLAIM)
+
+        self.send({"id": None, "method": "mining.notify", "params": params})
         log("notify", job_id)
 
     def bad_share(self, params):
@@ -459,9 +484,14 @@ def main():
     p = argparse.ArgumentParser(description="a Stratum server that misbehaves")
     p.add_argument("--port", type=int, default=3333)
     p.add_argument("--dialect", default="bitcoin",
-                   choices=["bitcoin", "progpow"],
+                   choices=["bitcoin", "progpow", "lbry"],
                    help="which job this pool serves: a coinbase to build a "
-                        "header from, or a header it has already hashed")
+                        "header from, a header it has already hashed, or the "
+                        "coinbase with a claimtrie root in front of it")
+    p.add_argument("--omit-claim", action="store_true",
+                   help="serve the lbry dialect without the claimtrie root, "
+                        "which is a job a miner for it cannot build a header "
+                        "from and must refuse rather than guess at")
     p.add_argument("--target", default=PROGPOW_TARGET,
                    help="the 256-bit share target for the ProgPoW dialect, as "
                         "64 hex digits; also what --set-target-first pushes")

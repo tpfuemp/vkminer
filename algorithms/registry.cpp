@@ -4,6 +4,7 @@
 #include "algorithms/registry.h"
 
 #include "algorithms/blake2s/blake2s.h"
+#include "algorithms/lbry/lbry.h"
 #include "algorithms/progpow/progpow.h"
 #include "algorithms/scrypt/scrypt.h"
 #include "algorithms/sha256d/sha256d.h"
@@ -62,6 +63,10 @@ const Entry kAlgorithms[] = {
     { "blake2s", "",       make_blake2s        },
     { "scrypt",  "",       make_scrypt         },
     { "sha3t",   "",       make_sha3t          },
+    // LBRY Credits. The first algorithm here whose header is not 80 bytes and
+    // whose difficulty is not quoted on Bitcoin's scale, so it is the first
+    // that would mine correctly and still be rejected by a pool.
+    { "lbry",    "",       make_lbry           },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.
@@ -138,21 +143,51 @@ void bind_protocol_settings(const char *name)
                          "sha256d's", name, opt_target_factor);
 
     opt_nonce_bits = algo->nonce_bits();
-    if (algo->stratum_dialect() == StratumDialect::kProgPow) {
+
+    // Put back rather than left alone, every time. Only an algorithm switch
+    // reaches this with another dialect in force, and a miner that moved off a
+    // ProgPoW fork still reading a notify as a header hash -- or off lbry still
+    // using its layout -- mines headers no pool sent, which reads as a
+    // rejected-share storm rather than as a stale flag.
+    opt_stratum_dialect = STRATUM_BITCOIN;
+    progpow_seed_hash_agrees = nullptr;
+    opt_ntime_index = STD_NTIME_INDEX;
+    opt_nbits_index = STD_NBITS_INDEX;
+    opt_nonce_index = STD_NONCE_INDEX;
+
+    switch (algo->stratum_dialect()) {
+    case StratumDialect::kProgPow:
         opt_stratum_dialect = STRATUM_PROGPOW;
         progpow_seed_hash_agrees = progpow_seed_hash_check;
         applog(LOG_INFO, "'%s' speaks the ProgPoW stratum: the pool sends a "
                          "header hash rather than a coinbase, and keeps the "
                          "top %u bits of the nonce",
                name, 64 - opt_nonce_bits);
-    } else {
-        // Put back rather than left alone. Only a switch reaches this with the
-        // other dialect in force, and a miner that moved off a ProgPoW fork
-        // still reading a notify as a header hash would mine headers no pool
-        // sent -- which reads as a rejected-share storm, not as a stale flag.
-        opt_stratum_dialect = STRATUM_BITCOIN;
-        progpow_seed_hash_agrees = nullptr;
+        break;
+
+    case StratumDialect::kLbry:
+        opt_stratum_dialect = STRATUM_LBRY;
+        opt_ntime_index = LBRY_NTIME_INDEX;
+        opt_nbits_index = LBRY_NBITS_INDEX;
+        opt_nonce_index = LBRY_NONCE_INDEX;
+        applog(LOG_INFO, "'%s' takes a claimtrie root in its notify and builds "
+                         "a %u-byte header, so ntime, nbits and the nonce are "
+                         "eight words further along than Bitcoin's",
+               name, static_cast<unsigned>(algo->header_bytes()));
+        break;
+
+    case StratumDialect::kBitcoin:
+        break;
     }
+
+    // The header build and the submit read these, and the shader reads
+    // nonce_word(); they are two spellings of one layout and a disagreement
+    // between them is a miner that mines the wrong word and submits another.
+    if (opt_nonce_index != algo->nonce_word())
+        applog(LOG_ERR, "'%s' hashes the nonce at word %u and would submit "
+                        "word %u -- its stratum dialect and its header layout "
+                        "disagree", name,
+               static_cast<unsigned>(algo->nonce_word()), opt_nonce_index);
 }
 
 std::string algorithm_names()

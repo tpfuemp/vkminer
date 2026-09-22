@@ -162,13 +162,21 @@ else()
     set(VKMINER_JANSSON "bundled 2.6")
 endif()
 
-# ------------------------------------------------------------------- sha256
+# ------------------------------------------------------- scalar hash cores
 #
-# First-party, so it is held to the project's warning flags. Separate from the
-# inherited library below only because that one is not.
-add_library(vkminer_sha256 STATIC src/core/sha256.c)
-target_include_directories(vkminer_sha256 PUBLIC src)
-target_link_libraries(vkminer_sha256 PRIVATE vkminer_warnings)
+# First-party, so these are held to the project's warning flags. Separate from
+# the inherited library below only because that one is not.
+#
+# Each of these is the oracle some kernel is differentially tested against, so
+# each is the plainest implementation that can be checked against the standard's
+# own vectors by reading it, and none of them may be optimized: a bug shared
+# between a reference and the shader it judges is a bug nothing can see.
+add_library(vkminer_hashes STATIC
+    src/core/sha256.c
+    src/core/sha512.c
+    src/core/ripemd160.c)
+target_include_directories(vkminer_hashes PUBLIC src)
+target_link_libraries(vkminer_hashes PRIVATE vkminer_warnings)
 
 # ------------------------------------------------------------------- paths
 #
@@ -225,7 +233,7 @@ if(NOT HAVE_GETOPT_LONG)
 endif()
 target_link_libraries(vkminer_inherited PUBLIC
     vkminer_jansson vkminer_curl Threads::Threads)
-target_link_libraries(vkminer_inherited PRIVATE vkminer_sha256)
+target_link_libraries(vkminer_inherited PRIVATE vkminer_hashes)
 if(WIN32)
     target_link_libraries(vkminer_inherited PUBLIC ws2_32)
 endif()
@@ -242,6 +250,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/blake2s/blake2s.cpp
     algorithms/scrypt/scrypt.cpp
     algorithms/sha3t/sha3t.cpp
+    algorithms/lbry/lbry.cpp
     algorithms/progpow/progpow.cpp
     algorithms/progpow/progpow_dag.cpp
     algorithms/progpow/progpow_hash.cpp
@@ -254,7 +263,7 @@ target_link_libraries(vkminer_algorithms PUBLIC vkminer_inherited)
 # kernel is judged against, and nothing outside algorithms/progpow/ has any
 # business including it.
 target_link_libraries(vkminer_algorithms PRIVATE
-    vkminer_sha256 vkminer_warnings ethash)
+    vkminer_hashes vkminer_warnings ethash)
 
 # ------------------------------------------------------------------ shaders
 if(VKMINER_BUILD_SHADERS)
@@ -273,6 +282,8 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/scrypt/scrypt.comp
                               algorithms/sha3t/sha3t.comp
                               algorithms/sha3t/sha3t32.comp
+                              algorithms/lbry/lbry.comp
+                              algorithms/lbry/lbry32.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp
@@ -359,7 +370,7 @@ target_include_directories(vkminer_tune_cache PUBLIC
     src "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(vkminer_tune_cache PUBLIC vkminer_jansson)
 target_link_libraries(vkminer_tune_cache PRIVATE
-    vkminer_sha256 vkminer_paths vkminer_warnings)
+    vkminer_hashes vkminer_paths vkminer_warnings)
 
 # ----------------------------------------------------------------- control
 #

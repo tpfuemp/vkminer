@@ -92,13 +92,32 @@ enum {
 /* Bitcoin-style 80-byte header, as 32-bit words, plus the SHA-256 padding
  * cpuminer-opt carries in the same buffer. cpuminer-opt reaches these through
  * algo_gate; that table is not inherited, because it mixes protocol concerns
- * with execution concerns and this project keeps those apart. Until an
- * Algorithm owns the header layout, these are the layout.  */
+ * with execution concerns and this project keeps those apart.  */
 #define STD_WORK_DATA_SIZE  128
 #define STD_WORK_CMP_SIZE    76
 #define STD_NTIME_INDEX      17
 #define STD_NBITS_INDEX      18
 #define STD_NONCE_INDEX      19
+
+/* ...and lbry's, which is that header plus a 32-byte claimtrie root sitting
+ * between the merkle root and ntime. Every mutable field after the insertion
+ * moves by eight words.  */
+#define LBRY_CLAIM_INDEX     17
+#define LBRY_NTIME_INDEX     25
+#define LBRY_NBITS_INDEX     26
+#define LBRY_NONCE_INDEX     27
+
+/* Where those three fields actually are, for the code that reads them without
+ * caring which layout built them: the stale check, and the submit that sends
+ * ntime and the nonce back up.
+ *
+ * Globals rather than macros because the layout is the algorithm's answer, the
+ * same way opt_target_factor and opt_nonce_bits are. bind_protocol_settings
+ * sets all of them from one object before any thread starts; the initialisers
+ * here are Bitcoin's, which is what every algorithm but lbry wants.  */
+extern uint32_t opt_ntime_index;
+extern uint32_t opt_nbits_index;
+extern uint32_t opt_nonce_index;
 
 /* Which Stratum a pool speaks. Set once from the algorithm before the first
  * connection and never touched again -- see StratumDialect in
@@ -112,7 +131,14 @@ enum stratum_dialect
 {
    STRATUM_BITCOIN = 0,   /* notify builds a header from a coinbase          */
    STRATUM_PROGPOW = 1,   /* notify carries the header hash, already made    */
+   STRATUM_LBRY    = 2,   /* Bitcoin's, plus a claimtrie root after prevhash */
 };
+
+/* True for the dialects that build a header out of a coinbase, which is both of
+ * them except ProgPoW. Written this way round deliberately: every branch here
+ * asks whether there is a header to assemble, and a new Bitcoin-like dialect
+ * should join this side of it by default rather than by being listed.  */
+#define stratum_builds_header() ( opt_stratum_dialect != STRATUM_PROGPOW )
 
 extern int      opt_stratum_dialect;
 
@@ -288,6 +314,14 @@ struct stratum_job
    unsigned char ntime[4];
    double diff;
    bool clean;
+
+   /* ---- STRATUM_LBRY only --------------------------------------------- */
+
+   /* The claimtrie root, as the pool sent it. It is a consensus field the
+    * miner has no way to compute -- unlike the merkle root, which is built
+    * here out of the coinbase -- so it is carried through untouched and laid
+    * into the header in the order it arrived.  */
+   unsigned char extra[32];
 
    /* ---- STRATUM_PROGPOW only ------------------------------------------ */
 
@@ -685,6 +719,10 @@ extern double   lowest_share;
 
 /* Header assembly, shared by the Stratum and (later) GBT paths. */
 void   sha256d_gen_merkle_root( char *merkle_root, struct stratum_ctx *sctx );
+void   lbry_build_block_header( struct work *g_work, uint32_t version,
+                       uint32_t *prevhash, uint32_t *merkle_tree,
+                       const unsigned char *claim,
+                       uint32_t ntime, uint32_t nbits );
 void   std_build_block_header( struct work *g_work, uint32_t version,
                                uint32_t *prevhash, uint32_t *merkle_tree,
                                uint32_t ntime, uint32_t nbits );

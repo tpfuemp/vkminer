@@ -95,6 +95,13 @@ double opt_target_factor = 1.0;
 int      opt_stratum_dialect = STRATUM_BITCOIN;
 uint32_t opt_nonce_bits      = 32;
 
+/* And the header layout, set from the same object at the same moment. These
+ * three are read by code that never learns which layout produced the header:
+ * the stale check, and the submit that echoes ntime and the nonce back. */
+uint32_t opt_ntime_index     = STD_NTIME_INDEX;
+uint32_t opt_nbits_index     = STD_NBITS_INDEX;
+uint32_t opt_nonce_index     = STD_NONCE_INDEX;
+
 /* Installed beside those two when the algorithm has epoch arithmetic to check
  * a pool's seed hash against, and null otherwise. */
 bool ( *progpow_seed_hash_agrees )( uint64_t height,

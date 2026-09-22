@@ -20,8 +20,12 @@
 #  set_target    the trap, sprung on the dialect that has no use for the
 #                method: a Bitcoin miner is sent a mining.set_target and then
 #                an ordinary Bitcoin job, which it must still read as one.
+#  lbry          a Bitcoin job with a claimtrie root inserted after the
+#                prevhash, read by a miner expecting the extra parameter.
+#  no_claim      the same pool with the field left out, which is a job the
+#                miner must refuse rather than fill in with zeros.
 #
-# The last case is the one this file exists for. A parser that reads
+# The set_target case is the one this file exists for. A parser that reads
 # mining.set_target as evidence of which dialect the pool speaks is right
 # against every pool that never sends the method, so it fails late and rarely.
 # Here it is sent to a miner mining sha256d, and the job after it has to become
@@ -98,13 +102,20 @@ def save_logs(opts):
         print(f"     {which} log: {path}")
 
 
-def run_case(name, opts, server_args, algo, miner_args, seconds):
+def run_case(name, opts, server_args, algo, miner_args, seconds, kill_after=0):
     """Starts the pool, runs the miner to its own time limit, returns both logs.
 
     The server logs to a file rather than a pipe for the reason reconnect_test.py
     gives: nothing reads a pipe until the miner has exited, and a pool blocked
     inside its own print has stopped answering the miner it is being used to
-    test."""
+    test.
+
+    kill_after is for the cases where the miner is never given work it can mine:
+    --time-limit measures mining and does not start until the first job becomes
+    work, so a miner refusing every job would sit there for as long as it was
+    left. Such a case is stopped from here after kill_after seconds, and gets
+    None for a return code -- which is itself the assertion that the miner was
+    still running rather than gone."""
     # Cleared before the case rather than after it, so that a case killed at the
     # timeout below leaves nothing behind to be read as its own.
     LAST.clear()
@@ -114,13 +125,25 @@ def run_case(name, opts, server_args, algo, miner_args, seconds):
     time.sleep(0.6)
 
     pin = ["--devices", opts.devices] if opts.devices else []
+    argv = [opts.miner, "-a", algo, "--backend", opts.backend,
+            "-u", "tester", "-p", "x", "--retry-pause", "2",
+            "--time-limit", str(seconds)] + pin + miner_args
     try:
-        miner = subprocess.run(
-            [opts.miner, "-a", algo, "--backend", opts.backend,
-             "-u", "tester", "-p", "x", "--retry-pause", "2",
-             "--time-limit", str(seconds)] + pin + miner_args,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            timeout=seconds + 120)
+        if kill_after:
+            proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
+            try:
+                stdout = proc.communicate(timeout=kill_after)[0]
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                stdout = proc.communicate(timeout=20)[0]
+                rc = None
+        else:
+            miner = subprocess.run(argv, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True,
+                                   timeout=seconds + 120)
+            stdout, rc = miner.stdout, miner.returncode
     finally:
         srv.terminate()
         try:
@@ -132,9 +155,9 @@ def run_case(name, opts, server_args, algo, miner_args, seconds):
     f.seek(0)
     server_log = f.read()
     f.close()
-    miner_log = ANSI.sub("", miner.stdout)
+    miner_log = ANSI.sub("", stdout)
     LAST.update(name=name, miner=miner_log, pool=server_log)
-    return miner_log, server_log, miner.returncode
+    return miner_log, server_log, rc
 
 
 def check(name, miner_log, server_log, rc, wants, unwanted):
@@ -224,6 +247,70 @@ def case_job_target(opts):
     return shares
 
 
+def case_lbry(opts):
+    """A job with a claimtrie root in it, read by a miner that knows to expect
+    one. stratum_header_kat.cpp proves the header that comes out of such a job;
+    what this adds is that the parameter is read off the wire at all, and that
+    the ten-parameter job is not mistaken for the nine-parameter one -- which
+    would take the claim for the coinbase and silently mine nothing real."""
+    port = free_port()
+    miner_log, server_log, rc = run_case(
+        "lbry", opts,
+        ["--port", str(port), "--dialect", "lbry", "--drops", "0",
+         # A difficulty of 1 is 2^40 hashes on this chain, so the number that
+         # gives a device a steady trickle is 256 times smaller than it looks.
+         "--diff", "0.001", "--job-interval", "4"],
+        "lbry", ["-o", f"stratum+tcp://127.0.0.1:{port}"], 14)
+
+    shares = check(
+        "lbry", miner_log, server_log, rc,
+        ["takes a claimtrie root in its notify",
+         "Job job0001"],
+        ["carries no claimtrie root",
+         # The claim is 64 hex digits and a coinbase is hundreds; a parser that
+         # read the job as Bitcoin's would fail on the coinbase, not the claim.
+         "Stratum notify: invalid parameters",
+         "speaks the ProgPoW stratum"])
+
+    print(f"  lbry         a ten-parameter job became work, {shares} share(s)")
+    return shares
+
+
+def case_no_claim(opts):
+    """The same pool with the claim left out. There is no local source for that
+    field, so a miner that carried on would mine a header with 32 zero bytes
+    where a consensus value belongs: it would find shares, and the pool would
+    reject every one of them with no reason given. Refusing the job is the only
+    behaviour that says anything."""
+    port = free_port()
+    miner_log, server_log, rc = run_case(
+        "no_claim", opts,
+        ["--port", str(port), "--dialect", "lbry", "--omit-claim",
+         "--drops", "0", "--diff", "0.001", "--job-interval", "4"],
+        "lbry", ["-o", f"stratum+tcp://127.0.0.1:{port}"], 10, kill_after=10)
+
+    # Still running when the ten seconds were up. A miner that exited had
+    # either crashed on the job or given up on a pool that may well send a
+    # usable one next, and the crash is what this case was written for: a
+    # refused job that flags itself as new leaves the work thread holding a
+    # job id that was never set.
+    if rc is not None:
+        raise Fail(f"no_claim: the miner exited {rc} rather than staying up "
+                   f"for a job it could use")
+    if "carries no claimtrie root" not in miner_log:
+        raise Fail("no_claim: the miner took a job with no claimtrie root in "
+                   "it, and said nothing")
+    # Refused, not merely complained about: a job that became work would have
+    # been mined, and on a device it would have produced shares for a header no
+    # node could accept.
+    if "Job job0001" in miner_log:
+        raise Fail("no_claim: the miner complained about the missing claimtrie "
+                   "root and mined the job anyway")
+
+    print("  no_claim     a job with no claimtrie root was refused, not guessed "
+          "at")
+
+
 def case_set_target(opts):
     """A mining.set_target sent to a Bitcoin miner, followed by a Bitcoin job.
     The method is not a dialect, and the job after it is read the way the
@@ -275,7 +362,8 @@ def main():
                    help="where the failing case's miner and pool logs are "
                         "written; a passing run writes nothing")
     p.add_argument("--case", default="all",
-                   choices=["all", "progpow", "job_target", "set_target"])
+                   choices=["all", "progpow", "job_target", "set_target",
+                            "lbry", "no_claim"])
     opts = p.parse_args()
 
     if not os.path.exists(opts.miner):
@@ -283,7 +371,8 @@ def main():
         return 77
 
     cases = {"progpow": case_progpow, "job_target": case_job_target,
-             "set_target": case_set_target}
+             "set_target": case_set_target, "lbry": case_lbry,
+             "no_claim": case_no_claim}
     todo = cases if opts.case == "all" else {opts.case: cases[opts.case]}
 
     print(f"dialect: {len(todo)} case(s) on the {opts.backend} backend")

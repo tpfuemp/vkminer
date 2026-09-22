@@ -20,6 +20,11 @@
 // are exactly the ones a hand-written vector gets self-consistently wrong: a
 // 78-byte coinbase scriptSig split across coinb1, both extranonces and coinb2;
 // an empty merkle branch; and a version of zero.
+//
+// The second half of the file does the same for lbry, whose header is this one
+// with a 32-byte claimtrie root between the merkle root and ntime -- so every
+// mutable field after it moves by eight words, and a builder that got the
+// layout right and the shift wrong would mine and be rejected on every share.
 
 #include "algorithms/registry.h"
 
@@ -126,6 +131,70 @@ const unsigned char kDigest[32] = {
     0x03, 0x4d, 0x7c, 0x6d, 0x00, 0x00, 0x00, 0x00,
 };
 
+// LBRY block 1300000, mined January 2023 -- the third of the vectors the lbry
+// KAT hashes, reused here for the other end of the same layout. A mined block
+// is a stronger anchor than a captured job for everything except the coinbase:
+// the network accepted these 112 bytes in this order, and the digest below
+// clears the target its own nBits encodes.
+const unsigned char kLbryHeader[112] = {
+    0x00, 0x00, 0x00, 0x20,
+    0x9d, 0x72, 0xc5, 0xdb, 0x07, 0xf6, 0xf5, 0xff,
+    0xae, 0xd5, 0x77, 0x6b, 0xac, 0x27, 0xb8, 0xcf,
+    0xdb, 0xe5, 0x7c, 0x45, 0xc5, 0xf7, 0xcc, 0x4e,
+    0x46, 0x5d, 0x24, 0xf3, 0x41, 0x11, 0xb3, 0x96,
+    0x83, 0xf2, 0x21, 0xb3, 0x48, 0xb7, 0x0f, 0x79,
+    0xa9, 0x10, 0x5d, 0x62, 0xba, 0x50, 0xdf, 0x94,
+    0xc6, 0xb0, 0x18, 0x20, 0x95, 0x9c, 0x88, 0x16,
+    0xa0, 0x94, 0xc6, 0x46, 0x35, 0x7e, 0x87, 0xcc,
+    0x1a, 0xed, 0x82, 0xca, 0x97, 0xbe, 0xd8, 0x7f,
+    0x5e, 0x85, 0x57, 0xff, 0x43, 0xa3, 0x8e, 0x33,
+    0x0b, 0xda, 0xcd, 0xca, 0xba, 0xd2, 0x7f, 0x49,
+    0xd4, 0xfa, 0x49, 0x3a, 0xe9, 0x04, 0xf5, 0x2e,
+    0x51, 0x23, 0xd2, 0x63,
+    0xef, 0xc8, 0x00, 0x1a,
+    0x59, 0xa3, 0xd0, 0x0e,
+};
+
+const unsigned char kLbryDigest[32] = {
+    0xae, 0x30, 0xcf, 0x78, 0x2b, 0x5a, 0xd9, 0x57,
+    0x37, 0x54, 0x5d, 0x00, 0x2f, 0x7e, 0xd2, 0x15,
+    0x31, 0x10, 0xfc, 0xb6, 0x53, 0xa0, 0x6e, 0x93,
+    0xbb, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+// The same prevhash as bytes 4..35 above, with each word reversed: that is the
+// spelling Stratum sends and the builder undoes, and it is why the sha256d
+// vector's kPrevhash does not read like its header either. Written out rather
+// than computed, so that a builder which stopped swapping fails here instead of
+// agreeing with a test that made the same change.
+const unsigned char kLbryPrevhash[32] = {
+    0xdb, 0xc5, 0x72, 0x9d, 0xff, 0xf5, 0xf6, 0x07,
+    0x6b, 0x77, 0xd5, 0xae, 0xcf, 0xb8, 0x27, 0xac,
+    0x45, 0x7c, 0xe5, 0xdb, 0x4e, 0xcc, 0xf7, 0xc5,
+    0xf3, 0x24, 0x5d, 0x46, 0x96, 0xb3, 0x11, 0x41,
+};
+
+// The claimtrie root the same way: bytes 68..99 above with each word reversed.
+// It is a chain hash the pool read out of its node, so Stratum word-swaps it
+// exactly as it word-swaps the prevhash, and the builder undoes both. Handing
+// the builder bytes 68..99 straight would put one spelling on both sides of
+// the conversion, which is a test that cannot fail however the builder swaps.
+// Written out for the same reason kLbryPrevhash is.
+const unsigned char kLbryClaim[32] = {
+    0xca, 0x82, 0xed, 0x1a, 0x7f, 0xd8, 0xbe, 0x97,
+    0xff, 0x57, 0x85, 0x5e, 0x33, 0x8e, 0xa3, 0x43,
+    0xca, 0xcd, 0xda, 0x0b, 0x49, 0x7f, 0xd2, 0xba,
+    0x3a, 0x49, 0xfa, 0xd4, 0x2e, 0xf5, 0x04, 0xe9,
+};
+
+// Version 0x20000000, time 0x63d22351, nBits 0x1a00c8ef -- each as the four
+// bytes a notify carries, which is the header's own spelling of them.
+const unsigned char kLbryVersion[4] = { 0x20, 0x00, 0x00, 0x00 };
+const unsigned char kLbryNtime[4]   = { 0x63, 0xd2, 0x23, 0x51 };
+const unsigned char kLbryNbits[4]   = { 0x1a, 0x00, 0xc8, 0xef };
+
+constexpr uint32_t kLbryNonce = 0x59a3d00e;
+
 void print_bytes(const char *label, const unsigned char *bytes, size_t n)
 {
     std::printf("  %-9s ", label);
@@ -141,6 +210,38 @@ void header_bytes(const struct work *w, unsigned char out[80])
 {
     for (int i = 0; i < 20; i++)
         be32enc(out + i * 4, w->data[i]);
+}
+
+void lbry_header_bytes(const struct work *w, unsigned char out[112])
+{
+    for (int i = 0; i < 28; i++)
+        be32enc(out + i * 4, w->data[i]);
+}
+
+// The 256-bit threshold nBits stands for: a three-byte mantissa shifted up by
+// (exponent - 3) bytes. Written out here rather than gone through
+// nbits_to_diff and diff_to_hash, because that round trip passes through a
+// double and this comparison is exact.
+void nbits_to_target(uint32_t nbits, unsigned char out[32])
+{
+    std::memset(out, 0, 32);
+    const unsigned exp = nbits >> 24;
+    const uint32_t mantissa = nbits & 0x00ffffff;
+    if (exp < 3)
+        return;
+    for (unsigned i = 0; i < 3; i++)
+        if (exp - 3 + i < 32)
+            out[exp - 3 + i] = static_cast<unsigned char>(mantissa >> (8 * i));
+}
+
+// Both are 256-bit little-endian, which is the order a digest lands in memory
+// in and the order an explorer prints backwards.
+bool below(const unsigned char *hash, const unsigned char *target)
+{
+    for (int i = 31; i >= 0; i--)
+        if (hash[i] != target[i])
+            return hash[i] < target[i];
+    return false;
 }
 
 }  // namespace
@@ -300,6 +401,159 @@ int main()
             fail("the refused roll modified the work anyway");
     }
 
+    // ---- lbry ------------------------------------------------------------
+    //
+    // The layout is the algorithm's answer and reaches the header build through
+    // these globals, so the binding is part of what is under test: a dialect
+    // that arrived without its indices would build a 112-byte header and then
+    // submit the ntime and nonce out of Bitcoin's positions in it.
+    vkminer::bind_protocol_settings("lbry");
+    if (opt_stratum_dialect != STRATUM_LBRY)
+        fail("'lbry' did not select its own stratum dialect");
+    if (opt_ntime_index != LBRY_NTIME_INDEX ||
+        opt_nbits_index != LBRY_NBITS_INDEX ||
+        opt_nonce_index != LBRY_NONCE_INDEX)
+        fail("'lbry' selected its dialect without the header indices that go "
+             "with it");
+
+    // The merkle root and the claimtrie root both come out of the block: the
+    // first because reproducing it would need the block's own coinbase, which
+    // the vector above already covers for the shared code that builds it, and
+    // the second because there is nowhere else it could come from -- it is a
+    // consensus value the miner cannot compute.
+    // Copied into words because that is the shape the builder takes them in --
+    // the same shape stratum_job holds them in, where they are four-byte
+    // aligned and these constants need not be.
+    uint32_t lbry_prevhash[8], lbry_merkle[8];
+    std::memcpy(lbry_prevhash, kLbryPrevhash, sizeof lbry_prevhash);
+    std::memcpy(lbry_merkle, kLbryHeader + 36, sizeof lbry_merkle);
+
+    struct work lbry;
+    std::memset(&lbry, 0, sizeof lbry);
+    lbry_build_block_header(&lbry, le32dec(kLbryVersion),
+                            lbry_prevhash, lbry_merkle, kLbryClaim,
+                            le32dec(kLbryNtime), le32dec(kLbryNbits));
+
+    unsigned char lbry_built[112];
+    lbry_header_bytes(&lbry, lbry_built);
+    if (std::memcmp(lbry_built, kLbryHeader, 108) != 0) {
+        fail("the block's own fields did not reassemble into its header");
+        print_bytes("expected", kLbryHeader, 108);
+        print_bytes("got", lbry_built, 108);
+    }
+
+    // 112 bytes, not 80: the terminator moves to word 28 and the length is 896
+    // bits. Nothing here hashes out of this buffer -- the shader pads for
+    // itself -- but a header that describes itself as the wrong length is read
+    // by the next person and believed.
+    if (lbry.data[28] != 0x80000000 || lbry.data[31] != 0x00000380)
+        fail("the lbry header build padded for an 80-byte message");
+
+    lbry.data[opt_nonce_index] = kLbryNonce;
+    lbry_header_bytes(&lbry, lbry_built);
+    if (std::memcmp(lbry_built, kLbryHeader, sizeof kLbryHeader) != 0)
+        fail("the nonce did not land at the word eight along from Bitcoin's");
+
+    std::unique_ptr<vkminer::Algorithm> lbry_algo =
+        vkminer::create_algorithm("lbry");
+    if (!lbry_algo) {
+        std::printf("FAIL: the registry has no 'lbry'\n");
+        return 1;
+    }
+
+    uint32_t lbry_hash[8];
+    lbry_algo->hash(lbry.data, kLbryNonce, lbry_hash);
+    const unsigned char *lbry_hash_bytes =
+        reinterpret_cast<const unsigned char *>(lbry_hash);
+    if (std::memcmp(lbry_hash, kLbryDigest, sizeof kLbryDigest) != 0) {
+        fail("the reassembled block did not hash to its own digest");
+        print_bytes("expected", kLbryDigest, 32);
+        print_bytes("got", lbry_hash_bytes, 32);
+    }
+
+    // The claim that makes the rest of it mean something: these bytes in this
+    // order are a solution the network accepted. A layout that happened to
+    // hash cleanly but put a field in the wrong place would not clear this.
+    //
+    // be32dec, not the le32dec the builder takes: those four bytes are the
+    // number 0x1a00c8ef written down, and the header stores it backwards. The
+    // miner only ever needs the reversed spelling -- nbits_to_diff swaps it
+    // back itself -- so this is the one place the value is read as itself.
+    unsigned char lbry_target[32];
+    nbits_to_target(be32dec(kLbryNbits), lbry_target);
+    if (!below(lbry_hash_bytes, lbry_target)) {
+        fail("the block's digest does not clear the target its own nBits set");
+        print_bytes("target", lbry_target, 32);
+        print_bytes("hash", lbry_hash_bytes, 32);
+    }
+
+    // What a builder that kept Bitcoin's header would have produced. The
+    // claimtrie root is the one field with no local source, so leaving it zero
+    // is the failure that looks most like working: the miner hashes, finds
+    // shares, and the pool rejects every one of them.
+    struct work no_claim;
+    std::memset(&no_claim, 0, sizeof no_claim);
+    const unsigned char zero_claim[32] = { 0 };
+    lbry_build_block_header(&no_claim, le32dec(kLbryVersion),
+                            lbry_prevhash, lbry_merkle, zero_claim,
+                            le32dec(kLbryNtime), le32dec(kLbryNbits));
+    no_claim.data[opt_nonce_index] = kLbryNonce;
+
+    unsigned char without[112];
+    lbry_header_bytes(&no_claim, without);
+    if (std::memcmp(without, kLbryHeader, 68) != 0 ||
+        std::memcmp(without + 100, kLbryHeader + 100, 12) != 0)
+        fail("dropping the claimtrie root moved a field that is not it");
+
+    uint32_t no_claim_hash[8];
+    lbry_algo->hash(no_claim.data, kLbryNonce, no_claim_hash);
+    if (std::memcmp(no_claim_hash, kLbryDigest, sizeof kLbryDigest) == 0)
+        fail("the claimtrie root does not reach the hash");
+
+    // And the path a real job takes into it: the same coinbase as above,
+    // through std_build_extraheader, which is where the dialect chooses a
+    // builder. The two shapes are compared against each other rather than
+    // against a stored header, because the coinbase here has been rolled and
+    // the merkle root is whatever that roll made it -- what has to hold is
+    // that the lbry header is the Bitcoin one with 32 bytes inserted.
+    struct work bitcoin_shape, lbry_shape;
+    std::memset(&bitcoin_shape, 0, sizeof bitcoin_shape);
+    std::memset(&lbry_shape, 0, sizeof lbry_shape);
+
+    opt_stratum_dialect = STRATUM_BITCOIN;
+    std_build_extraheader(&bitcoin_shape, &sctx);
+
+    // job.extra holds what hex2bin made of the notify's claim parameter, so it
+    // is the word-swapped spelling; the header it has to produce is the other
+    // one. Comparing those two is the point of this leg -- with the same bytes
+    // on both sides it passes without the swap ever happening.
+    std::memcpy(sctx.job.extra, kLbryClaim, sizeof sctx.job.extra);
+    opt_stratum_dialect = STRATUM_LBRY;
+    std_build_extraheader(&lbry_shape, &sctx);
+
+    unsigned char shape80[80], shape112[112];
+    header_bytes(&bitcoin_shape, shape80);
+    lbry_header_bytes(&lbry_shape, shape112);
+
+    // Version, prevhash and merkle root: the same job, in the same place.
+    if (std::memcmp(shape112, shape80, 68) != 0)
+        fail("the lbry dialect changed the part of the header it shares with "
+             "Bitcoin's");
+    if (std::memcmp(shape112 + 68, kLbryHeader + 68, 32) != 0)
+        fail("the claimtrie root the job carried did not reach the header");
+    if (std::memcmp(shape112 + 100, shape80 + 68, 8) != 0)
+        fail("ntime and nbits did not move along by the claimtrie root");
+
+    // Back to sha256d, which is the switch a running miner makes over the
+    // control API. The layout has to go with it: a miner left on lbry's
+    // indices would submit an 80-byte job's nonce from a word past its end.
+    vkminer::bind_protocol_settings("sha256d");
+    if (opt_stratum_dialect != STRATUM_BITCOIN ||
+        opt_ntime_index != STD_NTIME_INDEX ||
+        opt_nbits_index != STD_NBITS_INDEX ||
+        opt_nonce_index != STD_NONCE_INDEX)
+        fail("switching away from 'lbry' left its header layout behind");
+
     if (failures) {
         std::printf("\n%d check(s) failed\n", failures);
         return 1;
@@ -308,5 +562,8 @@ int main()
     std::printf("stratum: an accepted share rebuilds from its job, "
                 "hashes and verifies correctly, and rolling extranonce2 "
                 "rebuilds it again\n");
+    std::printf("stratum: a mined lbry block rebuilds from its fields, clears "
+                "its own nBits, and a job's claimtrie root reaches the header "
+                "with everything after it eight words along\n");
     return 0;
 }
