@@ -1,0 +1,11 @@
+// sha512256d with each 64-bit SHA-512 lane held as two 32-bit words.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Runs where shaderInt64 is missing, and may be faster where it is not; the
+// tuner decides. `--no-int64` forces it for testing.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "algorithms/sha512256d/sha512256d_kernel.glsl"

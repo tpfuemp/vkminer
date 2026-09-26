@@ -4,8 +4,8 @@
 // SHA-512 is SHA-256 with 64-bit words, eighty rounds, different rotation
 // amounts and a different initial value. This file holds the word type, the
 // constants and the round functions; the rounds themselves are written out in
-// the one kernel that uses them, algorithms/lbry/lbry_kernel.glsl. The
-// functions are named as in
+// the kernels that use them, algorithms/lbry/lbry_kernel.glsl and
+// algorithms/sha512256d/sha512256d_kernel.glsl. The functions are named as in
 // shaders/common/sha256.glsl so the two can be read against each other.
 //
 // The 64-bit word is the difficulty. shaderInt64 is an optional Vulkan feature
@@ -144,9 +144,22 @@ const uint sha512_k_words[160] = uint[160](
     0x4cc5d4beu, 0xcb3e42b6u, 0x597f299cu, 0xfc657e2au,
     0x5fcb6fabu, 0x3ad6faecu, 0x6c44198cu, 0x4a475817u);
 
+// SHA-512/256's initial value, FIPS 180-4 5.3.6.2. With the four-word digest,
+// the only difference from SHA-512.
+const uint sha512_256_iv_words[16] = uint[16](
+    0x22312194u, 0xfc2bf72cu, 0x9f555fa3u, 0xc84c64c2u,
+    0x2393b86bu, 0x6f53b151u, 0x96387719u, 0x5940eabdu,
+    0x96283ee2u, 0xa88effe3u, 0xbe5e1e25u, 0x53863992u,
+    0x2b0199fcu, 0x2c85b8aau, 0x0eb72ddcu, 0x81c52ca2u);
+
 SLANE sha512_iv(uint i)
 {
     return slane(sha512_iv_words[2u * i + 1u], sha512_iv_words[2u * i]);
+}
+
+SLANE sha512_256_iv(uint i)
+{
+    return slane(sha512_256_iv_words[2u * i + 1u], sha512_256_iv_words[2u * i]);
 }
 
 SLANE sha512_k(uint i)

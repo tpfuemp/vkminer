@@ -106,6 +106,12 @@ target_link_libraries(sha3t_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME sha3t_kat COMMAND sha3t_kat)
 
+# sha512256d: FIPS 180-4 SHA-512/256 vectors first, then Radiant block ids.
+add_executable(sha512256d_kat sha512256d_kat.cpp)
+target_link_libraries(sha512256d_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME sha512256d_kat COMMAND sha512256d_kat)
+
 # The ProgPoW host reference, which is not an algorithm here yet and is checked
 # anyway: it is the reference a future kernel would be judged against, the
 # vendored code is only worth what this test says it is, and none of it needs a
@@ -487,6 +493,21 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_lbry_nonces
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # sha512256d, both modules.
+    add_test(NAME diff_test_sha512256d COMMAND diff_test sha512256d 100000)
+    set_tests_properties(diff_test_sha512256d
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_sha512256d32
+        COMMAND diff_test sha512256d 100000 --no-int64)
+    set_tests_properties(diff_test_sha512256d32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_sha512256d_nonces
+        COMMAND diff_test sha512256d 100000 --nonces-per-invocation 3)
+    set_tests_properties(diff_test_sha512256d_nonces
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a
@@ -605,6 +626,10 @@ if(TARGET vkminer_shaders)
     set_tests_properties(race_test_lbry
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 
+    add_test(NAME race_test_sha512256d COMMAND race_test sha512256d 8)
+    set_tests_properties(race_test_sha512256d
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
     # The negative half of the known-answer test, perturbing the device rather
     # than the host reference. Cheap -- a couple of dozen single-nonce dispatches
     # -- so it is not labelled slow and runs on a software rasterizer too.
@@ -643,6 +668,15 @@ if(TARGET vkminer_shaders)
 
     add_test(NAME negative_kat_lbry32 COMMAND negative_kat lbry --no-int64)
     set_tests_properties(negative_kat_lbry32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_sha512256d COMMAND negative_kat sha512256d)
+    set_tests_properties(negative_kat_sha512256d
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_sha512256d32
+        COMMAND negative_kat sha512256d --no-int64)
+    set_tests_properties(negative_kat_sha512256d32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

@@ -18,6 +18,10 @@ extern "C" {
  * src/core/sha512.c about why it must stay slow and obvious.  */
 void sha512_full( void *hash, const void *data, size_t len );
 
+/* Scalar FIPS 180-4 SHA-512/256: the same compression from its own initial
+ * value, with the digest cut to the first 32 bytes.  */
+void sha512_256_full( void *hash, const void *data, size_t len );
+
 #ifdef __cplusplus
 }
 #endif

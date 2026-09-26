@@ -8,6 +8,7 @@
 #include "algorithms/progpow/progpow.h"
 #include "algorithms/scrypt/scrypt.h"
 #include "algorithms/sha256d/sha256d.h"
+#include "algorithms/sha512256d/sha512256d.h"
 #include "algorithms/sha3t/sha3t.h"
 
 #include <cstring>
@@ -67,6 +68,8 @@ const Entry kAlgorithms[] = {
     // whose difficulty is not quoted on Bitcoin's scale, so it is the first
     // that would mine correctly and still be rejected by a pool.
     { "lbry",    "",       make_lbry           },
+    // Radiant's: Bitcoin's header and scale, SHA-512/256 in place of SHA-256.
+    { "sha512256d", "",    make_sha512256d     },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.

@@ -251,6 +251,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/scrypt/scrypt.cpp
     algorithms/sha3t/sha3t.cpp
     algorithms/lbry/lbry.cpp
+    algorithms/sha512256d/sha512256d.cpp
     algorithms/progpow/progpow.cpp
     algorithms/progpow/progpow_dag.cpp
     algorithms/progpow/progpow_hash.cpp
@@ -284,6 +285,8 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/sha3t/sha3t32.comp
                               algorithms/lbry/lbry.comp
                               algorithms/lbry/lbry32.comp
+                              algorithms/sha512256d/sha512256d.comp
+                              algorithms/sha512256d/sha512256d32.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp

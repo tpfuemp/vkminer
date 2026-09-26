@@ -36,6 +36,15 @@ static const uint64_t sha512_iv[8] = {
     UINT64_C(0x1f83d9abfb41bd6b), UINT64_C(0x5be0cd19137e2179)
 };
 
+/* SHA-512/256's initial value, FIPS 180-4 5.3.6.2. Truncated SHA-512 is not
+ * SHA-512/256; tests/sha512256d_kat.cpp checks the standard's vectors. */
+static const uint64_t sha512_256_iv[8] = {
+    UINT64_C(0x22312194fc2bf72c), UINT64_C(0x9f555fa3c84c64c2),
+    UINT64_C(0x2393b86b6f53b151), UINT64_C(0x963877195940eabd),
+    UINT64_C(0x96283ee2a88effe3), UINT64_C(0xbe5e1e2553863992),
+    UINT64_C(0x2b0199fc2c85b8aa), UINT64_C(0x0eb72ddc81c52ca2)
+};
+
 /* ...and the cube roots of the first eighty. */
 static const uint64_t sha512_k[80] = {
     UINT64_C(0x428a2f98d728ae22), UINT64_C(0x7137449123ef65cd),
@@ -126,7 +135,9 @@ static void sha512_compress( uint64_t state[8], const unsigned char block[128] )
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 
-void sha512_full( void *hash, const void *data, size_t len )
+/* The whole message from `iv`, writing the first `words` state words out. */
+static void sha512_from( const uint64_t iv[8], int words, void *hash,
+                         const void *data, size_t len )
 {
     uint64_t state[8];
     unsigned char block[128];
@@ -135,7 +146,7 @@ void sha512_full( void *hash, const void *data, size_t len )
     int i;
 
     for ( i = 0; i < 8; i++ )
-        state[i] = sha512_iv[i];
+        state[i] = iv[i];
 
     while ( remaining >= 128 )
     {
@@ -160,6 +171,16 @@ void sha512_full( void *hash, const void *data, size_t len )
     be64enc_local( block + 120, (uint64_t)len << 3 );
     sha512_compress( state, block );
 
-    for ( i = 0; i < 8; i++ )
+    for ( i = 0; i < words; i++ )
         be64enc_local( (unsigned char *)hash + i * 8, state[i] );
+}
+
+void sha512_full( void *hash, const void *data, size_t len )
+{
+    sha512_from( sha512_iv, 8, hash, data, len );
+}
+
+void sha512_256_full( void *hash, const void *data, size_t len )
+{
+    sha512_from( sha512_256_iv, 4, hash, data, len );
 }
