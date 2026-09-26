@@ -56,6 +56,25 @@ void sha256_advance_nonce_block( uint32_t advanced[8], uint32_t sched[4],
                                  const uint32_t state[8],
                                  const uint32_t tail[3] );
 
+/* The same again for a 112-byte message, whose nonce-bearing block holds eleven
+ * header words before the nonce: the affine argument above carries through
+ * round 11 and ten schedule words.
+ *
+ * The nonce enters w[18] and w[25] as a bare addend and w[20], w[22] and w[24]
+ * as sigma1 of the word two back. Those five are computed here *without* that
+ * term, which the device adds once it knows the nonce.
+ *
+ * Outputs, given the midstate over header words 0..15 and words 16..26:
+ *   advanced[0..7]  the working variables a..h entering round 12, where
+ *                   advanced[0] and advanced[4] are bases the device adds the
+ *                   nonce to and the other six are the same for every nonce;
+ *   sched[0..9]     message words w[16..25], five of them short a term.
+ *
+ * Like sha256_midstate(), not an optimization of the reference.  */
+void sha256_advance_nonce_block_112( uint32_t advanced[8], uint32_t sched[10],
+                                     const uint32_t state[8],
+                                     const uint32_t tail[11] );
+
 #ifdef __cplusplus
 }
 #endif

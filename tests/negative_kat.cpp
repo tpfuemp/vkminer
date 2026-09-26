@@ -255,18 +255,21 @@ bool run_vector(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     }
 
     // The device's own half of the target comparison. The published digest is
-    // met exactly; one less than its low word is not, and a kernel that emits
-    // anyway is one whose candidates are only as good as the host re-verify
-    // behind them. Sound because word 0 of a mainnet digest is nonzero, which
-    // is checked rather than assumed -- a vector added later with a zero low
-    // word would silently turn this into a different test.
-    if (base[0] == 0) {
-        fail("%s: the low digest word is zero, so the decrement below would "
-             "borrow", answer.label);
+    // met exactly; one less is not, and a kernel that emits anyway is one whose
+    // candidates are only as good as the host re-verify behind them.
+    //
+    // The decrement goes in the lowest word the kernel's screen reads, which is
+    // word 0 only for a kernel that compares all 256 bits. Sound because that
+    // word of a mainnet digest is nonzero, which is checked rather than assumed.
+    const int screened = 8 - algo.screen_bits() / 32;
+
+    if (base[screened] == 0) {
+        fail("%s: digest word %d is zero, so the decrement below would borrow",
+             answer.label, screened);
     } else {
         uint32_t tight[8];
         std::memcpy(tight, base, sizeof tight);
-        tight[0]--;
+        tight[screened]--;
 
         if (!kernel.dispatch(header.data(), tight, answer.nonce, 1)) {
             fail("the kernel refused a dispatch of one nonce");

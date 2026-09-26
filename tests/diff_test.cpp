@@ -209,19 +209,36 @@ struct Candidate {
     uint32_t hash[8];
 };
 
+// The comparison the kernel actually makes: the real target with every word
+// below its screen replaced by all-ones. A kernel screening on all 256 bits
+// gets its target back unchanged. The device is still held to set equality and
+// byte-identical digests, against the set its screen actually selects.
+void screened_target(const vkminer::Algorithm &algo, const uint32_t *target,
+                     uint32_t out[8])
+{
+    // Words, counted down from the most significant, which is the last.
+    const int kept = algo.screen_bits() / 32;
+
+    for (int i = 0; i < 8; i++)
+        out[i] = (i >= 8 - kept) ? target[i] : 0xffffffffu;
+}
+
 // Every nonce in [start, start + count) that the reference says meets the
-// target, in increasing order. This is the answer; the device is measured
-// against it.
+// target the kernel screens on, in increasing order. This is the answer; the
+// device is measured against it.
 void reference_candidates(const vkminer::Algorithm &algo,
                           const uint32_t *header, const uint32_t *target,
                           uint64_t start, uint32_t count,
                           std::vector<Candidate> *out)
 {
+    uint32_t screen[8];
+    screened_target(algo, target, screen);
+
     out->clear();
     for (uint32_t i = 0; i < count; i++) {
         Candidate c;
         c.nonce = start + i;
-        if (algo.verify(header, c.nonce, target, c.hash))
+        if (algo.verify(header, c.nonce, screen, c.hash))
             out->push_back(c);
     }
 }
@@ -487,15 +504,17 @@ bool compare_boundary(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
                            kBoundarySpan, &candidates))
             return false;
 
-        // The screen passes on the top word alone, so every case that keeps the
-        // top word equal is one the device carried into the full compare.
+        // Every case below the top word is one the device had to carry
+        // further, or, below a narrow screen, one it must not decide at all.
         if (c.word != 7)
             survivors++;
     }
 
     std::printf("ok   %u boundary target(s) at nonce 0x%s, %u of them decided "
-                "below the top word\n", static_cast<unsigned>(cases.size()),
-                vkminer::nonce_hex(witness).c_str(), survivors);
+                "below the top word, %d bit(s) of screen\n",
+                static_cast<unsigned>(cases.size()),
+                vkminer::nonce_hex(witness).c_str(), survivors,
+                algo.screen_bits());
     return true;
 }
 
@@ -590,8 +609,8 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
 
 void usage(const char *program)
 {
-    std::printf("usage: %s [algo] [nonces] [queue-depth] [--no-int64]\n",
-                program);
+    std::printf("usage: %s [algo] [nonces] [queue-depth] [--no-int64] "
+                "[--nonces-per-invocation N]\n", program);
 }
 
 }  // namespace
@@ -604,11 +623,21 @@ int main(int argc, char *argv[])
     // who wants it need not spell out the three numbers before it. It is the
     // only way to point this test at an algorithm's 2x32 fallback on a device
     // that has shaderInt64, and it must be set before the backend exists.
+    // --nonces-per-invocation likewise, for a module searching several nonces
+    // per invocation.
     const char *args[4] = { argv[0], nullptr, nullptr, nullptr };
     int count = 1;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--no-int64") == 0) {
             opt_no_int64 = true;
+        } else if (std::strcmp(argv[i], "--nonces-per-invocation") == 0
+                   && i + 1 < argc) {
+            const long n = std::strtol(argv[++i], nullptr, 0);
+            if (n < 1 || n > 256) {
+                usage(argv[0]);
+                return 2;
+            }
+            opt_nonces_per_invocation = static_cast<int>(n);
         } else if (count < 4) {
             args[count++] = argv[i];
         } else {
@@ -658,9 +687,13 @@ int main(int argc, char *argv[])
         return 77;  // ctest's convention for a test that could not run
     }
 
-    std::printf("%s: %u nonces from 0x%s per device%s\n", name, total,
+    std::printf("%s: %u nonces from 0x%s per device%s", name, total,
                 vkminer::nonce_hex(kNonceBase).c_str(),
                 opt_no_int64 ? ", shaderInt64 disabled" : "");
+    if (opt_nonces_per_invocation > 1)
+        std::printf(", %d to an invocation where the module takes it",
+                    opt_nonces_per_invocation);
+    std::printf("\n");
 
     for (const vkminer::DeviceInfo &info : backend->devices())
         run_device(*backend, info, *algo, total);

@@ -323,12 +323,37 @@ bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
         // the default is the control rather than the fast one. Algorithms
         // offering a single kernel pay nothing: kernels() answers with it.
         KernelSpec variants[kMaxVariants];
-        const size_t variant_count = algo->kernels(info, variants,
-                                                   kMaxVariants);
+        size_t variant_count = algo->kernels(info, variants, kMaxVariants);
         if (!variant_count) {
             applog(LOG_ERR, "Self-test: '%s' offers device %d no kernel it "
                             "could build", algo->name(), index);
             return false;
+        }
+
+        // Whether the device had a choice, which is a different question from
+        // how many kernels are tested below and is what the log line means.
+        const bool choice = variant_count > 1;
+
+        // Under --kernel the others will never be built, so do not compile
+        // them here either: a slow driver compile of an unused module would
+        // delay the start. A name that matches nothing is refused, as in
+        // tuned_kernel().
+        if (opt_kernel && opt_kernel[0]) {
+            size_t named = variant_count;
+            for (size_t i = 0; i < variant_count && named == variant_count; i++)
+                if (variants[i].variant
+                    && std::strcmp(variants[i].variant, opt_kernel) == 0)
+                    named = i;
+
+            if (named == variant_count) {
+                applog(LOG_ERR, "Self-test: device %d (%s) has no '%s' kernel "
+                                "for %s", index, info.name.c_str(), opt_kernel,
+                       algo->name());
+                return false;
+            }
+
+            variants[0] = variants[named];
+            variant_count = 1;
         }
 
         const std::string device = "device " + std::to_string(index)
@@ -344,9 +369,10 @@ bool self_test(ComputeBackend &backend, const std::vector<int> &device_indices,
             }
 
             // Named only where there is a choice, so the single-kernel
-            // algorithms keep the line they have always printed.
+            // algorithms keep the line they have always printed, including
+            // when --kernel narrowed the loop to one of several.
             const std::string what =
-                variant_count > 1 && variants[v].variant
+                choice && variants[v].variant
                     ? device + ", kernel '" + variants[v].variant + "'"
                     : device;
 

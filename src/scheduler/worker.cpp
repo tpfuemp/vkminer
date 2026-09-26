@@ -101,6 +101,12 @@ struct BatchCount {
     std::atomic<double> best_ratio_sum{0.};
     std::atomic<uint64_t> best_samples{0};
     std::atomic<uint64_t> hashes{0};
+
+    // The --vk-count-reached four, copied out the same way.
+    std::atomic<uint64_t> reached{0};
+    std::atomic<uint64_t> reached_dispatched{0};
+    std::atomic<uint64_t> reached_samples{0};
+    std::atomic<uint64_t> reached_short{0};
 };
 
 // One entry per worker, allocated before any of them starts. Null in a build
@@ -128,6 +134,13 @@ size_t benchmark_word(const vkminer::Algorithm &algo)
     return algo.header_bytes() / 4 > 15 ? 15 : 0;
 }
 
+// Where --benchmark-seed goes: the word beside that one, so that no number of
+// passes can carry one seed's headers into another's.
+size_t benchmark_seed_word(const vkminer::Algorithm &algo)
+{
+    return benchmark_word(algo) == 15 ? 14 : 1;
+}
+
 // A job that never came from a pool: --benchmark needs a header and a target
 // and nothing else. The header is one of the algorithm's own published vectors,
 // so the kernel schedules the shape of thing it will be given in earnest rather
@@ -152,6 +165,13 @@ bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
     // own nonce would be rediscovered on every pass -- correct, useless, and a
     // line of log every few seconds.
     work->data[benchmark_word(algo)] ^= 1u;
+
+    // Without a seed every run hashes the same nonces, which suits an A/B of
+    // two kernels. With one, runs are independent draws, which a candidate
+    // count held against an expectation needs.
+    if (opt_benchmark_seed >= 0)
+        work->data[benchmark_seed_word(algo)] ^=
+            static_cast<uint32_t>(opt_benchmark_seed);
 
     // 0x000000000000ffff0000...0000, most significant word last, which is the
     // order fulltest() compares in: an ordinary pool share target, met about
@@ -221,6 +241,49 @@ void report_probe()
     }
 }
 
+// Under --vk-count-reached: how many invocations computed a digest, against how
+// many nonces the host dispatched. Printed even when they agree, so a silent
+// line cannot be mistaken for a shader built without the count.
+void report_reached()
+{
+    if (!opt_vk_count_reached || !g_batches)
+        return;
+
+    for (int i = 0; i < opt_n_threads; i++) {
+        const uint64_t samples =
+            g_batches[i].reached_samples.load(std::memory_order_relaxed);
+        const uint64_t reached =
+            g_batches[i].reached.load(std::memory_order_relaxed);
+        const uint64_t dispatched =
+            g_batches[i].reached_dispatched.load(std::memory_order_relaxed);
+        const uint64_t bad =
+            g_batches[i].reached_short.load(std::memory_order_relaxed);
+
+        if (!samples) {
+            if (g_batches[i].hashes.load(std::memory_order_relaxed))
+                applog2(LOG_ERR, "worker %d   the invocation count reported "
+                                 "nothing -- the shader was built without it",
+                        i);
+            continue;
+        }
+
+        const double delta =
+            dispatched ? 100. * (static_cast<double>(reached)
+                                 - static_cast<double>(dispatched))
+                             / static_cast<double>(dispatched)
+                       : 0.;
+
+        applog2(reached == dispatched ? LOG_INFO : LOG_ERR,
+                "worker %d   %llu invocation(s) reached a digest of %llu "
+                "dispatched (%+.4f%%), over %llu dispatch(es), %llu "
+                "disagreeing",
+                i, static_cast<unsigned long long>(reached),
+                static_cast<unsigned long long>(dispatched), delta,
+                static_cast<unsigned long long>(samples),
+                static_cast<unsigned long long>(bad));
+    }
+}
+
 // The two counters that should read zero for the life of a run. Printed only
 // when they do not, and at an error priority, because this is the miner saying
 // its own device is computing the wrong thing -- see candidate_log.h for why
@@ -255,6 +318,7 @@ void report_benchmark(const double *rates, int workers, double total)
     // Here as well as in the periodic report: a benchmark never reaches that
     // one, and a benchmark is where these two are usually switched on.
     report_probe();
+    report_reached();
     report_disagreements();
 }
 
@@ -341,6 +405,7 @@ void report_devices()
     }
 
     report_probe();
+    report_reached();
     report_disagreements();
 }
 
@@ -408,6 +473,15 @@ void worker_candidate_counts(uint64_t *confirmed, uint64_t *rejected)
         *confirmed = g_candidates_confirmed.load(std::memory_order_relaxed);
     if (rejected)
         *rejected = g_candidates_rejected.load(std::memory_order_relaxed);
+}
+
+uint64_t worker_hashes_reaped()
+{
+    uint64_t sum = 0;
+    if (g_batches)
+        for (int i = 0; i < opt_n_threads; i++)
+            sum += g_batches[i].hashes.load(std::memory_order_relaxed);
+    return sum;
 }
 
 extern "C" void *miner_thread(void *userdata)
@@ -685,6 +759,16 @@ extern "C" void *miner_thread(void *userdata)
                                                    std::memory_order_relaxed);
             g_batches[thr_id].best_samples.store(probe.samples,
                                                  std::memory_order_relaxed);
+
+            const vkminer::Kernel::ReachedCount reach = kernel->reached_count();
+            g_batches[thr_id].reached.store(reach.reached,
+                                            std::memory_order_relaxed);
+            g_batches[thr_id].reached_dispatched.store(reach.dispatched,
+                                                       std::memory_order_relaxed);
+            g_batches[thr_id].reached_samples.store(reach.samples,
+                                                    std::memory_order_relaxed);
+            g_batches[thr_id].reached_short.store(reach.short_dispatches,
+                                                  std::memory_order_relaxed);
 
             bool late = false;
             if (!opt_benchmark) {

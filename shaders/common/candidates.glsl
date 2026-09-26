@@ -11,10 +11,11 @@
 // returning a full buffer, and "the buffer filled up" is a real event -- it
 // means the dispatch is far too large for the difficulty it is being run at.
 //
-// The buffer also carries one word that is not a result: the best digest any
-// invocation saw. It answers what a candidate count cannot -- whether the
-// kernel is missing valid nonces, which produces no reject and no failed check,
-// only worse luck than it should have had.
+// The buffer also carries two words that are not results. The best digest any
+// invocation saw, and the number of invocations that computed one. Both answer
+// what a candidate count cannot -- whether the kernel is missing valid nonces,
+// which produces no reject and no failed check, only worse luck than it should
+// have had. The best digest is a statistic; the invocation count is exact.
 
 #ifndef VKMINER_SHADERS_COMMON_CANDIDATES_GLSL_INCLUDED
 #define VKMINER_SHADERS_COMMON_CANDIDATES_GLSL_INCLUDED
@@ -29,9 +30,10 @@
 const uint kCandidateWords = 10u;
 
 layout(std430, set = 0, binding = 0) buffer Candidates {
-    uint found;   // total candidates this dispatch produced, capacity or not
-    uint best;    // smallest top digest word seen, or ~0 with the probe off
-    uint word[];  // kCandidateWords each, for the first `capacity` of them
+    uint found;    // total candidates this dispatch produced, capacity or not
+    uint best;     // smallest top digest word seen, or ~0 with the probe off
+    uint reached;  // invocations that computed a digest, or 0 with the count off
+    uint word[];   // kCandidateWords each, for the first `capacity` of them
 } candidates;
 
 // Whether to keep `best` up to date. Off in every pipeline the miner builds to
@@ -40,14 +42,22 @@ layout(std430, set = 0, binding = 0) buffer Candidates {
 // run, asked for with --vk-probe-best, not a counter to leave on.
 layout(constant_id = 1) const bool kProbeBest = false;
 
+// Whether to count the invocations that get that far, with --vk-count-reached.
+// Costlier than the probe; a run under it measures nothing about rate.
+layout(constant_id = 4) const bool kCountReached = false;
+
 // The best digest word this invocation computed, offered to the running
 // minimum. `top` is the most significant word of the digest as the target
 // comparison reads it, which is the word that decides all but one nonce in
 // 2^32 -- so a kernel is searching correctly exactly when this descends.
+// Every kernel calls this exactly once per nonce, on the path every nonce
+// takes, which is why the invocation count lives here too.
 void probe_best(uint top)
 {
     if (kProbeBest)
         atomicMin(candidates.best, top);
+    if (kCountReached)
+        atomicAdd(candidates.reached, 1u);
 }
 
 // `hash` is the digest as the host reads it: eight little-endian words, most

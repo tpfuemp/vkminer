@@ -149,6 +149,7 @@ cp config-template.json config.json     # then edit config.json
 | `--algo-dir DIR` | Load an algorithm's shaders from `DIR` rather than the installed location, so an edited shader can be run without reinstalling |
 | `--benchmark` | Measure hashrate without connecting to a pool. Never submits |
 | `--benchmark-target HEX` | Loosen `--benchmark`'s synthetic target to `HEX` as its top word and ones below it, so candidates are actually found. Exercises everything downstream of the shader without a pool |
+| `--benchmark-seed N` | Fold `N` into the benchmark header, so runs with different seeds hash different nonces. Unseeded runs all hash the same ones, which suits an A/B and not a candidate count |
 | `--self-test` | Run the built-in known-answer tests and exit |
 | `--hash-meter` | Log each worker's rate, not just the total |
 | `--vk-validate` | Enable Vulkan validation layers. Much slower; for debugging |
@@ -158,6 +159,7 @@ cp config-template.json config.json     # then edit config.json
 | `--no-int64` | Report every device as lacking `shaderInt64`, so an algorithm carrying both a 64-bit and a 32-bit kernel takes the 32-bit one |
 | `--queue-depth N` | Dispatches to keep queued on each GPU at once. Leave it alone to mine; set it to compare throughput at one depth against another |
 | `--workgroup N` | Invocations per workgroup. The other half of the same idea: leave it alone to mine, set it to compare two runs at two widths |
+| `--nonces-per-invocation N` | Nonces each GPU invocation searches in turn, 1 by default. A kernel whose shader cannot take more runs at one, and the log says which ran. For comparing two runs, not for mining; a run that tunes under it saves nothing |
 | `--kernel NAME` | Which of the algorithm's kernels to run, where it has more than one. The third of the same idea, and the one `--no-tune` needs: with no measurement to read, the algorithm's opening guess runs, which is not always the fast one. Refuses to start on a name the device has no kernel for |
 | `--retune` | Measure the workgroup size and queue depth again, even though they are already known |
 | `--no-tune` | Do not measure and do not use a measurement. Two runs of one binary are then comparable |

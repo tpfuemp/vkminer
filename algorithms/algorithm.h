@@ -74,6 +74,12 @@ public:
     // 2^32 * d hashes; 65536 for scrypt.
     virtual double target_factor() const { return 1.; }
 
+    // How many of the digest's leading bits the kernel compares against the
+    // target. Fewer than 256 yields a superset of the shares; the host re-checks
+    // every candidate with fulltest() either way. Only diff_test reads it, to
+    // know which comparison the device made.
+    virtual int screen_bits() const { return 256; }
+
     // Which stratum a pool for this algorithm speaks. Read once at startup.
     virtual StratumDialect stratum_dialect() const
     {

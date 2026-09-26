@@ -49,33 +49,33 @@ extern "C" {
 namespace vkminer {
 namespace {
 
-// The push constant block lbry_kernel.glsl declares. 120 bytes against a
-// guaranteed minimum of 128; the GLSL and this struct are one definition
-// written in two languages, and nothing but the asserts would notice them
-// drifting apart.
+// The push constant block lbry_kernel.glsl declares: exactly the 128 bytes
+// Vulkan guarantees. The GLSL and this struct are one definition written in two
+// languages, and only the asserts would notice them drifting apart.
 //
-// The midstate is here because it is the only way this fits. Twenty-seven
-// header words, a 256-bit target and three scalars come to 152 bytes, which is
-// over what Vulkan guarantees. Compressing words 0..15 on the host -- which is
-// sound because none of them holds the nonce -- replaces sixteen words with
-// eight and brings the block to 120. The nonce-independence that makes the
-// midstate correct is the same fact that makes it fit.
+// Everything that does not depend on the nonce is done on the host: the first
+// block's compression, and twelve rounds and ten schedule words of the second.
+// Only the top 64 bits of the target fit; the host re-checks all 256.
 struct LbryPush {
-    uint32_t midstate[8];  // SHA-256 state after header words 0..15
-    uint32_t tail[11];     // header words 16..26; word 27 is the nonce
-    uint32_t target[8];    // as fulltest() compares: little-endian, most significant last
+    uint32_t midstate[8];   // SHA-256 state after header words 0..15
+    uint32_t midbuffer[8];  // and after twelve rounds of the block that follows
+    uint32_t sched[10];     // that block's w[16..25], five of them short a term
+    uint32_t tail10;        // header word 26, which is w[10] and is read again
+    uint32_t target[2];     // the top 64 bits, most significant last
     uint32_t nonce_start;
     uint32_t count;
     uint32_t capacity;
 };
 
-static_assert(sizeof(LbryPush) == 120,
-              "lbry_kernel.glsl's push block is 120 bytes");
+static_assert(sizeof(LbryPush) == 128,
+              "lbry_kernel.glsl's push block is 128 bytes");
 static_assert(sizeof(LbryPush) <= 128,
               "Vulkan guarantees only 128 bytes of push constants");
-static_assert(offsetof(LbryPush, tail) == 32, "push block layout");
-static_assert(offsetof(LbryPush, target) == 76, "push block layout");
-static_assert(offsetof(LbryPush, nonce_start) == 108, "push block layout");
+static_assert(offsetof(LbryPush, midbuffer) == 32, "push block layout");
+static_assert(offsetof(LbryPush, sched) == 64, "push block layout");
+static_assert(offsetof(LbryPush, tail10) == 104, "push block layout");
+static_assert(offsetof(LbryPush, target) == 108, "push block layout");
+static_assert(offsetof(LbryPush, nonce_start) == 116, "push block layout");
 
 // ---------------------------------------------------------------- the hash
 
@@ -224,6 +224,9 @@ public:
     // miners set it to the same 256.
     double target_factor() const override { return 256.; }
 
+    // The kernel screens on the top 64 bits; see LbryPush.
+    int screen_bits() const override { return 64; }
+
     // Bitcoin's stratum, plus the claimtrie root the header needs and the
     // miner cannot compute. It has to come down the wire with the job, which
     // is the one place this protocol differs -- and it is why the header
@@ -292,11 +295,9 @@ public:
         return count;
     }
 
-    // Everything that is the same for every nonce in the dispatch, which here
-    // is the first 64 bytes of the header: version, prevhash, and the first
-    // half of the merkle root. Their compression happens once instead of a few
-    // billion times -- and, as the struct comment says, it is also the only
-    // reason the rest of this fits in push constants.
+    // Everything that is the same for every nonce in the dispatch: the first
+    // 64 bytes of the header, then the second block as far as it goes before
+    // the nonce is needed.
     size_t prepare(const Dispatch &dispatch, void *out,
                    size_t capacity) const override
     {
@@ -310,11 +311,16 @@ public:
         sha256_midstate(push.midstate, dispatch.header);
 
         // Words 16..26 are the rest of the header; 27 is the nonce, which the
-        // kernel substitutes per invocation.
-        for (size_t i = 0; i < 11; i++)
-            push.tail[i] = dispatch.header[16 + i];
+        // kernel substitutes per invocation. Word 26 goes along separately
+        // because the schedule reads it again at w[26].
+        sha256_advance_nonce_block_112(push.midbuffer, push.sched,
+                                       push.midstate, dispatch.header + 16);
+        push.tail10 = dispatch.header[26];
 
-        std::memcpy(push.target, dispatch.target, sizeof push.target);
+        // The top 64 bits only; the host compares all 256 before submitting.
+        push.target[0] = dispatch.target[6];
+        push.target[1] = dispatch.target[7];
+
         // The low half, because this kernel's nonce is one header word -- the
         // same halving hash() makes, and the reason the two agree about which
         // nonces those are.

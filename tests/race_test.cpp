@@ -615,8 +615,8 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
 
 void usage(const char *program)
 {
-    std::printf("usage: %s [algo] [repetitions] [queue-depth] [--device-dag]\n",
-                program);
+    std::printf("usage: %s [algo] [repetitions] [queue-depth] [--device-dag] "
+                "[--nonces-per-invocation N]\n", program);
 }
 
 // KawPoW's table, and the choice between the two of them.
@@ -644,10 +644,19 @@ int main(int argc, char *argv[])
     bool device_dag = false;
     std::vector<const char *> positional;
     for (int i = 1; i < argc; i++) {
-        if (std::strcmp(argv[i], "--device-dag") == 0)
+        if (std::strcmp(argv[i], "--device-dag") == 0) {
             device_dag = true;
-        else
+        } else if (std::strcmp(argv[i], "--nonces-per-invocation") == 0
+                   && i + 1 < argc) {
+            const long n = std::strtol(argv[++i], nullptr, 0);
+            if (n < 1 || n > 256) {
+                usage(argv[0]);
+                return 2;
+            }
+            opt_nonces_per_invocation = static_cast<int>(n);
+        } else {
             positional.push_back(argv[i]);
+        }
     }
 
     const char *name = !positional.empty() ? positional[0] : "sha256d";

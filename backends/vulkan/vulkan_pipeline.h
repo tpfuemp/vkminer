@@ -27,10 +27,20 @@ namespace vkminer {
 // it aligned as such, which is why this returns words and not bytes.
 bool read_spirv(const std::string &path, std::vector<uint32_t> *out);
 
-// Where a kernel's own constants start. Zero to three are this backend's --
-// the workgroup width, the probe, and the two the shared table is addressed
-// with -- and four to seven are left for the next one of those, so that adding
-// one does not renumber every program constant in every shader that has any.
+// Whether a module declares specialization constant `id`. Needed where the host
+// credits work based on a constant a module might silently ignore.
+bool spirv_declares_constant(const uint32_t *words, size_t count, uint32_t id);
+
+// Specialization constant 5, and the most it may be. A limit rather than a
+// size, like the ones in backend.h.
+constexpr uint32_t kNoncesConstantId = 5;
+constexpr uint32_t kMaxNoncesPerInvocation = 256;
+
+// Where a kernel's own constants start. Zero to five are this backend's -- the
+// workgroup width, the probe, the two the shared table is addressed with, the
+// invocation count and the nonces an invocation searches -- and six and seven
+// are left for the next one of those, so that adding one does not renumber
+// every program constant in every shader that has any.
 constexpr uint32_t kProgramConstantId = 8;
 
 // Where the job-independent ones start: above every program constant a module
@@ -52,6 +62,14 @@ struct ComputePipelineDesc {
     // debug probe on the path every invocation takes. Compare the two binary
     // sizes under --vk-pipeline-stats to check that it really went.
     bool probe_best = false;
+
+    // Specialization constant 4: whether the shader counts the invocations that
+    // reach a digest. Off and folded away like the probe, and costlier when on.
+    bool count_reached = false;
+
+    // Specialization constant 5: how many consecutive nonces one invocation
+    // searches. Never zero; ignored by a module that does not declare it.
+    uint32_t nonces_per_invocation = 1;
 
     // Specialization constants 2 and 3: how many pieces the shared table is in
     // on this device, and how many 32-bit words are in one of them. A shader

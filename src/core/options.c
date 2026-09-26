@@ -79,6 +79,10 @@ int stratum_keepalive_timeout = 60;
  * reserved target. */
 int64_t opt_benchmark_target = -1;
 
+/* What --benchmark folds into its header so that two runs hash different
+ * nonces, or -1 for the fixed header. */
+int64_t opt_benchmark_seed = -1;
+
 double opt_diff_factor = 1.0;
 
 /* Every difficulty this miner prints is in the scale the pool quotes; every
@@ -137,6 +141,11 @@ bool opt_vk_pipeline_stats = false;
  * is off, and a hash rate measured with it on is not a hash rate. */
 bool opt_vk_probe_best = false;
 
+/* Whether the shader counts the invocations that computed a digest, to check
+ * against the nonces dispatched. An atomic add per invocation, so a diagnostic
+ * and never a mining option. */
+bool opt_vk_count_reached = false;
+
 /* Report every device as lacking shaderInt64. The feature is optional, so an
  * algorithm with a 64-bit state ships two kernels, and this is how the one
  * written for hardware without it gets run on hardware with it. The device is
@@ -157,6 +166,10 @@ int opt_progpow_max_epoch = 0;
  * two runs at two widths are the only way to check that tuning it is worth
  * anything. Zero lets the backend pick. */
 int opt_workgroup = 0;
+
+/* Nonces each invocation searches in turn, for the same reason again. Zero is
+ * one; a kernel that cannot take more runs at the most it can. */
+int opt_nonces_per_invocation = 0;
 
 /* Which of an algorithm's kernels to run, by the name kernels() gives it. NULL
  * lets the tuner choose, which is the setting to mine with.
@@ -266,6 +279,11 @@ Options:\n\
                         is the only way to see nonces it should have found and\n\
                         did not. Costs an atomic per hash, so a rate measured\n\
                         with this on is not a rate\n\
+      --vk-count-reached\n\
+                        count the invocations that reached a digest and report\n\
+                        them against the nonces dispatched. They are equal or\n\
+                        the kernel is skipping work; unlike the probe this is\n\
+                        exact, and it costs more\n\
       --no-int64        report every device as having no shaderInt64, so an\n\
                         algorithm carrying both a 64-bit and a 32-bit kernel\n\
                         takes the 32-bit one. That feature is optional, and\n\
@@ -289,6 +307,11 @@ Options:\n\
       --workgroup=N     invocations per workgroup (vulkan only; default: let\n\
                         the backend choose). The tuner's other axis, named so\n\
                         that two runs can be compared at two widths\n\
+      --nonces-per-invocation=N\n\
+                        nonces each GPU invocation searches in turn (vulkan\n\
+                        only; default 1). A kernel that cannot take N runs at\n\
+                        the most it can, which the log reports. For measuring\n\
+                        the difference, not for mining\n\
       --kernel=NAME     which of the algorithm's kernels to run, where it\n\
                         offers more than one (default: let the tuner choose).\n\
                         --no-tune otherwise falls back to the algorithm's\n\
@@ -365,7 +388,12 @@ Options:\n\
                         2^32/(HEX+1) passes. Nothing is ever submitted. Use it\n\
                         to prove the emit and re-verification path runs at a\n\
                         rate arithmetic predicts -- a silent benchmark is no\n\
-                        evidence that it works at all\n"
+                        evidence that it works at all\n\
+      --benchmark-seed=N\n\
+                        fold N into --benchmark's header so that runs with\n\
+                        different seeds hash different nonces. Without it\n\
+                        every run hashes the same ones, which is what an A/B\n\
+                        wants and what a count against an expectation does not\n"
 #ifdef HAVE_SYSLOG_H
 "\
   -S, --syslog          use system log for output messages\n"
@@ -399,6 +427,7 @@ static struct option const options[] = {
    { "background",        0, NULL, 'B' },
    { "bell",              0, NULL, 1031 },
    { "benchmark",         0, NULL, 1005 },
+   { "benchmark-seed",    1, NULL, 1065 },
    { "benchmark-target",  1, NULL, 1052 },
    { "cert",              1, NULL, 1001 },
    { "config",            1, NULL, 'c' },
@@ -419,6 +448,7 @@ static struct option const options[] = {
    { "no-redirect",       0, NULL, 1009 },
    { "no-stratum",        0, NULL, 1007 },
    { "no-tune",           0, NULL, 1048 },
+   { "nonces-per-invocation", 1, NULL, 1064 },
    { "pass",              1, NULL, 'p' },
    { "progpow-max-epoch", 1, NULL, 1062 },
    { "protocol",          0, NULL, 'P' },
@@ -443,6 +473,7 @@ static struct option const options[] = {
    { "user",              1, NULL, 'u' },
    { "userpass",          1, NULL, 'O' },
    { "version",           0, NULL, 'V' },
+   { "vk-count-reached",  0, NULL, 1063 },
    { "vk-pipeline-stats", 0, NULL, 1049 },
    { "vk-probe-best",     0, NULL, 1050 },
    { "vk-validate",       0, NULL, 1042 },
@@ -740,6 +771,15 @@ void parse_arg( int key, char *arg )
          opt_workgroup = v;
          break;
 
+      case 1064: // nonces-per-invocation
+         v = atoi( arg );
+         /* Past a few hundred the batch is a handful of invocations and the
+          * device is idle, so a larger number is a typo rather than a test. */
+         if ( v < 1 || v > 256 )
+            show_usage_and_exit( 1 );
+         opt_nonces_per_invocation = v;
+         break;
+
       case 1055: // kernel
          free( opt_kernel );
          opt_kernel = strdup( arg );
@@ -809,6 +849,17 @@ void parse_arg( int key, char *arg )
          if ( !*arg || !end || *end || t > 0xffffffffULL )
             show_usage_and_exit( 1 );
          opt_benchmark_target = (int64_t) t;
+         break;
+      }
+
+      case 1065: // benchmark-seed
+      {
+         /* Decimal or hex. */
+         char *end = NULL;
+         unsigned long long s = strtoull( arg, &end, 0 );
+         if ( !*arg || !end || *end || s > 0xffffffffULL )
+            show_usage_and_exit( 1 );
+         opt_benchmark_seed = (int64_t) s;
          break;
       }
 
@@ -926,6 +977,10 @@ void parse_arg( int key, char *arg )
 
       case 1050: // vk-probe-best
          opt_vk_probe_best = true;
+         break;
+
+      case 1063: // vk-count-reached
+         opt_vk_count_reached = true;
          break;
 
       case 1053: // no-int64

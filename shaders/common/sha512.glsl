@@ -1,10 +1,12 @@
-// SHA-512 compression, FIPS 180-4, for compute kernels.
+// SHA-512 building blocks, FIPS 180-4, for compute kernels.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // SHA-512 is SHA-256 with 64-bit words, eighty rounds, different rotation
-// amounts and a different initial value. The structure below is deliberately
-// the same shape as shaders/common/sha256.glsl so the two can be read against
-// each other, including the rolling sixteen-word message schedule.
+// amounts and a different initial value. This file holds the word type, the
+// constants and the round functions; the rounds themselves are written out in
+// the one kernel that uses them, algorithms/lbry/lbry_kernel.glsl. The
+// functions are named as in
+// shaders/common/sha256.glsl so the two can be read against each other.
 //
 // The 64-bit word is the difficulty. shaderInt64 is an optional Vulkan feature
 // and Mali and Adreno frequently lack it, so this file is written over a lane
@@ -58,13 +60,12 @@ SLANE slane(uint lo, uint hi) { return uvec2(lo, hi); }
 uint  slo(SLANE x)            { return x.x; }
 uint  shi(SLANE x)            { return x.y; }
 
-// The carry is the whole point of this function existing. `lo < a.x` is the
-// unsigned-overflow test: the sum wrapped exactly when it came out below either
-// operand.
+// The carry is the whole point of this function existing. uaddCarry() returns
+// it from the add itself, which a driver can lower to one add-with-carry.
 SLANE sadd(SLANE a, SLANE b)
 {
-    uint lo = a.x + b.x;
-    uint carry = lo < a.x ? 1u : 0u;
+    uint carry;
+    uint lo = uaddCarry(a.x, b.x, carry);
     return uvec2(lo, a.y + b.y + carry);
 }
 
@@ -174,40 +175,6 @@ SLANE sha512_small_s0(SLANE x)
 SLANE sha512_small_s1(SLANE x)
 {
     return srotr(x, 19u) ^ srotr(x, 61u) ^ sshr(x, 6u);
-}
-
-// Compress one 128-byte block into `state`. The block arrives as sixteen 64-bit
-// words, each holding eight message bytes in big-endian order. `w` is consumed:
-// the schedule is expanded over it in place, sixteen slots wide, exactly as
-// sha256_compress() does it and for the same register-pressure reason.
-void sha512_compress(inout SLANE state[8], inout SLANE w[16])
-{
-    SLANE a = state[0], b = state[1], c = state[2], d = state[3];
-    SLANE e = state[4], f = state[5], g = state[6], h = state[7];
-
-    for (uint i = 0u; i < 80u; i++) {
-        if (i >= 16u) {
-            // w[i] = w[i-16] + s0(w[i-15]) + w[i-7] + s1(w[i-2]), indices
-            // modulo 16. The slot written is w[i-16]'s.
-            w[i & 15u] = sadd(sadd(w[i & 15u],
-                                   sha512_small_s0(w[(i + 1u) & 15u])),
-                              sadd(w[(i + 9u) & 15u],
-                                   sha512_small_s1(w[(i + 14u) & 15u])));
-        }
-
-        SLANE t1 = sadd(sadd(sadd(h, sha512_big_s1(e)),
-                             sadd(sha512_ch(e, f, g), sha512_k(i))),
-                        w[i & 15u]);
-        SLANE t2 = sadd(sha512_big_s0(a), sha512_maj(a, b, c));
-
-        h = g; g = f; f = e; e = sadd(d, t1);
-        d = c; c = b; b = a; a = sadd(t1, t2);
-    }
-
-    state[0] = sadd(state[0], a); state[1] = sadd(state[1], b);
-    state[2] = sadd(state[2], c); state[3] = sadd(state[3], d);
-    state[4] = sadd(state[4], e); state[5] = sadd(state[5], f);
-    state[6] = sadd(state[6], g); state[7] = sadd(state[7], h);
 }
 
 #endif  // VKMINER_SHADERS_COMMON_SHA512_GLSL_INCLUDED

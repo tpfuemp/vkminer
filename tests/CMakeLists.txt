@@ -480,6 +480,13 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_lbry32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # And with each invocation searching three nonces. Three so that the last
+    # invocation stops partway through its share of the range.
+    add_test(NAME diff_test_lbry_nonces
+        COMMAND diff_test lbry 100000 --nonces-per-invocation 3)
+    set_tests_properties(diff_test_lbry_nonces
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a

@@ -63,7 +63,7 @@ layout(push_constant) uniform Push {
 // -------------------------------------------------------------- the program
 //
 // One constant per word of what progpow_program.cpp generates, in that order and
-// from constant ID 8 -- zero to three are the backend's own and four to seven
+// from constant ID 8 -- zero to five are the backend's own and six and seven
 // are spare, see kProgramConstantId. The defaults are not a program: the
 // backend refuses to dispatch until a pipeline is built with the period's real
 // values.

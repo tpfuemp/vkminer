@@ -363,6 +363,11 @@ int main(int argc, char *argv[])
     // of this process go through proper_exit rather than through main.
     set_exit_hook(release_devices);
 
+    // And the ways out that return from main. g_backend's static destructor
+    // would run after the driver's exit handlers, which crashed saving the
+    // pipeline cache on a Linux NVIDIA driver; this one runs before them.
+    std::atexit(release_devices);
+
     // What the status API reports devices from. The list is the backend's own
     // and is built once, so this is a pointer rather than a copy; it is handed
     // over here, before anything can ask.
@@ -738,21 +743,35 @@ int main(int argc, char *argv[])
                     // when a target was chosen to produce some, because at the
                     // default one the honest expectation is zero and a line
                     // saying "0, expected 0.0" is noise.
+                    //
+                    // Both sides are counted where a dispatch is collected and
+                    // read once the workers have stopped, so that no dispatch
+                    // is in one total and not the other.
                     if (opt_benchmark_target >= 0) {
+                        worker_request_stop();
+                        const auto deadline =
+                            std::chrono::steady_clock::now() + kStopGrace;
+                        while (worker_count() > 0 &&
+                               std::chrono::steady_clock::now() < deadline)
+                            std::this_thread::sleep_for(
+                                std::chrono::milliseconds(10));
+
                         uint64_t confirmed = 0, rejected = 0;
                         worker_candidate_counts(&confirmed, &rejected);
+                        const double reaped =
+                            static_cast<double>(worker_hashes_reaped());
 
                         const double p = (static_cast<double>(
                                               opt_benchmark_target) + 1.) /
                                          4294967296.;
-                        const double expected = hashes * p;
+                        const double expected = reaped * p;
                         applog(LOG_NOTICE,
                                "Benchmark: %llu candidate(s) confirmed by the "
                                "host and %llu rejected, against %.1f expected "
                                "from %.0f hashes at a target of %08llx",
                                static_cast<unsigned long long>(confirmed),
                                static_cast<unsigned long long>(rejected),
-                               expected, hashes,
+                               expected, reaped,
                                static_cast<unsigned long long>(
                                    opt_benchmark_target));
                     }

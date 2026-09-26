@@ -286,6 +286,12 @@ struct KernelSpec {
     // ask for one combination without going through a process-wide global.
     uint32_t queue_depth = 0;
 
+    // Nonces each invocation searches in turn, for the same caller and on the
+    // same terms; 0 lets the backend choose, which is one unless the operator
+    // asked for more. The backend reads from the SPIR-V whether the module
+    // takes more than one. Not combined with `lanes`.
+    uint32_t nonces_per_invocation = 0;
+
     // Kernels the caller will hold alive on this device at once, itself
     // included; the backend divides its scratch budget by this. Zero and one
     // both mean alone. Each gets an equal share rather than whatever is left
@@ -407,6 +413,18 @@ public:
         uint64_t samples = 0;
     };
     virtual BestDigest best_digest() const { return BestDigest{}; }
+
+    // `dispatched` is the nonces the host asked for and `reached` the
+    // invocations that computed a digest. They are equal or the kernel is not
+    // running what it was handed; `short_dispatches` counts the dispatches
+    // where they differ. An exact check, where the probe above is a statistic.
+    struct ReachedCount {
+        uint64_t reached = 0;
+        uint64_t dispatched = 0;
+        uint64_t samples = 0;
+        uint64_t short_dispatches = 0;
+    };
+    virtual ReachedCount reached_count() const { return ReachedCount{}; }
 };
 
 class ComputeBackend {

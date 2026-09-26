@@ -37,6 +37,11 @@ int worker_exit_code();
 // evidence.
 void worker_candidate_counts(uint64_t *confirmed, uint64_t *rejected);
 
+// The hashes those candidates were found in: every nonce of every dispatch the
+// workers have collected, counted at the same moment as the candidates. The
+// published total_hashes lags, because it moves only when a rate window closes.
+uint64_t worker_hashes_reaped();
+
 // Which device a worker mines on, as an index into backend->devices(), or -1
 // before worker_set_backend has run. Two workers may answer the same: what a
 // worker is on a GPU is a queue to keep fed, so a reader comparing devices has

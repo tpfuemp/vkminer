@@ -7,6 +7,7 @@
 #include "backends/vulkan/command_ring.h"
 #include "backends/vulkan/vulkan_pipeline.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -27,11 +28,14 @@ constexpr uint32_t kCandidateWords = 10;
 // kMaxCandidates is in backends/backend.h, because every caller of collect()
 // has to size its array by the same number.
 
-// Word 0 is the count, word 1 the best digest the probe saw, and the candidates
-// follow. Both halves of the same contract as above.
+// Word 0 is the count, word 1 the best digest the probe saw, word 2 the
+// invocations that got as far as having one, and the candidates follow. Both
+// halves of the same contract as above. Nothing checks that a .spv loaded
+// through --algo-dir was built against this layout.
 constexpr uint32_t kFoundWord = 0;
 constexpr uint32_t kBestWord = 1;
-constexpr uint32_t kHeaderWords = 2;
+constexpr uint32_t kReachedWord = 2;
+constexpr uint32_t kHeaderWords = 3;
 
 constexpr uint32_t kResultWords = kHeaderWords + kMaxCandidates * kCandidateWords;
 
@@ -158,6 +162,7 @@ public:
         // this had before it was pipelined, from the same binary.
         depth_ = fit.depth;
         lanes_ = fit.lanes;
+        nonces_ = fit.nonces;
 
         ComputePipelineDesc desc;
         desc.spirv = spec.spirv;
@@ -190,6 +195,9 @@ public:
         desc.local_size_x = fit.local_size_x;
         probe_best_ = opt_vk_probe_best;
         desc.probe_best = probe_best_;
+        count_reached_ = opt_vk_count_reached;
+        desc.count_reached = count_reached_;
+        desc.nonces_per_invocation = nonces_;
         desc.sets = depth_;
 
         // What the table came out as on this device, which the shader needs to
@@ -347,6 +355,9 @@ public:
         char lanes[48] = "";
         if (lanes_ > 1)
             std::snprintf(lanes, sizeof lanes, ", %u lanes to a hash", lanes_);
+        else if (nonces_ > 1)
+            std::snprintf(lanes, sizeof lanes, ", %u hashes to an invocation",
+                          nonces_);
         applog(LOG_INFO, "Vulkan: '%s' on %s, workgroup %u%s, %u dispatch%s in "
                          "flight%s%s", name_, info.name.c_str(), local_, lanes,
                depth_, depth_ == 1 ? "" : "es",
@@ -519,14 +530,15 @@ public:
         // Three fills rather than one because the probe's word starts at the
         // other end of the range: a running minimum initialized to zero stays
         // zero. They cover disjoint bytes, which is what lets them go in
-        // without a barrier between them.
+        // without a barrier between them. The last one includes the invocation
+        // counter, which starts at zero like the rest.
         fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
                            kFoundWord * sizeof(uint32_t), sizeof(uint32_t), 0);
         fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
                            kBestWord * sizeof(uint32_t), sizeof(uint32_t),
                            0xffffffffu);
         fn.vkCmdFillBuffer(slot->cmd, mine.results.handle,
-                           kHeaderWords * sizeof(uint32_t), VK_WHOLE_SIZE, 0);
+                           kReachedWord * sizeof(uint32_t), VK_WHOLE_SIZE, 0);
 
         VkMemoryBarrier cleared{};
         cleared.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -624,6 +636,26 @@ public:
             best_samples_++;
         }
 
+        // Exactly `entry.count` invocations should have reached a digest. The
+        // counter is 32 bits, which kMaxBatch (2^28) cannot wrap.
+        if (count_reached_) {
+            const uint32_t reached = result[kReachedWord];
+            reached_total_ += reached;
+            reached_dispatched_ += entry.count;
+            reached_samples_++;
+            if (reached != entry.count) {
+                reached_short_++;
+                if (reached_short_ <= 4)
+                    applog(LOG_WARNING,
+                           "Vulkan: '%s' was handed %u nonces and %u "
+                           "invocation(s) reached a digest -- %s%u",
+                           name_, entry.count, reached,
+                           reached < entry.count ? "short by " : "over by ",
+                           reached < entry.count ? entry.count - reached
+                                                 : reached - entry.count);
+            }
+        }
+
         if (found > kMaxCandidates) {
             applog(LOG_WARNING, "Vulkan: '%s' found %u candidates in one "
                                 "dispatch and only %u fit -- %u lost. The "
@@ -657,6 +689,12 @@ public:
     BestDigest best_digest() const override
     {
         return BestDigest{best_ratio_sum_, best_samples_};
+    }
+
+    ReachedCount reached_count() const override
+    {
+        return ReachedCount{reached_total_, reached_dispatched_,
+                            reached_samples_, reached_short_};
     }
 
 private:
@@ -777,8 +815,11 @@ private:
             // The two numbers a rate is the product of: a configuration that
             // reads slowly is dispatching too little or taking too long per
             // dispatch, and nothing outside this function can tell which.
-            applog(LOG_DEBUG, "Vulkan: '%s' sizes to %u hashes, retiring one "
-                              "every %.1f ms", name_, batch_, seconds * 1e3);
+            // Behind --debug, because a live run resizes about once a second.
+            if (opt_debug)
+                applog(LOG_DEBUG, "Vulkan: '%s' sizes to %u hashes, retiring "
+                                  "one every %.1f ms",
+                       name_, batch_, seconds * 1e3);
         }
     }
 
@@ -790,8 +831,9 @@ private:
         // Sixteen lanes to the nonce made it sixteen times the intended size,
         // and a floor the tuning cannot descend below is a floor it has to run
         // at: on a software rasterizer that is a KawPoW dispatch of seconds
-        // where the aim is fifty milliseconds.
-        uint32_t least = kMinBatch / lanes_;
+        // where the aim is fifty milliseconds. The same argument the other
+        // way where an invocation searches several nonces.
+        uint32_t least = kMinBatch / lanes_ * nonces_;
         if (least < per_group_)
             least = per_group_;
         if (batch_ < least)
@@ -926,6 +968,7 @@ private:
     // Invocations per nonce, and the nonces a workgroup of them holds. One and
     // the width for every kernel where an invocation is a hash.
     uint32_t lanes_ = 1;
+    uint32_t nonces_ = 1;
     uint32_t per_group_ = 1;
 
     // Device-local bytes per invocation, the batch that many of them fit in,
@@ -942,6 +985,14 @@ private:
     double best_ratio_sum_ = 0.;
     uint64_t best_samples_ = 0;
     bool probe_best_ = false;
+
+    // The invocation count against what was dispatched. All four stay at zero
+    // unless the count is on.
+    uint64_t reached_total_ = 0;
+    uint64_t reached_dispatched_ = 0;
+    uint64_t reached_samples_ = 0;
+    uint64_t reached_short_ = 0;
+    bool count_reached_ = false;
 };
 
 }  // namespace
@@ -1053,9 +1104,29 @@ bool vulkan_kernel_fit(const DeviceInfo &info, const KernelSpec &spec,
         fit.local_size_x = whole ? whole : step;
     }
 
+    // Nonces each invocation searches in turn. A module takes more than one
+    // only if it declares the constant, or the host would count nonces nobody
+    // hashed. A spec asking for more is refused; the process-wide option is
+    // clamped instead, and the build log reports what ran.
+    const uint32_t most =
+        fit.lanes == 1 && spirv_declares_constant(spec.spirv, spec.spirv_words,
+                                                  kNoncesConstantId)
+            ? kMaxNoncesPerInvocation : 1u;
+    if (spec.nonces_per_invocation > most) {
+        snprintf(why, why_bytes, "'%s' was asked for %u nonces per invocation "
+                                 "and takes at most %u", spec.name,
+                 spec.nonces_per_invocation, most);
+        return false;
+    }
+    fit.nonces = spec.nonces_per_invocation
+               ? spec.nonces_per_invocation
+               : opt_nonces_per_invocation > 0
+               ? std::min(static_cast<uint32_t>(opt_nonces_per_invocation), most)
+               : 1u;
+
     // Nonces per workgroup, which is the unit a dispatch is counted in and the
-    // width only where an invocation is a hash.
-    fit.per_group = fit.local_size_x / fit.lanes;
+    // width only where an invocation is one hash.
+    fit.per_group = fit.local_size_x / fit.lanes * fit.nonces;
     if (!fit.per_group)
         fit.per_group = 1;
 

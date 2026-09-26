@@ -443,6 +443,7 @@ extern bool opt_debug;
 extern bool opt_debug_diff;
 extern bool opt_benchmark;
 extern int64_t opt_benchmark_target;
+extern int64_t opt_benchmark_seed;
 extern bool opt_protocol;
 extern bool opt_extranonce;
 extern bool opt_quiet;
@@ -533,8 +534,10 @@ extern bool opt_device_list;   /* enumerate and exit */
 extern bool opt_vk_validate;   /* Vulkan validation layers */
 extern bool opt_vk_pipeline_stats; /* report what the driver compiled a shader into */
 extern bool opt_vk_probe_best; /* have the shader track the best digest it sees */
+extern bool opt_vk_count_reached; /* have the shader count the invocations that ran */
 extern bool opt_no_int64;      /* report every device as having no shaderInt64 */
 extern int opt_workgroup;      /* invocations per workgroup, 0 to let the backend pick */
+extern int opt_nonces_per_invocation; /* nonces per invocation, 0 = one */
 extern char *opt_kernel;       /* which of the algorithm's kernels, NULL = the tuner's */
 extern char *opt_replay;       /* capture file to re-run, NULL to mine */
 extern bool opt_self_test;     /* run the known-answer vectors and exit */

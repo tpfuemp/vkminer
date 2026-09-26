@@ -183,7 +183,10 @@ void bind_protocol_settings(const char *name)
     // The header build and the submit read these, and the shader reads
     // nonce_word(); they are two spellings of one layout and a disagreement
     // between them is a miner that mines the wrong word and submits another.
-    if (opt_nonce_index != algo->nonce_word())
+    // An algorithm whose nonce is past the end of its header carries it as a
+    // field of its own, and its submit never reads the index.
+    const bool nonce_in_header = algo->nonce_word() * 4 < algo->header_bytes();
+    if (nonce_in_header && opt_nonce_index != algo->nonce_word())
         applog(LOG_ERR, "'%s' hashes the nonce at word %u and would submit "
                         "word %u -- its stratum dialect and its header layout "
                         "disagree", name,

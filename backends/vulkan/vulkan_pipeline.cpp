@@ -47,6 +47,27 @@ bool read_spirv(const std::string &path, std::vector<uint32_t> *out)
     return true;
 }
 
+bool spirv_declares_constant(const uint32_t *words, size_t count, uint32_t id)
+{
+    // Five words of header, then instructions whose first word is their length
+    // above their opcode.
+    constexpr uint32_t kOpDecorate = 71;
+    constexpr uint32_t kDecorationSpecId = 1;
+    if (!words || count < 5)
+        return false;
+    for (size_t i = 5; i < count;) {
+        const uint32_t length = words[i] >> 16;
+        const uint32_t opcode = words[i] & 0xffffu;
+        if (!length || i + length > count)
+            return false;
+        if (opcode == kOpDecorate && length >= 4
+            && words[i + 2] == kDecorationSpecId && words[i + 3] == id)
+            return true;
+        i += length;
+    }
+    return false;
+}
+
 std::unique_ptr<ComputePipeline> ComputePipeline::create(
     VulkanDevice &device, const ComputePipelineDesc &desc, VkPipelineCache cache)
 {
@@ -172,12 +193,18 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
     //
     // The three groups are contiguous in the data block and not in the ID
     // space, which is what the map entries are for.
+    constexpr uint32_t kFixedConstants = 6;
+
     std::vector<uint32_t> constants;
-    constants.reserve(4 + desc.program_count + desc.constant_count);
+    constants.reserve(kFixedConstants + desc.program_count
+                      + desc.constant_count);
     constants.push_back(desc.local_size_x);
     constants.push_back(desc.probe_best ? VK_TRUE : VK_FALSE);
     constants.push_back(desc.shared_chunks);
     constants.push_back(desc.shared_chunk_words);
+    constants.push_back(desc.count_reached ? VK_TRUE : VK_FALSE);
+    constants.push_back(desc.nonces_per_invocation
+                        ? desc.nonces_per_invocation : 1u);
     for (uint32_t i = 0; i < desc.program_count; i++)
         constants.push_back(desc.program ? desc.program[i] : 0);
     for (uint32_t i = 0; i < desc.constant_count; i++)
@@ -185,12 +212,13 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
 
     std::vector<VkSpecializationMapEntry> entries(constants.size());
     for (uint32_t i = 0; i < entries.size(); i++) {
-        const uint32_t after_program = 4 + desc.program_count;
+        const uint32_t after_program = kFixedConstants + desc.program_count;
         entries[i].constantID =
-            i < 4 ? i
-                  : i < after_program
-                        ? kProgramConstantId + (i - 4)
-                        : kKernelConstantId + (i - after_program);
+            i < kFixedConstants
+                ? i
+                : i < after_program
+                      ? kProgramConstantId + (i - kFixedConstants)
+                      : kKernelConstantId + (i - after_program);
         entries[i].offset = i * sizeof(uint32_t);
         entries[i].size = sizeof(uint32_t);
     }

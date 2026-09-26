@@ -32,7 +32,8 @@ std::unique_ptr<Kernel> make_vulkan_kernel(VulkanDevice &device,
 struct KernelFit {
     uint32_t local_size_x = 0;  // invocations per workgroup
     uint32_t lanes = 1;         // invocations that cooperate on one hash
-    uint32_t per_group = 1;     // hashes per workgroup, which is the two above
+    uint32_t nonces = 1;        // hashes one invocation searches in turn
+    uint32_t per_group = 1;     // hashes per workgroup, which is the three above
     uint32_t depth = 0;         // dispatches queued on the device at once
     uint32_t max_batch = 0;     // hashes one dispatch may carry
     uint64_t per_nonce = 0;     // scratch one hash costs across every dispatch

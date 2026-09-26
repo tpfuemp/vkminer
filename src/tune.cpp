@@ -209,13 +209,15 @@ struct Candidate {
         return (sorted.back() - sorted.front()) / (2. * middle);
     }
 
-    // What this candidate varies, for a log line: a pass sweeps one axis, so
-    // naming the other two would be naming what every candidate shares.
+    // What this candidate varies, for a log line: the depth pass sweeps one
+    // axis and the width pass one or two, so naming the rest would be naming
+    // what every candidate shares.
     std::string describe() const
     {
-        char buf[64];
+        char buf[96];
         if (variant[0])
-            std::snprintf(buf, sizeof buf, "kernel '%s'", variant);
+            std::snprintf(buf, sizeof buf, "kernel '%s' at workgroup %u",
+                          variant, local);
         else
             std::snprintf(buf, sizeof buf, "workgroup %u, depth %u", local,
                           depth);
@@ -462,50 +464,26 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
         return c.kernel != nullptr;
     };
 
-    // Which kernel first, where the algorithm has more than one: a different
-    // module is the coarsest axis, and the width that suits one need not suit
-    // the other, so the passes below run on whichever wins. At the default
-    // width and depth, the only footing they share before either is known.
-    KernelSpec chosen = base;
-    {
-        KernelSpec variants[kMaxVariants];
-        const size_t count = algo.kernels(info, variants, kMaxVariants);
+    // Every kernel the algorithm offers for this device. Module and width are
+    // raced together rather than one after the other, because they interact:
+    // a module that loses at the default width can win at another.
+    KernelSpec variants[kMaxVariants];
+    size_t count = algo.kernels(info, variants, kMaxVariants);
 
-        std::vector<KernelSpec> specs;
-        std::vector<Candidate> candidates;
-        for (size_t i = 0; count > 1 && i < count; i++) {
-            Candidate c;
-            c.spec = variants[i];
-            c.kernel = build(backend, device_index, algo, c.spec, 0, 0,
-                             alone ? 1u : static_cast<uint32_t>(count), answers,
-                             answer_count);
-            if (!c.kernel)
-                continue;
-            c.local = c.kernel->local_size();
-            c.depth = c.kernel->queue_depth();
-            c.variant = variants[i].variant;
-            if (alone)
-                c.kernel.reset();
-
-            // The one the algorithm would have handed out unaided. A second
-            // module has to beat it, not merely differ from it.
-            c.is_default = variants[i].spirv == base.spirv;
-            specs.push_back(variants[i]);
-            candidates.push_back(std::move(c));
-        }
-
-        if (candidates.size() > 1) {
-            applog(LOG_INFO, "Tuning: device %d (%s) can run %u kernels of "
-                             "'%s'", device_index, info.name.c_str(),
-                   static_cast<unsigned>(candidates.size()), algo.name());
-
-            const int best =
-                alone ? race_alone(device_index, candidates, rebuild,
-                                   header.data(), &nonce)
-                      : race(device_index, candidates, header.data(), &nonce);
-            if (best >= 0)
-                chosen = specs[static_cast<size_t>(best)];
-        }
+    // Where the user named a kernel there is no module to race, and building
+    // the others would only cost compile time (self_test.cpp narrows the same
+    // way). The named module still gets the width and depth passes below.
+    if (opt_kernel && opt_kernel[0])
+        for (size_t i = 0; i < count; i++)
+            if (variants[i].variant
+                && std::strcmp(variants[i].variant, opt_kernel) == 0) {
+                variants[0] = variants[i];
+                count = 1;
+                break;
+            }
+    if (count == 0) {
+        variants[0] = base;
+        count = 1;
     }
 
     // The widths to try, and none where --workgroup named one: that option
@@ -517,33 +495,68 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
 
     // race() runs the candidates interleaved, so all of them are alive at once
     // and a kernel wanting memory per invocation has to be told how many that
-    // is. The default is included: it must be measured on the same terms as
-    // what it is compared against. Those kernels are exactly the ones raced one
-    // at a time, so there the share is the whole card.
+    // is. Each module's default is included: it must be measured on the same
+    // terms as what it is compared against. Those kernels are exactly the ones
+    // raced one at a time, so there the share is the whole card.
     //
-    // An upper bound, not a count -- widths may or may not contain the default,
-    // and a width that fails to build leaves its share unclaimed.
+    // An upper bound, not a count -- widths may or may not contain a module's
+    // default, and a width that fails to build leaves its share unclaimed.
     // Over-declaring costs a smaller batch during the sweep and nothing else.
     const uint32_t width_share =
-        alone ? 1u : static_cast<uint32_t>(widths.size()) + 1;
+        alone ? 1u
+              : static_cast<uint32_t>(count * (widths.size() + 1));
 
-    // What the backend would run unaided, asked for by naming no width and no
-    // depth; both passes below measure against it. The rule that picks it is
-    // the backend's.
+    // One module the width pass can run, with the width the backend would give
+    // it unaided.
+    struct Module {
+        KernelSpec spec;
+        uint32_t default_local = 0;
+    };
+    std::vector<Module> modules;
+
+    // What the backend would run unaided, per module, asked for by naming no
+    // width and no depth; the passes below measure against the algorithm's
+    // own module at its own width. The rule that picks either is not this
+    // file's.
     //
     // Held past the first width pass rather than read and dropped: a build
     // prepares the algorithm's shared state, which the backend keeps only while
     // some kernel holds it, so releasing this early pays to rebuild a DAG-sized
     // table. Raced alone the opposite holds -- what it keeps is the memory each
     // candidate needs all of -- so there it goes at once.
-    std::unique_ptr<Kernel> probe = build(backend, device_index, algo, chosen,
-                                          0, 0, width_share, answers,
-                                          answer_count);
-    if (!probe) {
+    std::vector<std::unique_ptr<Kernel>> probes;
+    uint32_t default_local = 0;
+    uint32_t default_depth = 0;
+    const KernelSpec *standing = nullptr;
+    for (size_t i = 0; i < count; i++) {
+        std::unique_ptr<Kernel> probe = build(backend, device_index, algo,
+                                              variants[i], 0, 0, width_share,
+                                              answers, answer_count);
+        if (!probe)
+            continue;   // build() said why; the other modules can still run
+
+        Module m;
+        m.spec = variants[i];
+        m.default_local = probe->local_size();
+        modules.push_back(m);
+
+        // The one the algorithm would have handed out unaided, or failing
+        // that the first that built. Its default depth is the one every
+        // module is raced at, being the footing they share.
+        if (!standing || variants[i].spirv == base.spirv) {
+            standing = &variants[i];
+            default_local = probe->local_size();
+            default_depth = probe->queue_depth();
+        }
+        if (!alone)
+            probes.push_back(std::move(probe));
+    }
+
+    if (modules.empty()) {
         // Two different failures, and the difference is worth printing: a
         // device with room to run this kernel and none to hold a field of them
         // is not a broken kernel and does not stop the run.
-        if (chosen.scratch_bytes && width_share > 1)
+        if (base.scratch_bytes && width_share > 1)
             applog(LOG_WARNING, "Tuning: device %d cannot hold %u candidates of "
                                 "'%s' at once, and a sweep is candidates raced "
                                 "against each other; mining untuned",
@@ -554,40 +567,51 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
         return false;
     }
 
-    const uint32_t default_local = probe->local_size();
-    const uint32_t default_depth = probe->queue_depth();
-    if (alone)
-        probe.reset();
+    if (modules.size() > 1)
+        applog(LOG_INFO, "Tuning: device %d (%s) can run %u kernels of '%s', "
+                         "each raced at every width", device_index,
+               info.name.c_str(), static_cast<unsigned>(modules.size()),
+               algo.name());
 
+    KernelSpec chosen = *standing;
     out->variant = chosen.variant ? chosen.variant : "";
     out->local_size_x = default_local;
     out->queue_depth = default_depth;
 
-    // One pass over the widths, all at one depth, the default width first
-    // because it is what the others are measured against.
+    // One pass over every module at every width, all at one depth, the
+    // default first because it is what the others are measured against.
     auto width_pass = [&](uint32_t depth) {
-        std::vector<uint32_t> order{default_local};
-        for (const uint32_t local : widths)
-            if (local != default_local)
-                order.push_back(local);
-
         std::vector<Candidate> candidates;
-        for (const uint32_t local : order) {
-            Candidate c;
-            c.spec = chosen;
-            c.local = local;
-            c.depth = depth;
-            c.is_default = local == default_local;
-            if (!alone) {
-                c.kernel = build(backend, device_index, algo, chosen, local,
-                                 depth, width_share, answers, answer_count);
-                if (!c.kernel)
-                    continue;   // build() said why; a width that will not build
-            }                   // is not a failure of the sweep
-            candidates.push_back(std::move(c));
+        for (const Module &m : modules) {
+            const bool standing_module = m.spec.spirv == standing->spirv;
+
+            std::vector<uint32_t> order{m.default_local};
+            for (const uint32_t local : widths)
+                if (local != m.default_local)
+                    order.push_back(local);
+
+            for (const uint32_t local : order) {
+                Candidate c;
+                c.spec = m.spec;
+                c.local = local;
+                c.depth = depth;
+                c.variant = modules.size() > 1 && m.spec.variant
+                                ? m.spec.variant : "";
+                c.is_default = standing_module && local == default_local;
+                if (!alone) {
+                    c.kernel = build(backend, device_index, algo, m.spec, local,
+                                     depth, width_share, answers, answer_count);
+                    if (!c.kernel)
+                        continue;   // build() said why; a width that will not
+                }                   // build is not a failure of the sweep
+                if (c.is_default)
+                    candidates.insert(candidates.begin(), std::move(c));
+                else
+                    candidates.push_back(std::move(c));
+            }
         }
 
-        applog(LOG_INFO, "Tuning: device %d (%s), %u workgroup size(s) at depth "
+        applog(LOG_INFO, "Tuning: device %d (%s), %u configuration(s) at depth "
                          "%u, about %.0f seconds", device_index,
                info.name.c_str(), static_cast<unsigned>(candidates.size()),
                depth, (alone ? 2 : 1) * candidates.size()
@@ -600,14 +624,17 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
         if (best < 0)
             return false;
 
-        out->local_size_x = candidates[static_cast<size_t>(best)].local;
-        out->queue_depth = candidates[static_cast<size_t>(best)].depth;
-        out->rate = candidates[static_cast<size_t>(best)].score();
+        const Candidate &winner = candidates[static_cast<size_t>(best)];
+        chosen = winner.spec;
+        out->variant = chosen.variant ? chosen.variant : "";
+        out->local_size_x = winner.local;
+        out->queue_depth = winner.depth;
+        out->rate = winner.score();
         return true;
     };
 
     const bool swept = width_pass(default_depth);
-    probe.reset();
+    probes.clear();
     if (!swept) {
         applog(LOG_WARNING, "Tuning: device %d failed every configuration; "
                             "mining untuned", device_index);
@@ -668,10 +695,13 @@ bool sweep(ComputeBackend &backend, int device_index, const Algorithm &algo,
 
     // Said plainly: a sweep is the first seconds of load a card sees, which on
     // a thermally capped part is its best, so the rate above will not hold.
-    if (out->local_size_x != default_local || out->queue_depth != default_depth)
-        applog(LOG_INFO, "Tuning: that is not the default (%u, %u). The rate "
-                         "was measured while the device was still cold and is "
-                         "a ranking, not a benchmark.",
+    if (chosen.spirv != standing->spirv || out->local_size_x != default_local
+        || out->queue_depth != default_depth)
+        applog(LOG_INFO, "Tuning: that is not the default (%s%s%u, %u). The "
+                         "rate was measured while the device was still cold "
+                         "and is a ranking, not a benchmark.",
+               standing->variant ? standing->variant : "",
+               standing->variant && standing->variant[0] ? ", " : "",
                default_local, default_depth);
 
     // Where there is a scratchpad the candidates were raced one at a time, so
@@ -749,10 +779,13 @@ void tune_devices(ComputeBackend &backend,
         remember_tuning(index, algo->name(), tuning);
 
         // Used for this run but not filed, because part of it was not measured:
-        // --workgroup and --queue-depth each skip a pass. The key says nothing
-        // about either option, so writing it would make a one-off experiment
-        // permanent.
-        if (opt_workgroup > 0 || opt_queue_depth > 0)
+        // --workgroup and --queue-depth each skip a pass, and --kernel skips
+        // the module race, and --nonces-per-invocation changes what the other
+        // axes are best for. The key records none of them, so writing it would
+        // make a one-off experiment permanent.
+        if (opt_workgroup > 0 || opt_queue_depth > 0
+            || opt_nonces_per_invocation > 0
+            || (opt_kernel && opt_kernel[0]))
             continue;
 
         const std::string description = info.name + " (" + info.driver + "), "
