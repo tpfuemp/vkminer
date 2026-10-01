@@ -302,6 +302,29 @@ bool run_vector(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     return !ignored && !wrong;
 }
 
+// The module under test: the one the device would open with, or the one
+// --kernel names out of every module it can build. A name no module has is a
+// failure, not a quiet fall back to the default.
+bool pick_kernel(const vkminer::Algorithm &algo, const vkminer::DeviceInfo &info,
+                 vkminer::KernelSpec *out)
+{
+    if (!opt_kernel || !opt_kernel[0]) {
+        *out = algo.kernel(info);
+        return true;
+    }
+    vkminer::KernelSpec variants[8];
+    const size_t n = algo.kernels(info, variants, 8);
+    for (size_t i = 0; i < n; i++) {
+        if (variants[i].variant
+            && std::strcmp(variants[i].variant, opt_kernel) == 0) {
+            *out = variants[i];
+            return true;
+        }
+    }
+    fail("%s has no kernel '%s' for this device", algo.name(), opt_kernel);
+    return false;
+}
+
 bool run_device(vkminer::ComputeBackend &backend,
                 const vkminer::DeviceInfo &info,
                 const vkminer::Algorithm &algo)
@@ -309,7 +332,9 @@ bool run_device(vkminer::ComputeBackend &backend,
     std::printf("\n-- device %d: %s [%s]\n", info.index, info.name.c_str(),
                 vkminer::device_kind_name(info.kind));
 
-    const vkminer::KernelSpec spec = algo.kernel(info);
+    vkminer::KernelSpec spec;
+    if (!pick_kernel(algo, info, &spec))
+        return false;
     if (!spec.spirv || !spec.spirv_words) {
         std::printf("SKIP %s has no shader for this device\n", algo.name());
         return true;
@@ -373,13 +398,15 @@ int main(int argc, char *argv[])
 {
     pthread_mutex_init(&applog_lock, nullptr);
 
-    // --no-int64 as the differential test takes it: an algorithm with a 2x32
-    // fallback has two kernels, and the one this device would not otherwise
-    // choose is the one nobody ever runs.
+    // --no-int64 and --kernel as the differential test takes them: an
+    // algorithm with several kernels has ones this device would not
+    // otherwise choose, and those are the ones nobody ever runs.
     const char *name = "sha256d";
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--no-int64") == 0)
             opt_no_int64 = true;
+        else if (std::strcmp(argv[i], "--kernel") == 0 && i + 1 < argc)
+            opt_kernel = argv[++i];
         else
             name = argv[i];
     }

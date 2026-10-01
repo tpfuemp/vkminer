@@ -187,7 +187,8 @@ the built-in defaults.
 Where an algorithm has more than one kernel, which one to run is measured the same way rather
 than chosen from a feature bit. `sha3t`, `lbry` and `sha512256d` each ship a 64-bit and a 2x32-bit shader,
 and the faster of the two is not the one the hardware's advertised support predicts on every
-card.
+card. `sha512256d` ships a second 64-bit shader that differs only in the order of its adds:
+it is the faster of the two on an RTX 3060 and the slower on a GTX 1080 Ti.
 
 An algorithm that keeps a scratchpad per hash -- `scrypt` is the one today -- is swept one
 candidate at a time rather than with all of them side by side, so that each is measured with
@@ -226,8 +227,8 @@ one printed at exit, which divides by the whole wall clock:
 | `blake2s` | ~4.7 GH/s |
 | `sha256d` | ~1370 MH/s |
 | `sha3t` | ~225 MH/s |
-| `lbry` | ~70 MH/s |
-| `sha512256d` | ~370 MH/s |
+| `lbry` | ~340 MH/s |
+| `sha512256d` | ~525 MH/s |
 | `scrypt` | ~1820 kH/s |
 | `kawpow` | ~17.9 MH/s |
 | `firopow` | ~17.4 MH/s |

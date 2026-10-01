@@ -518,13 +518,38 @@ bool compare_boundary(vkminer::Kernel &kernel, const vkminer::Algorithm &algo,
     return true;
 }
 
+// The module under test: the one the device would open with, or the one
+// --kernel names out of every module it can build. A name no module has is a
+// failure, not a quiet fall back to the default.
+bool pick_kernel(const vkminer::Algorithm &algo, const vkminer::DeviceInfo &info,
+                 vkminer::KernelSpec *out)
+{
+    if (!opt_kernel || !opt_kernel[0]) {
+        *out = algo.kernel(info);
+        return true;
+    }
+    vkminer::KernelSpec variants[8];
+    const size_t n = algo.kernels(info, variants, 8);
+    for (size_t i = 0; i < n; i++) {
+        if (variants[i].variant
+            && std::strcmp(variants[i].variant, opt_kernel) == 0) {
+            *out = variants[i];
+            return true;
+        }
+    }
+    fail("%s has no kernel '%s' for this device", algo.name(), opt_kernel);
+    return false;
+}
+
 bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &info,
                 const vkminer::Algorithm &algo, uint32_t total)
 {
     std::printf("\n-- device %d: %s [%s]\n", info.index, info.name.c_str(),
                 vkminer::device_kind_name(info.kind));
 
-    const vkminer::KernelSpec spec = algo.kernel(info);
+    vkminer::KernelSpec spec;
+    if (!pick_kernel(algo, info, &spec))
+        return false;
     if (!spec.spirv || !spec.spirv_words) {
         std::printf("SKIP %s has no shader for this device\n", algo.name());
         return true;
@@ -536,6 +561,8 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
         fail("could not build %s for this device", algo.name());
         return false;
     }
+    if (spec.variant)
+        std::printf("     kernel '%s'\n", spec.variant);
 
     // struct work's spelling of the header: one host-order word per big-endian
     // read of the wire. The same conversion the miner makes on the way in, so
@@ -610,7 +637,7 @@ bool run_device(vkminer::ComputeBackend &backend, const vkminer::DeviceInfo &inf
 void usage(const char *program)
 {
     std::printf("usage: %s [algo] [nonces] [queue-depth] [--no-int64] "
-                "[--nonces-per-invocation N]\n", program);
+                "[--nonces-per-invocation N] [--kernel NAME]\n", program);
 }
 
 }  // namespace
@@ -624,7 +651,8 @@ int main(int argc, char *argv[])
     // only way to point this test at an algorithm's 2x32 fallback on a device
     // that has shaderInt64, and it must be set before the backend exists.
     // --nonces-per-invocation likewise, for a module searching several nonces
-    // per invocation.
+    // per invocation, and --kernel for a module the device would not open
+    // with, which is otherwise never compared against the reference here.
     const char *args[4] = { argv[0], nullptr, nullptr, nullptr };
     int count = 1;
     for (int i = 1; i < argc; i++) {
@@ -638,6 +666,8 @@ int main(int argc, char *argv[])
                 return 2;
             }
             opt_nonces_per_invocation = static_cast<int>(n);
+        } else if (std::strcmp(argv[i], "--kernel") == 0 && i + 1 < argc) {
+            opt_kernel = argv[++i];
         } else if (count < 4) {
             args[count++] = argv[i];
         } else {

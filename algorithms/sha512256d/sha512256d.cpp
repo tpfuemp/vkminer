@@ -33,9 +33,10 @@ namespace vkminer {
 namespace {
 
 // The push constant block sha512256d_kernel.glsl declares; keep the two in
-// step. No midstate: the state after the job-constant rounds 0..8 plus the
-// message words the schedule still reads exceeds 128 bytes. Only the top 64
-// bits of the target go; the host re-checks all 256.
+// step. The header rather than a midstate: the state after the job-constant
+// rounds plus the schedule sums is 160 bytes, more than the block holds, so
+// each workgroup computes them from the header itself. Only the top 64 bits of
+// the target go; the host re-checks all 256.
 struct Sha512256dPush {
     uint32_t header[19];  // header words 0..18; word 19 is the nonce
     uint32_t target[2];   // the top 64 bits, most significant last
@@ -152,7 +153,10 @@ public:
         return sizeof kAnswers / sizeof kAnswers[0];
     }
 
-    // Two modules over one text: Int64 is a module-wide capability.
+    // Three modules over one text. Int64 is a module-wide capability, and the
+    // two 64-bit modules differ only in the order of t1's adds (S5D_T1 in
+    // sha512256d_kernel.glsl). The folded one opens because where it wins, it
+    // wins by less than the tuner's margin for leaving the default.
     KernelSpec kernel(const DeviceInfo &device) const override
     {
 #ifdef VKMINER_HAVE_SHADERS
@@ -166,10 +170,10 @@ public:
                    device.name.c_str());
         }
 
-        return spec_for(wide);
+        return spec_for(wide ? kWideFold : kPairs);
 #else
         (void)device;
-        return spec_for(false);
+        return spec_for(kPairs);
 #endif
     }
 
@@ -179,16 +183,18 @@ public:
     {
         size_t count = 0;
 #ifdef VKMINER_HAVE_SHADERS
-        if (device.int64 && count < max) {
-            const KernelSpec spec = spec_for(true);
-            if (spec.spirv)
-                out[count++] = spec;
+        if (device.int64) {
+            for (Module m : { kWide, kWideFold }) {
+                const KernelSpec spec = spec_for(m);
+                if (spec.spirv && count < max)
+                    out[count++] = spec;
+            }
         }
 #else
         (void)device;
 #endif
         if (count < max) {
-            const KernelSpec spec = spec_for(false);
+            const KernelSpec spec = spec_for(kPairs);
             if (spec.spirv)
                 out[count++] = spec;
         }
@@ -234,21 +240,27 @@ public:
     }
 
 private:
-    // One of the two modules. A spec with no SPIR-V is not an error: the CPU
+    enum Module { kWide, kWideFold, kPairs, kModules };
+
+    // One of the modules. A spec with no SPIR-V is not an error: the CPU
     // backend still has the reference.
-    KernelSpec spec_for(bool wide) const
+    KernelSpec spec_for(Module m) const
     {
+        static const char *const kVariant[kModules] = {
+            "int64", "int64-fold", "2x32" };
+        static const char *const kShader[kModules] = {
+            "sha512256d", "sha512256d_fold", "sha512256d32" };
+
         KernelSpec spec;
         spec.name = name();
         spec.algorithm = this;
-        spec.variant = wide ? "int64" : "2x32";
+        spec.variant = kVariant[m];
 
 #ifdef VKMINER_HAVE_SHADERS
         // Loaded on first use and kept, since the spec points into it. One
         // Algorithm per worker, so no lock.
-        ShaderModule &module = wide ? module64_ : module32_;
-        if (module.words.empty()
-            && !load_shader(wide ? "sha512256d" : "sha512256d32", &module))
+        ShaderModule &module = modules_[m];
+        if (module.words.empty() && !load_shader(kShader[m], &module))
             return spec;
 
         spec.spirv = module.words.data();
@@ -261,15 +273,12 @@ private:
                                  ? module.push_constant_bytes
                                  : sizeof(Sha512256dPush);
         spec.local_size_x = module.local_size_x;  // 0: the backend chooses
-#else
-        (void)wide;
 #endif
         return spec;
     }
 
 #ifdef VKMINER_HAVE_SHADERS
-    mutable ShaderModule module64_;
-    mutable ShaderModule module32_;
+    mutable ShaderModule modules_[kModules];
 
     // A device that cannot run the 64-bit module is worth one line.
     mutable bool announced_ = false;

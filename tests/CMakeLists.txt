@@ -493,7 +493,7 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_lbry_nonces
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
-    # sha512256d, both modules.
+    # sha512256d, all three modules.
     add_test(NAME diff_test_sha512256d COMMAND diff_test sha512256d 100000)
     set_tests_properties(diff_test_sha512256d
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
@@ -501,6 +501,12 @@ if(TARGET vkminer_shaders)
     add_test(NAME diff_test_sha512256d32
         COMMAND diff_test sha512256d 100000 --no-int64)
     set_tests_properties(diff_test_sha512256d32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # The default is the folded module; this is the other 64-bit one.
+    add_test(NAME diff_test_sha512256d_paired
+        COMMAND diff_test sha512256d 100000 --kernel int64)
+    set_tests_properties(diff_test_sha512256d_paired
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
     add_test(NAME diff_test_sha512256d_nonces
@@ -677,6 +683,11 @@ if(TARGET vkminer_shaders)
     add_test(NAME negative_kat_sha512256d32
         COMMAND negative_kat sha512256d --no-int64)
     set_tests_properties(negative_kat_sha512256d32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_sha512256d_paired
+        COMMAND negative_kat sha512256d --kernel int64)
+    set_tests_properties(negative_kat_sha512256d_paired
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

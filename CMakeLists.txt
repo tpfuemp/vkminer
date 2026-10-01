@@ -287,6 +287,7 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/lbry/lbry32.comp
                               algorithms/sha512256d/sha512256d.comp
                               algorithms/sha512256d/sha512256d32.comp
+                              algorithms/sha512256d/sha512256d_fold.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp

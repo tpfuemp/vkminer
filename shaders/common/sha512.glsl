@@ -11,10 +11,12 @@
 // The 64-bit word is the difficulty. shaderInt64 is an optional Vulkan feature
 // and Mali and Adreno frequently lack it, so this file is written over a lane
 // typedef and compiled twice: once with SLANE as a native uint64_t, once as a
-// uvec2 pair. Which module a device gets is decided in Algorithm::kernel(), not
-// by a specialization constant -- Int64 is an OpCapability declared at module
-// scope, so a driver without the feature rejects the whole module however
-// unreachable the 64-bit code is.
+// uvec2 pair. A third build, VKMINER_SHA512_WIDE_ADD, keeps the pair but adds
+// through uint64_t, and is what the shaderInt64 modules use. Which module a
+// device gets is decided in Algorithm::kernel(), not by a specialization
+// constant -- Int64 is an OpCapability declared at module scope, so a driver
+// without the feature rejects the whole module however unreachable the 64-bit
+// code is.
 //
 // ## The one rule for editing this file
 //
@@ -60,6 +62,18 @@ SLANE slane(uint lo, uint hi) { return uvec2(lo, hi); }
 uint  slo(SLANE x)            { return x.x; }
 uint  shi(SLANE x)            { return x.y; }
 
+#ifdef VKMINER_SHA512_WIDE_ADD
+
+// Pairs for the rotates, a 64-bit integer for the add: a uint64_t rotate may
+// not become funnel shifts, and uaddCarry() may not become the hardware carry.
+// The packs are bitcasts. Needs shaderInt64.
+SLANE sadd(SLANE a, SLANE b)
+{
+    return unpackUint2x32(packUint2x32(a) + packUint2x32(b));
+}
+
+#else
+
 // The carry is the whole point of this function existing. uaddCarry() returns
 // it from the add itself, which a driver can lower to one add-with-carry.
 SLANE sadd(SLANE a, SLANE b)
@@ -68,6 +82,8 @@ SLANE sadd(SLANE a, SLANE b)
     uint lo = uaddCarry(a.x, b.x, carry);
     return uvec2(lo, a.y + b.y + carry);
 }
+
+#endif
 
 SLANE sshr(SLANE x, uint n)
 {
