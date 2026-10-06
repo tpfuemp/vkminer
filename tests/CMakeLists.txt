@@ -112,6 +112,13 @@ target_link_libraries(sha512256d_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME sha512256d_kat COMMAND sha512256d_kat)
 
+# skein: the Skein 1.3 vectors and the configuration block first, then
+# Skeincoin's genesis ids and mined Auroracoin skein headers.
+add_executable(skein_kat skein_kat.cpp)
+target_link_libraries(skein_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME skein_kat COMMAND skein_kat)
+
 # The ProgPoW host reference, which is not an algorithm here yet and is checked
 # anyway: it is the reference a future kernel would be judged against, the
 # vendored code is only worth what this test says it is, and none of it needs a
@@ -514,6 +521,20 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_sha512256d_nonces
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # skein, both modules.
+    add_test(NAME diff_test_skein COMMAND diff_test skein 100000)
+    set_tests_properties(diff_test_skein
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_skein32 COMMAND diff_test skein 100000 --no-int64)
+    set_tests_properties(diff_test_skein32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_skein_nonces
+        COMMAND diff_test skein 100000 --nonces-per-invocation 3)
+    set_tests_properties(diff_test_skein_nonces
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a
@@ -636,6 +657,10 @@ if(TARGET vkminer_shaders)
     set_tests_properties(race_test_sha512256d
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 
+    add_test(NAME race_test_skein COMMAND race_test skein 8)
+    set_tests_properties(race_test_skein
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
     # The negative half of the known-answer test, perturbing the device rather
     # than the host reference. Cheap -- a couple of dozen single-nonce dispatches
     # -- so it is not labelled slow and runs on a software rasterizer too.
@@ -688,6 +713,15 @@ if(TARGET vkminer_shaders)
     add_test(NAME negative_kat_sha512256d_paired
         COMMAND negative_kat sha512256d --kernel int64)
     set_tests_properties(negative_kat_sha512256d_paired
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Both of skein's.
+    add_test(NAME negative_kat_skein COMMAND negative_kat skein)
+    set_tests_properties(negative_kat_skein
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_skein32 COMMAND negative_kat skein --no-int64)
+    set_tests_properties(negative_kat_skein32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

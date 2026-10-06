@@ -174,7 +174,8 @@ endif()
 add_library(vkminer_hashes STATIC
     src/core/sha256.c
     src/core/sha512.c
-    src/core/ripemd160.c)
+    src/core/ripemd160.c
+    src/core/skein512.c)
 target_include_directories(vkminer_hashes PUBLIC src)
 target_link_libraries(vkminer_hashes PRIVATE vkminer_warnings)
 
@@ -252,6 +253,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/sha3t/sha3t.cpp
     algorithms/lbry/lbry.cpp
     algorithms/sha512256d/sha512256d.cpp
+    algorithms/skein/skein.cpp
     algorithms/progpow/progpow.cpp
     algorithms/progpow/progpow_dag.cpp
     algorithms/progpow/progpow_hash.cpp
@@ -288,6 +290,8 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/sha512256d/sha512256d.comp
                               algorithms/sha512256d/sha512256d32.comp
                               algorithms/sha512256d/sha512256d_fold.comp
+                              algorithms/skein/skein.comp
+                              algorithms/skein/skein32.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp

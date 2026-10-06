@@ -10,6 +10,7 @@
 #include "algorithms/sha256d/sha256d.h"
 #include "algorithms/sha512256d/sha512256d.h"
 #include "algorithms/sha3t/sha3t.h"
+#include "algorithms/skein/skein.h"
 
 #include <cstring>
 #include <string>
@@ -70,6 +71,9 @@ const Entry kAlgorithms[] = {
     { "lbry",    "",       make_lbry           },
     // Radiant's: Bitcoin's header and scale, SHA-512/256 in place of SHA-256.
     { "sha512256d", "",    make_sha512256d     },
+    // Skeincoin's, and the skein half of DigiByte's and Auroracoin's
+    // multi-algorithm chains: Skein-512-512, then SHA-256 of that.
+    { "skein",   "",       make_skein          },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.
