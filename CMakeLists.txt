@@ -254,6 +254,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/lbry/lbry.cpp
     algorithms/sha512256d/sha512256d.cpp
     algorithms/skein/skein.cpp
+    algorithms/skein2/skein2.cpp
     algorithms/progpow/progpow.cpp
     algorithms/progpow/progpow_dag.cpp
     algorithms/progpow/progpow_hash.cpp
@@ -292,6 +293,8 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/sha512256d/sha512256d_fold.comp
                               algorithms/skein/skein.comp
                               algorithms/skein/skein32.comp
+                              algorithms/skein2/skein2.comp
+                              algorithms/skein2/skein2_32.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp
