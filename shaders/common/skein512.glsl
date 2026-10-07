@@ -6,8 +6,9 @@
 // same block serves any message layout. src/core/skein512.c is the scalar
 // reference and spells out the tweak. Version 1.2's rotation constants differ.
 //
-// A word is TLANE: a uint64_t, or a uvec2 pair where shaderInt64 is missing.
-// Never `+` a TLANE, use tadd(); in the pair build `+` drops the carry.
+// A word is TLANE: a uint64_t, or a uvec2 pair (VKMINER_SKEIN_WIDE_ADD: a pair
+// added through uint64_t). Never `+` a TLANE, use tadd(): on a pair `+` drops
+// the carry.
 
 #ifndef VKMINER_SHADERS_COMMON_SKEIN512_GLSL_INCLUDED
 #define VKMINER_SHADERS_COMMON_SKEIN512_GLSL_INCLUDED
@@ -34,12 +35,24 @@ TLANE tlane(uint lo, uint hi) { return uvec2(lo, hi); }
 uint  tlo(TLANE x)            { return x.x; }
 uint  thi(TLANE x)            { return x.y; }
 
+#ifdef VKMINER_SKEIN_WIDE_ADD
+
+// The packs are bitcasts. Needs shaderInt64; the includer declares it.
+TLANE tadd(TLANE a, TLANE b)
+{
+    return unpackUint2x32(packUint2x32(a) + packUint2x32(b));
+}
+
+#else
+
 TLANE tadd(TLANE a, TLANE b)
 {
     uint carry;
     uint lo = uaddCarry(a.x, b.x, carry);
     return uvec2(lo, a.y + b.y + carry);
 }
+
+#endif  // VKMINER_SKEIN_WIDE_ADD
 
 // 32 or more swaps the halves first; n is constant, so the branches fold.
 TLANE trotl(TLANE x, uint n)

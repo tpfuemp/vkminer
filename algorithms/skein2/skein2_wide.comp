@@ -1,0 +1,14 @@
+// skein2 with uvec2 lanes and 64-bit adds; needs shaderInt64.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Same kernel text as skein2.comp and skein2_32.comp; see
+// shaders/common/skein512.glsl.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+#define VKMINER_SKEIN_WIDE_ADD 1
+
+#include "algorithms/skein2/skein2_kernel.glsl"

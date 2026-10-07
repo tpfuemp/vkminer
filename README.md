@@ -191,7 +191,8 @@ than chosen from a feature bit. `sha3t`, `lbry`, `sha512256d`, `skein` and `skei
 64-bit and a 2x32-bit shader, and the faster of the two is not the one the hardware's advertised
 support predicts on every card. `sha512256d` ships a second 64-bit shader that differs only
 in the order of its adds: it is the faster of the two on an RTX 3060 and the slower on a
-GTX 1080 Ti.
+GTX 1080 Ti. `skein` and `skein2` ship a third that keeps 2x32-bit lanes but adds in 64 bits;
+it is the fastest of their three on both cards.
 
 An algorithm that keeps a scratchpad per hash -- `scrypt` is the one today -- is swept one
 candidate at a time rather than with all of them side by side, so that each is measured with
@@ -233,7 +234,7 @@ one printed at exit, which divides by the whole wall clock:
 | `lbry` | ~340 MH/s |
 | `sha512256d` | ~525 MH/s |
 | `skein` | ~560 MH/s |
-| `skein2` | ~435 MH/s |
+| `skein2` | ~460 MH/s |
 | `scrypt` | ~1820 kH/s |
 | `kawpow` | ~17.9 MH/s |
 | `firopow` | ~17.4 MH/s |

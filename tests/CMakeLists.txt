@@ -536,6 +536,12 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_skein32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # The plain 64-bit module; the default is int64-wide.
+    add_test(NAME diff_test_skein_int64
+        COMMAND diff_test skein 100000 --kernel int64)
+    set_tests_properties(diff_test_skein_int64
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     add_test(NAME diff_test_skein_nonces
         COMMAND diff_test skein 100000 --nonces-per-invocation 3)
     set_tests_properties(diff_test_skein_nonces
@@ -548,6 +554,11 @@ if(TARGET vkminer_shaders)
 
     add_test(NAME diff_test_skein2_32 COMMAND diff_test skein2 100000 --no-int64)
     set_tests_properties(diff_test_skein2_32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_skein2_int64
+        COMMAND diff_test skein2 100000 --kernel int64)
+    set_tests_properties(diff_test_skein2_int64
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
     add_test(NAME diff_test_skein2_nonces
@@ -748,12 +759,22 @@ if(TARGET vkminer_shaders)
     set_tests_properties(negative_kat_skein32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
+    add_test(NAME negative_kat_skein_int64
+        COMMAND negative_kat skein --kernel int64)
+    set_tests_properties(negative_kat_skein_int64
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
     add_test(NAME negative_kat_skein2 COMMAND negative_kat skein2)
     set_tests_properties(negative_kat_skein2
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     add_test(NAME negative_kat_skein2_32 COMMAND negative_kat skein2 --no-int64)
     set_tests_properties(negative_kat_skein2_32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_skein2_int64
+        COMMAND negative_kat skein2 --kernel int64)
+    set_tests_properties(negative_kat_skein2_int64
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

@@ -205,8 +205,9 @@ public:
         return sizeof kAnswers / sizeof kAnswers[0];
     }
 
-    // Two modules over one text, because Int64 is a module-wide capability.
-    // This is the opening guess; the tuner races both.
+    // Three modules over one text, because Int64 is a module-wide capability:
+    // int64, uvec2 lanes with 64-bit adds ("int64-wide"), and 2x32. The wide
+    // one opens where it builds; the tuner races all three.
     KernelSpec kernel(const DeviceInfo &device) const override
     {
 #ifdef VKMINER_HAVE_SHADERS
@@ -219,7 +220,7 @@ public:
                    device.name.c_str());
         }
 
-        return spec_for(wide ? kWide : kPairs);
+        return spec_for(wide ? kWideAdd : kPairs);
 #else
         (void)device;
         return spec_for(kPairs);
@@ -232,10 +233,12 @@ public:
     {
         size_t count = 0;
 #ifdef VKMINER_HAVE_SHADERS
-        if (device.int64 && count < max) {
-            const KernelSpec spec = spec_for(kWide);
-            if (spec.spirv)
-                out[count++] = spec;
+        if (device.int64) {
+            for (Module m : { kWideAdd, kWide }) {
+                const KernelSpec spec = spec_for(m);
+                if (spec.spirv && count < max)
+                    out[count++] = spec;
+            }
         }
 #else
         (void)device;
@@ -298,14 +301,16 @@ public:
     }
 
 private:
-    enum Module { kWide, kPairs, kModules };
+    enum Module { kWide, kWideAdd, kPairs, kModules };
 
     // One of the modules. A spec with no SPIR-V is not an error: the CPU
     // backend still has the reference.
     KernelSpec spec_for(Module m) const
     {
-        static const char *const kVariant[kModules] = { "int64", "2x32" };
-        static const char *const kShader[kModules] = { "skein", "skein32" };
+        static const char *const kVariant[kModules] = {
+            "int64", "int64-wide", "2x32" };
+        static const char *const kShader[kModules] = {
+            "skein", "skein_wide", "skein32" };
 
         KernelSpec spec;
         spec.name = name();

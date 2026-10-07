@@ -293,8 +293,10 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/sha512256d/sha512256d_fold.comp
                               algorithms/skein/skein.comp
                               algorithms/skein/skein32.comp
+                              algorithms/skein/skein_wide.comp
                               algorithms/skein2/skein2.comp
                               algorithms/skein2/skein2_32.comp
+                              algorithms/skein2/skein2_wide.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp
