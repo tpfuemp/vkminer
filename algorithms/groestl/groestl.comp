@@ -1,0 +1,10 @@
+// groestl: Groestl-512 twice over the 80-byte header.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 32-bit words only, so one module serves every device.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "algorithms/groestl/groestl_kernel.glsl"

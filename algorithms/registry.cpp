@@ -4,6 +4,7 @@
 #include "algorithms/registry.h"
 
 #include "algorithms/blake2s/blake2s.h"
+#include "algorithms/groestl/groestl.h"
 #include "algorithms/lbry/lbry.h"
 #include "algorithms/progpow/progpow.h"
 #include "algorithms/scrypt/scrypt.h"
@@ -77,6 +78,8 @@ const Entry kAlgorithms[] = {
     { "skein",   "",       make_skein          },
     // Woodcoin's: Skein-512-512 twice, no SHA-256.
     { "skein2",  "",       make_skein2         },
+    // Groestlcoin's: Groestl-512 twice.
+    { "groestl", "",       make_groestl        },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.
@@ -164,6 +167,7 @@ void bind_protocol_settings(const char *name)
     opt_ntime_index = STD_NTIME_INDEX;
     opt_nbits_index = STD_NBITS_INDEX;
     opt_nonce_index = STD_NONCE_INDEX;
+    opt_coinbase_sha256 = algo->coinbase_sha256();
 
     switch (algo->stratum_dialect()) {
     case StratumDialect::kProgPow:

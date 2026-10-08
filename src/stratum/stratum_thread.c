@@ -42,7 +42,12 @@ static struct timeval stratum_keepalive_timer = {0};
 
 void sha256d_gen_merkle_root( char *merkle_root, struct stratum_ctx *sctx )
 {
-  sha256d( merkle_root, sctx->job.coinbase, (int) sctx->job.coinbase_size );
+  if ( opt_coinbase_sha256 )
+     sha256_full( merkle_root, sctx->job.coinbase,
+                  (int) sctx->job.coinbase_size );
+  else
+     sha256d( merkle_root, sctx->job.coinbase,
+              (int) sctx->job.coinbase_size );
   for ( int i = 0; i < sctx->job.merkle_count; i++ )
   {
      memcpy( merkle_root + 32, sctx->job.merkle[i], 32 );

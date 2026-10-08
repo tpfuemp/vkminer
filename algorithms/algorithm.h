@@ -86,6 +86,10 @@ public:
         return StratumDialect::kBitcoin;
     }
 
+    // Whether the coinbase txid is a single SHA-256 (Groestlcoin) rather than
+    // SHA-256d. The merkle branch steps are SHA-256d either way.
+    virtual bool coinbase_sha256() const { return false; }
+
     // How much of the nonce is the miner's to walk, in bits, and so how wide a
     // range the workers divide between them. The pool's share is already
     // subtracted: KawPoW's nonce is 64 bits and its pools keep the top two

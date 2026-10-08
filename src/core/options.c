@@ -105,6 +105,7 @@ uint32_t opt_nonce_bits      = 32;
 uint32_t opt_ntime_index     = STD_NTIME_INDEX;
 uint32_t opt_nbits_index     = STD_NBITS_INDEX;
 uint32_t opt_nonce_index     = STD_NONCE_INDEX;
+bool     opt_coinbase_sha256 = false;
 
 /* Installed beside those two when the algorithm has epoch arithmetic to check
  * a pool's seed hash against, and null otherwise. */

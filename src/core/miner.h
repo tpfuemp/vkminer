@@ -119,6 +119,9 @@ extern uint32_t opt_ntime_index;
 extern uint32_t opt_nbits_index;
 extern uint32_t opt_nonce_index;
 
+/* Coinbase txid is one SHA-256, not SHA-256d. Set by bind_protocol_settings. */
+extern bool opt_coinbase_sha256;
+
 /* Which Stratum a pool speaks. Set once from the algorithm before the first
  * connection and never touched again -- see StratumDialect in
  * algorithms/algorithm.h for why this is stated rather than sniffed off the
