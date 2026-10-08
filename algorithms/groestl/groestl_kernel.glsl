@@ -23,7 +23,8 @@ layout(local_size_x_id = 0) in;
 // two, one pass.
 layout(constant_id = 5) const uint kNoncesPerInvocation = 1u;
 
-// 96 bytes. Mirrored by GroestlPush in groestl.cpp, which asserts the layout.
+// 96 bytes. Mirrored by GroestlPush in groestl.cpp and MyrgrPush in myrgr.cpp,
+// which assert the layout.
 layout(push_constant) uniform Push {
     uint header[19];    // header words 0..18, little-endian reads of the wire
     uint target[2];     // the top 64 bits, most significant last
@@ -128,6 +129,9 @@ void groestl_check(uint nonce, uint hash[8])
     emit_candidate(push.capacity, nonce, hash);
 }
 
+// myr-gr includes the above and brings its own search and main().
+#ifndef VKMINER_GROESTL_NO_MAIN
+
 // Nonces n and n + 1; `two` false hashes the second lane and drops it.
 void groestl_search(uint n, bool two)
 {
@@ -184,5 +188,7 @@ void main()
                        k + 1u < kNoncesPerInvocation && index + 1u < push.count);
     }
 }
+
+#endif  // VKMINER_GROESTL_NO_MAIN
 
 #endif  // VKMINER_ALGORITHMS_GROESTL_KERNEL_GLSL_INCLUDED

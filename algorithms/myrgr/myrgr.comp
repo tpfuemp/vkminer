@@ -1,0 +1,10 @@
+// myr-gr: Groestl-512 of the 80-byte header, then SHA-256.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// 32-bit words only, so one module serves every device.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "algorithms/myrgr/myrgr_kernel.glsl"

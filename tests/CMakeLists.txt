@@ -131,6 +131,12 @@ target_link_libraries(groestl_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME groestl_kat COMMAND groestl_kat)
 
+# myr-gr: Myriadcoin groestl headers, anchored on their own nBits.
+add_executable(myrgr_kat myrgr_kat.cpp)
+target_link_libraries(myrgr_kat PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME myrgr_kat COMMAND myrgr_kat)
+
 # The ProgPoW host reference, which is not an algorithm here yet and is checked
 # anyway: it is the reference a future kernel would be judged against, the
 # vendored code is only worth what this test says it is, and none of it needs a
@@ -581,6 +587,15 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_groestl_nonces
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    add_test(NAME diff_test_myrgr COMMAND diff_test myr-gr 100000)
+    set_tests_properties(diff_test_myrgr
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_myrgr_nonces
+        COMMAND diff_test myr-gr 100000 --nonces-per-invocation 3)
+    set_tests_properties(diff_test_myrgr_nonces
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a
@@ -715,6 +730,10 @@ if(TARGET vkminer_shaders)
     set_tests_properties(race_test_groestl
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 
+    add_test(NAME race_test_myrgr COMMAND race_test myr-gr 8)
+    set_tests_properties(race_test_myrgr
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
     # The negative half of the known-answer test, perturbing the device rather
     # than the host reference. Cheap -- a couple of dozen single-nonce dispatches
     # -- so it is not labelled slow and runs on a software rasterizer too.
@@ -798,6 +817,10 @@ if(TARGET vkminer_shaders)
 
     add_test(NAME negative_kat_groestl COMMAND negative_kat groestl)
     set_tests_properties(negative_kat_groestl
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_myrgr COMMAND negative_kat myr-gr)
+    set_tests_properties(negative_kat_myrgr
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

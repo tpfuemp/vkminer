@@ -257,6 +257,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/skein/skein.cpp
     algorithms/skein2/skein2.cpp
     algorithms/groestl/groestl.cpp
+    algorithms/myrgr/myrgr.cpp
     algorithms/progpow/progpow.cpp
     algorithms/progpow/progpow_dag.cpp
     algorithms/progpow/progpow_hash.cpp
@@ -300,6 +301,7 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/skein2/skein2_32.comp
                               algorithms/skein2/skein2_wide.comp
                               algorithms/groestl/groestl.comp
+                              algorithms/myrgr/myrgr.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp
