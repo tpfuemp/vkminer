@@ -4,6 +4,7 @@
 #include "algorithms/registry.h"
 
 #include "algorithms/blake2s/blake2s.h"
+#include "algorithms/bmw512/bmw512.h"
 #include "algorithms/groestl/groestl.h"
 #include "algorithms/lbry/lbry.h"
 #include "algorithms/myrgr/myrgr.h"
@@ -83,6 +84,8 @@ const Entry kAlgorithms[] = {
     { "groestl", "",       make_groestl        },
     // Myriadcoin's groestl algorithm: Groestl-512, then SHA-256.
     { "myr-gr",  "",       make_myrgr          },
+    // DigitalNote's: BMW-512 once, the first 32 bytes.
+    { "bmw512",  "",       make_bmw512         },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.
