@@ -198,11 +198,8 @@ def stop(proc):
 def assert_loaded_bad_blob(miner_log, algo_dir):
     """--algo-dir falls back to the built-in blob with a warning, so without
     this every assertion below would hold for a miner running the good one."""
-    # Separators are normalised on both sides before comparing. os.path.join
-    # gives a backslash under Windows Python while the miner echoes the path it
-    # was handed, so the two disagree on a run where everything else is right --
-    # which is exactly how this failed both arms on the 3060 while the log said
-    # the bad blob had loaded.
+    # Separators are normalised on both sides: os.path.join gives a backslash
+    # under Windows Python, while the miner echoes the path it was handed.
     def flat(p):
         return p.replace("\\", "/")
 

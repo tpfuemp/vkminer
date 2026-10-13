@@ -63,6 +63,10 @@ public:
     // stops answering must not hang a miner forever, it must be reported.
     bool wait(Slot *slot, uint64_t timeout_ns);
 
+    // As wait(), but a timeout is not an error: `*done` says whether the slot
+    // completed, and false is returned only for a device error.
+    bool poll(Slot *slot, uint64_t timeout_ns, bool *done);
+
     uint32_t size() const { return static_cast<uint32_t>(slots_.size()); }
 
 private:

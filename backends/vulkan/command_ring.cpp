@@ -132,6 +132,22 @@ bool CommandRing::submit(Slot *slot)
 
 bool CommandRing::wait(Slot *slot, uint64_t timeout_ns)
 {
+    bool done = false;
+    if (!poll(slot, timeout_ns, &done))
+        return false;
+
+    if (!done) {
+        applog(LOG_ERR, "Vulkan: %s did not finish a dispatch within %u ms",
+               device_->info().name.c_str(),
+               static_cast<unsigned>(timeout_ns / 1000000));
+        return false;
+    }
+    return true;
+}
+
+bool CommandRing::poll(Slot *slot, uint64_t timeout_ns, bool *done)
+{
+    *done = true;
     if (!slot->pending)
         return true;
 
@@ -139,10 +155,8 @@ bool CommandRing::wait(Slot *slot, uint64_t timeout_ns)
         device_->handle(), 1, &slot->fence, VK_TRUE, timeout_ns);
 
     if (result == VK_TIMEOUT) {
-        applog(LOG_ERR, "Vulkan: %s did not finish a dispatch within %u ms",
-               device_->info().name.c_str(),
-               static_cast<unsigned>(timeout_ns / 1000000));
-        return false;
+        *done = false;
+        return true;
     }
     if (!vk_ok(result, "vkWaitForFences"))
         return false;

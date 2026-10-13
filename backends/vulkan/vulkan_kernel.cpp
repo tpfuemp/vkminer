@@ -49,6 +49,11 @@ constexpr double kTargetSeconds = 0.05;
 // reported and a miner that stops answering with no explanation.
 constexpr uint64_t kTimeoutNs = 10ull * 1000 * 1000 * 1000;
 
+// How much longer a dispatch past kTimeoutNs is waited for before the device is
+// reported. A slow device is not a hung one: the first dispatch is a guess, and
+// on a device that hashes under ~100 kH/s the guess alone runs past kTimeoutNs.
+constexpr uint64_t kSlowTimeoutNs = 6 * kTimeoutNs;
+
 constexpr uint32_t kMinBatch = 1u << 12;
 constexpr uint32_t kMaxBatch = 1u << 28;
 
@@ -594,10 +599,30 @@ public:
         if (!inflight_)
             retiring_.reset();
 
-        if (!ring_->wait(ring_->slot(entry.slot), kTimeoutNs)) {
-            applog(LOG_ERR, "Vulkan: '%s' did not finish within %u seconds",
-                   name_, static_cast<unsigned>(kTimeoutNs / 1000000000ull));
+        CommandRing::Slot *fence = ring_->slot(entry.slot);
+        bool done = false;
+        if (!ring_->poll(fence, kTimeoutNs, &done))
             return -1;
+
+        // Too slow rather than hung: a timeout gives retune() nothing to size
+        // from, so shrink by its largest step here. Only for a dispatch of the
+        // current size, or each one queued behind it would cut again.
+        if (!done) {
+            if (entry.count == batch_) {
+                batch_ /= 4;
+                clamp_batch(device_->info());
+                hold_ = depth_;
+                applog(LOG_WARNING, "Vulkan: '%s' took over %u seconds for %u "
+                                    "hashes; dispatching %u from here",
+                       name_, static_cast<unsigned>(kTimeoutNs / 1000000000ull),
+                       entry.count, batch_);
+            }
+            if (!ring_->wait(fence, kSlowTimeoutNs)) {
+                applog(LOG_ERR, "Vulkan: '%s' did not finish within %u seconds",
+                       name_, static_cast<unsigned>(
+                           (kTimeoutNs + kSlowTimeoutNs) / 1000000000ull));
+                return -1;
+            }
         }
 
         // From one completion to the next, not from submit to complete: a
@@ -606,9 +631,10 @@ public:
         // device retires work at, which is what kTargetSeconds is about.
         //
         // Only while the queue stayed full across the interval -- a completion
-        // with nothing queued behind it measures how late the host was.
+        // with nothing queued behind it measures how late the host was. Not
+        // after a slow one, which has just been sized from above.
         const auto now = std::chrono::steady_clock::now();
-        if (was_full && prev_full_ && entry.full_batch)
+        if (done && was_full && prev_full_ && entry.full_batch)
             retune(std::chrono::duration<double>(now - last_done_).count());
         prev_full_ = was_full;
         last_done_ = now;

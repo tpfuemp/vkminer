@@ -237,8 +237,8 @@ one printed at exit, which divides by the whole wall clock:
 | `sha512256d` | ~525 MH/s |
 | `skein` | ~560 MH/s |
 | `skein2` | ~460 MH/s |
-| `groestl` | ~56 MH/s |
-| `myr-gr` | ~89 MH/s |
+| `groestl` | ~68 MH/s |
+| `myr-gr` | ~119 MH/s |
 | `scrypt` | ~1820 kH/s |
 | `kawpow` | ~17.9 MH/s |
 | `firopow` | ~17.4 MH/s |

@@ -85,8 +85,10 @@ constexpr int kWarmup = 24;
 
 // Candidates a dispatch should average. Well under the result buffer's
 // capacity, because a dispatch that overflowed it would return a truncated set
-// and the comparison below would report the truncation as a race.
-constexpr double kWantCandidates = 6.;
+// and the comparison below would report the truncation as a race. Not much
+// lower either: the header is fixed, so a range with no candidate fails every
+// run.
+constexpr double kWantCandidates = 12.;
 
 // How many candidates to ask for in one collect(), larger than the buffer holds
 // so that a truncation shows up as missing nonces rather than as this test
