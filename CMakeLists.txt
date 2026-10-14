@@ -177,7 +177,8 @@ add_library(vkminer_hashes STATIC
     src/core/ripemd160.c
     src/core/skein512.c
     src/core/groestl512.c
-    src/core/bmw512.c)
+    src/core/bmw512.c
+    src/core/heavyhash.c)
 target_include_directories(vkminer_hashes PUBLIC src)
 target_link_libraries(vkminer_hashes PRIVATE vkminer_warnings)
 
@@ -260,6 +261,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/groestl/groestl.cpp
     algorithms/myrgr/myrgr.cpp
     algorithms/bmw512/bmw512.cpp
+    algorithms/heavyhash/heavyhash.cpp
     algorithms/progpow/progpow.cpp
     algorithms/progpow/progpow_dag.cpp
     algorithms/progpow/progpow_hash.cpp
@@ -307,6 +309,8 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/bmw512/bmw512.comp
                               algorithms/bmw512/bmw512_32.comp
                               algorithms/bmw512/bmw512_wide.comp
+                              algorithms/heavyhash/heavyhash.comp
+                              algorithms/heavyhash/heavyhash32.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp

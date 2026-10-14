@@ -144,6 +144,13 @@ target_link_libraries(bmw512_kat PRIVATE
     vkminer_algorithms vkminer_warnings Threads::Threads)
 add_test(NAME bmw512_kat COMMAND bmw512_kat)
 
+# heavyhash: obtc-core's own core vectors on its fixed matrix, the rank check on
+# matrices built singular, then OBTC's two genesis headers.
+add_executable(heavyhash_kat heavyhash_kat.cpp)
+target_link_libraries(heavyhash_kat PRIVATE
+    vkminer_algorithms vkminer_hashes vkminer_warnings Threads::Threads)
+add_test(NAME heavyhash_kat COMMAND heavyhash_kat)
+
 # The ProgPoW host reference, which is not an algorithm here yet and is checked
 # anyway: it is the reference a future kernel would be judged against, the
 # vendored code is only worth what this test says it is, and none of it needs a
@@ -622,6 +629,23 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_bmw512_nonces
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # heavyhash, both modules. The matrix comes in a uniform block, so these
+    # are also what tests that block reaching the kernel.
+    add_test(NAME diff_test_heavyhash COMMAND diff_test heavyhash 100000)
+    set_tests_properties(diff_test_heavyhash
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_heavyhash32
+        COMMAND diff_test heavyhash 100000 --no-int64)
+    set_tests_properties(diff_test_heavyhash32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    # The default is the 2x32 module; this is the 64-bit one.
+    add_test(NAME diff_test_heavyhash_int64
+        COMMAND diff_test heavyhash 100000 --kernel int64)
+    set_tests_properties(diff_test_heavyhash_int64
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a
@@ -764,6 +788,10 @@ if(TARGET vkminer_shaders)
     set_tests_properties(race_test_bmw512
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 
+    add_test(NAME race_test_heavyhash COMMAND race_test heavyhash 8)
+    set_tests_properties(race_test_heavyhash
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
     # The negative half of the known-answer test, perturbing the device rather
     # than the host reference. Cheap -- a couple of dozen single-nonce dispatches
     # -- so it is not labelled slow and runs on a software rasterizer too.
@@ -865,6 +893,22 @@ if(TARGET vkminer_shaders)
     add_test(NAME negative_kat_bmw512_int64
         COMMAND negative_kat bmw512 --kernel int64)
     set_tests_properties(negative_kat_bmw512_int64
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Both of heavyhash's. Header words 1..8 are also the matrix seed, so a flip
+    # there moves the uniform block as well as the message.
+    add_test(NAME negative_kat_heavyhash COMMAND negative_kat heavyhash)
+    set_tests_properties(negative_kat_heavyhash
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_heavyhash32
+        COMMAND negative_kat heavyhash --no-int64)
+    set_tests_properties(negative_kat_heavyhash32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_heavyhash_int64
+        COMMAND negative_kat heavyhash --kernel int64)
+    set_tests_properties(negative_kat_heavyhash_int64
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

@@ -131,8 +131,8 @@ constexpr uint32_t kMaxSharedChunks = 16;
 constexpr uint32_t kMaxProgramConstants = 256;
 
 // Bytes of a kernel's uniform block, and the size the backend stages it in.
-// Far below the 16 KiB every device allows.
-constexpr uint32_t kMaxUniformBytes = 1024;
+// Half the 16 KiB every device allows; heavyhash's matrix takes all of it.
+constexpr uint32_t kMaxUniformBytes = 8192;
 
 class Algorithm;
 

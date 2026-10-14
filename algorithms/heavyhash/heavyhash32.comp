@@ -1,0 +1,11 @@
+// heavyhash with each 64-bit Keccak lane held as two 32-bit words.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// The only kernel on a device without shaderInt64; --no-int64 is how it gets
+// tested on one that has it.
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "algorithms/heavyhash/heavyhash_kernel.glsl"
