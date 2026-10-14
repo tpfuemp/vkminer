@@ -111,6 +111,7 @@ public:
                 device_->destroy_buffer(&slot.results);
                 device_->destroy_buffer(&slot.readback);
                 device_->destroy_buffer(&slot.scratch);
+                device_->destroy_buffer(&slot.uniform);
             }
     }
 
@@ -146,6 +147,14 @@ public:
             applog(LOG_ERR, "Vulkan: '%s' wants %u bytes of push constants, "
                             "which is more than this backend carries (%u)",
                    name_, push_bytes_, static_cast<unsigned>(sizeof push_));
+            return false;
+        }
+
+        uniform_bytes_ = spec.uniform_bytes;
+        if (uniform_bytes_ > sizeof uniform_) {
+            applog(LOG_ERR, "Vulkan: '%s' wants a %u-byte uniform block, and "
+                            "this backend carries %u", name_, uniform_bytes_,
+                   static_cast<unsigned>(sizeof uniform_));
             return false;
         }
 
@@ -197,6 +206,7 @@ public:
             return false;
         }
         desc.push_constant_bytes = push_bytes_;
+        desc.uniform_buffer = uniform_bytes_ != 0;
         desc.local_size_x = fit.local_size_x;
         probe_best_ = opt_vk_probe_best;
         desc.probe_best = probe_best_;
@@ -292,6 +302,18 @@ public:
                            name_, i, depth_);
                     return false;
                 }
+            }
+
+            // One per slot for the reason the results are: the host rewrites
+            // it for the next dispatch while this one may still be reading.
+            if (uniform_bytes_
+                && !device.create_buffer(uniform_bytes_,
+                                         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                         BufferKind::Upload,
+                                         &slot_[i].uniform)) {
+                applog(LOG_ERR, "Vulkan: could not allocate uniform buffer %u "
+                                "for '%s'", i, name_);
+                return false;
             }
 
             // What set `i` points at, written once and never rewritten: a set
@@ -516,6 +538,20 @@ public:
             return false;
         }
 
+        // The uniform block under the same rule. Staged here, not written
+        // into the slot's buffer, because the slot may not be free yet.
+        if (uniform_bytes_) {
+            const size_t block =
+                algorithm_ ? algorithm_->prepare_uniform(job, uniform_,
+                                                         sizeof uniform_) : 0;
+            if (block != uniform_bytes_) {
+                applog(LOG_ERR, "Vulkan: '%s' declared a %u-byte uniform block "
+                                "and prepared %zu", name_, uniform_bytes_,
+                       block);
+                return false;
+            }
+        }
+
         CommandRing::Slot *slot = ring_->begin();
         if (!slot)
             return false;
@@ -525,6 +561,13 @@ public:
         // so the two orders cannot drift.
         const uint32_t index = slot->index;
         Slot &mine = slot_[index];
+
+        // The ring waited for this slot's fence, so nothing reads its block now.
+        if (uniform_bytes_) {
+            std::memcpy(mine.uniform.mapped, uniform_, uniform_bytes_);
+            if (!device_->flush(mine.uniform))
+                return false;
+        }
 
         const VolkDeviceTable &fn = device_->fn();
 
@@ -739,9 +782,12 @@ private:
         if (!built)
             return nullptr;
 
-        for (uint32_t i = 0; i < bound_.size(); i++)
+        for (uint32_t i = 0; i < bound_.size(); i++) {
             built->bind(i, bound_[i].data(),
                         static_cast<uint32_t>(bound_[i].size()));
+            if (uniform_bytes_)
+                built->bind_uniform(i, slot_[i].uniform);
+        }
 
         builds_.fetch_add(1, std::memory_order_relaxed);
 
@@ -950,6 +996,8 @@ private:
         // than shared: dispatches overlap, and two of them in one scratchpad
         // would both be wrong, differently on every run.
         Buffer scratch{};
+        // Only for a kernel with a uniform block; rewritten every dispatch.
+        Buffer uniform{};
     };
     std::vector<Slot> slot_;
 
@@ -987,6 +1035,10 @@ private:
     // device that happens to allow it.
     unsigned char push_[128] = {0};
     uint32_t push_bytes_ = 0;
+
+    // The uniform block, staged here until the slot it goes to is free.
+    unsigned char uniform_[kMaxUniformBytes] = {0};
+    uint32_t uniform_bytes_ = 0;
 
     uint32_t local_ = 0;
     uint32_t batch_ = kMinBatch;

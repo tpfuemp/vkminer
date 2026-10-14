@@ -102,13 +102,18 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
     const VolkDeviceTable &fn = device.fn();
     const VkDevice dev = device.handle();
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings(desc.storage_buffers);
-    for (uint32_t i = 0; i < desc.storage_buffers; i++) {
+    std::vector<VkDescriptorSetLayoutBinding> bindings(
+        desc.storage_buffers + (desc.uniform_buffer ? 1u : 0u));
+    for (uint32_t i = 0; i < bindings.size(); i++) {
         bindings[i].binding = i;
-        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorType = i < desc.storage_buffers
+                                   ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                   : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
+    if (desc.uniform_buffer)
+        p->uniform_binding_ = desc.storage_buffers;
 
     VkDescriptorSetLayoutCreateInfo set_layout{};
     set_layout.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -119,16 +124,23 @@ std::unique_ptr<ComputePipeline> ComputePipeline::create(
                "vkCreateDescriptorSetLayout"))
         return nullptr;
 
-    if (desc.storage_buffers) {
-        VkDescriptorPoolSize size{};
-        size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        size.descriptorCount = desc.storage_buffers * sets;
+    if (!bindings.empty()) {
+        VkDescriptorPoolSize sizes[2]{};
+        uint32_t kinds = 0;
+        if (desc.storage_buffers) {
+            sizes[kinds].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            sizes[kinds++].descriptorCount = desc.storage_buffers * sets;
+        }
+        if (desc.uniform_buffer) {
+            sizes[kinds].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            sizes[kinds++].descriptorCount = sets;
+        }
 
         VkDescriptorPoolCreateInfo pool{};
         pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         pool.maxSets = sets;
-        pool.poolSizeCount = 1;
-        pool.pPoolSizes = &size;
+        pool.poolSizeCount = kinds;
+        pool.pPoolSizes = sizes;
         if (!vk_ok(fn.vkCreateDescriptorPool(dev, &pool, nullptr, &p->pool_),
                    "vkCreateDescriptorPool"))
             return nullptr;
@@ -401,6 +413,28 @@ void ComputePipeline::bind(uint32_t set, const Buffer *buffers, uint32_t count)
 
     device_->fn().vkUpdateDescriptorSets(device_->handle(), count,
                                          writes.data(), 0, nullptr);
+}
+
+void ComputePipeline::bind_uniform(uint32_t set, const Buffer &buffer)
+{
+    if (uniform_binding_ == ~0u || set >= sets_.size())
+        return;
+
+    VkDescriptorBufferInfo info{};
+    info.buffer = buffer.handle;
+    info.offset = 0;
+    info.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = sets_[set];
+    write.dstBinding = uniform_binding_;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    write.pBufferInfo = &info;
+
+    device_->fn().vkUpdateDescriptorSets(device_->handle(), 1, &write, 0,
+                                         nullptr);
 }
 
 void ComputePipeline::record(VkCommandBuffer cmd, uint32_t set, uint32_t groups,

@@ -130,6 +130,10 @@ constexpr uint32_t kMaxSharedChunks = 16;
 // algorithm axis from asking the compiler for a million of them.
 constexpr uint32_t kMaxProgramConstants = 256;
 
+// Bytes of a kernel's uniform block, and the size the backend stages it in.
+// Far below the 16 KiB every device allows.
+constexpr uint32_t kMaxUniformBytes = 1024;
+
 class Algorithm;
 
 // The one thing that crosses between the two axes: what to run, in the terms
@@ -153,6 +157,11 @@ struct KernelSpec {
     uint32_t storage_buffers     = 0;
     uint32_t push_constant_bytes = 0;
     uint32_t local_size_x        = 0;  // 0 lets the backend choose
+
+    // Bytes of a uniform block for per-job data that does not fit the push
+    // constants, bound after the last storage buffer and filled per dispatch
+    // by Algorithm::prepare_uniform. Zero: no binding.
+    uint32_t uniform_bytes       = 0;
 
     // Invocations that cooperate on one nonce. One -- and zero, which means the
     // same -- is every kernel where an invocation is a hash. More is a kernel

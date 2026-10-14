@@ -56,6 +56,10 @@ struct ComputePipelineDesc {
     uint32_t push_constant_bytes = 0;  // 0 for a shader with no push block
     uint32_t local_size_x        = 0;  // specialization constant 0
 
+    // Whether the set has a uniform block, at the binding after the last
+    // storage buffer. False leaves the layout exactly as it was without one.
+    bool uniform_buffer = false;
+
     // Specialization constant 1: whether the shader maintains the best-digest
     // word. A constant rather than a uniform so that the atomic is not in the
     // module at all when it is off -- which is what makes it safe to have a
@@ -127,6 +131,10 @@ public:
     // or between two of them.
     void bind(uint32_t set, const Buffer *buffers, uint32_t count);
 
+    // Point set `set`'s uniform block at `buffer`, under the same rule. A no-op
+    // for a pipeline built without one.
+    void bind_uniform(uint32_t set, const Buffer &buffer);
+
     // Record a dispatch of `groups` workgroups against descriptor set `set`,
     // with `push` bytes of push constants (may be null when the pipeline has
     // none).
@@ -158,6 +166,9 @@ private:
     VkPipelineLayout      layout_    = VK_NULL_HANDLE;
     VkPipeline            pipeline_  = VK_NULL_HANDLE;
     uint32_t              local_size_x_ = 0;
+
+    // The uniform block's binding, or ~0u where the set has none.
+    uint32_t              uniform_binding_ = ~0u;
 };
 
 }  // namespace vkminer

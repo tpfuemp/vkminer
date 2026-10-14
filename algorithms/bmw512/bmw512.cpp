@@ -5,7 +5,9 @@
 //
 // DigitalNote's proof of work and block id. Bitcoin's header, nonce at word
 // 19. Header words go to the device in wire order; header and padding are one
-// block, so there is no midstate.
+// block, so there is no midstate. Most of the first compression does not read
+// the nonce, though: the host computes that part and the kernel reads it from
+// a uniform block (bmw512_80_precompute() in src/core/bmw512.c).
 
 #include "algorithms/bmw512/bmw512.h"
 
@@ -38,6 +40,15 @@ static_assert(sizeof(Bmw512Push) == 96,
               "bmw512_kernel.glsl's push block is 96 bytes");
 static_assert(offsetof(Bmw512Push, target) == 76, "push block layout");
 static_assert(offsetof(Bmw512Push, nonce_start) == 84, "push block layout");
+
+// The uniform block bmw512_kernel.glsl declares: bmw512_80_precompute()'s 35
+// words as (low, high) pairs, padded to std140's sixteen-byte array stride.
+struct Bmw512Uniform {
+    uint32_t words[72];
+};
+
+static_assert(sizeof(Bmw512Uniform) == 288,
+              "bmw512_kernel.glsl's uniform block is 288 bytes");
 
 // ------------------------------------------------------------- the vectors
 
@@ -294,6 +305,30 @@ public:
         return sizeof push;
     }
 
+    size_t prepare_uniform(const Dispatch &dispatch, void *out,
+                           size_t capacity) const override
+    {
+        if (!dispatch.header || capacity < sizeof(Bmw512Uniform))
+            return 0;
+
+        // The nonce bytes stay zero; nothing written here reads them.
+        unsigned char data[80] = {};
+        for (size_t i = 0; i < 19; i++)
+            be32enc(data + i * 4, dispatch.header[i]);
+
+        uint64_t words[35];
+        bmw512_80_precompute(words, data);
+
+        Bmw512Uniform block = {};
+        for (size_t i = 0; i < 35; i++) {
+            block.words[2 * i] = static_cast<uint32_t>(words[i]);
+            block.words[2 * i + 1] = static_cast<uint32_t>(words[i] >> 32);
+        }
+
+        std::memcpy(out, &block, sizeof block);
+        return sizeof block;
+    }
+
     void hash(const uint32_t *header, uint64_t nonce,
               uint32_t out[8]) const override
     {
@@ -340,6 +375,7 @@ private:
         spec.push_constant_bytes = module.push_constant_bytes
                                  ? module.push_constant_bytes
                                  : sizeof(Bmw512Push);
+        spec.uniform_bytes = sizeof(Bmw512Uniform);
         spec.local_size_x = module.local_size_x;  // 0: the backend chooses
 #endif
         return spec;

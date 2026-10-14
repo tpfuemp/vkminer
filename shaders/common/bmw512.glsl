@@ -174,14 +174,13 @@ const uvec2 bmw512_k_words[16] = uvec2[16](
         q[j] = v;                                                         \
     }
 
-// h = f2(f1(f0(h, m)), m): one compression of the 128-byte block m.
-void bmw512_compress(inout BLANE h[16], BLANE m[16])
+// f0: Q[0..15]. The rest of q is left as it was.
+void bmw512_f0(inout BLANE q[32], BLANE h[16], BLANE m[16])
 {
     BLANE x[16];
     for (uint i = 0u; i < 16u; i++)
         x[i] = m[i] ^ h[i];
 
-    BLANE q[32];
     BMW_F0( 0, bmw_s0,  5, bsub,  7, badd, 10, badd, 13, badd, 14);
     BMW_F0( 1, bmw_s1,  6, bsub,  8, badd, 11, badd, 14, bsub, 15);
     BMW_F0( 2, bmw_s2,  0, badd,  7, badd,  9, bsub, 12, badd, 15);
@@ -198,14 +197,11 @@ void bmw512_compress(inout BLANE h[16], BLANE m[16])
     BMW_F0(13, bmw_s3,  2, badd,  4, badd,  7, badd, 10, badd, 11);
     BMW_F0(14, bmw_s4,  3, bsub,  5, badd,  8, bsub, 11, bsub, 12);
     BMW_F0(15, bmw_s0, 12, bsub,  4, bsub,  6, bsub,  9, badd, 13);
+}
 
-    BMW_EXPAND1(16); BMW_EXPAND1(17);
-    BMW_EXPAND2(18); BMW_EXPAND2(19); BMW_EXPAND2(20); BMW_EXPAND2(21);
-    BMW_EXPAND2(22); BMW_EXPAND2(23); BMW_EXPAND2(24); BMW_EXPAND2(25);
-    BMW_EXPAND2(26); BMW_EXPAND2(27); BMW_EXPAND2(28); BMW_EXPAND2(29);
-    BMW_EXPAND2(30); BMW_EXPAND2(31);
-
-    // f2
+// f2: the fold of q back into h; m is the block.
+void bmw512_f2(inout BLANE h[16], BLANE q[32], BLANE m[16])
+{
     BLANE xl = q[16] ^ q[17] ^ q[18] ^ q[19] ^ q[20] ^ q[21] ^ q[22] ^ q[23];
     BLANE xh = xl ^ q[24] ^ q[25] ^ q[26] ^ q[27] ^ q[28] ^ q[29] ^ q[30]
                   ^ q[31];
@@ -235,6 +231,21 @@ void bmw512_compress(inout BLANE h[16], BLANE m[16])
                  bshr(xl, 7u) ^ q[21] ^ q[14]);
     h[15] = badd(badd(brotl(h[3], 16u), xh ^ q[31] ^ m[15]),
                  bshr(xl, 2u) ^ q[22] ^ q[15]);
+}
+
+// h = f2(f1(f0(h, m)), m): one compression of the 128-byte block m.
+void bmw512_compress(inout BLANE h[16], BLANE m[16])
+{
+    BLANE q[32];
+    bmw512_f0(q, h, m);
+
+    BMW_EXPAND1(16); BMW_EXPAND1(17);
+    BMW_EXPAND2(18); BMW_EXPAND2(19); BMW_EXPAND2(20); BMW_EXPAND2(21);
+    BMW_EXPAND2(22); BMW_EXPAND2(23); BMW_EXPAND2(24); BMW_EXPAND2(25);
+    BMW_EXPAND2(26); BMW_EXPAND2(27); BMW_EXPAND2(28); BMW_EXPAND2(29);
+    BMW_EXPAND2(30); BMW_EXPAND2(31);
+
+    bmw512_f2(h, q, m);
 }
 
 // Final transform: compress the state as a message under 0xaaaa..aaa0 + i.

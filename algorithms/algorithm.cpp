@@ -18,6 +18,15 @@ size_t Algorithm::prepare(const Dispatch &dispatch, void *out,
     return 0;
 }
 
+size_t Algorithm::prepare_uniform(const Dispatch &dispatch, void *out,
+                                  size_t capacity) const
+{
+    (void)dispatch;
+    (void)out;
+    (void)capacity;
+    return 0;
+}
+
 size_t Algorithm::kernels(const DeviceInfo &device, KernelSpec *out,
                           size_t max) const
 {

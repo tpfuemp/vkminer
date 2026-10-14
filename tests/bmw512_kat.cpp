@@ -109,6 +109,44 @@ bool nbits_target(const unsigned char *header, uint32_t target[8])
     return true;
 }
 
+// The kernel's job words must not read the nonce, and must read the rest of
+// the header. Whether they are the right words only the kernels can show:
+// --self-test and diff_test run them against bmw512_full().
+void check_precompute(const vkminer::KnownAnswer &answer)
+{
+    unsigned char data[80];
+    std::memcpy(data, answer.header, sizeof data);
+
+    uint64_t base[35], other[35];
+    bmw512_80_precompute(base, data);
+
+    for (unsigned flip : { 0x00000001u, 0x80000000u, 0xffffffffu }) {
+        le32enc(data + 76, le32dec(answer.header + 76) ^ flip);
+        bmw512_80_precompute(other, data);
+        if (std::memcmp(base, other, sizeof base) != 0)
+            fail("%s: the job words change with nonce bits %08x",
+                 answer.label, flip);
+    }
+
+    // Nor with nBits, the other half of M[9]: the kernel adds all of that word
+    // back, from the push block, so the job leaves all of it out.
+    std::memcpy(data, answer.header, sizeof data);
+    data[72] ^= 1;
+    bmw512_80_precompute(other, data);
+    if (std::memcmp(base, other, sizeof base) != 0)
+        fail("%s: the job words change with nBits", answer.label);
+
+    // Byte 71 is the last of M[8].
+    for (size_t at : { size_t(0), size_t(71) }) {
+        std::memcpy(data, answer.header, sizeof data);
+        data[at] ^= 1;
+        bmw512_80_precompute(other, data);
+        if (std::memcmp(base, other, sizeof base) == 0)
+            fail("%s: the job words ignore header byte %zu",
+                 answer.label, at);
+    }
+}
+
 void check(vkminer::Algorithm &algo, const vkminer::KnownAnswer &answer)
 {
     uint32_t header[20];
@@ -164,6 +202,8 @@ void check(vkminer::Algorithm &algo, const vkminer::KnownAnswer &answer)
     std::memcpy(target, hash, sizeof target);
     if (algo.verify(header, answer.nonce + 1, target, verified))
         fail("%s: verify() accepted the wrong nonce", answer.label);
+
+    check_precompute(answer);
 }
 
 }  // namespace

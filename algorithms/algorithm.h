@@ -195,6 +195,11 @@ public:
     virtual size_t prepare(const Dispatch &dispatch, void *out,
                            size_t capacity) const;
 
+    // The same for the spec's uniform block, if any: the return must be its
+    // uniform_bytes. The default writes nothing, for specs without one.
+    virtual size_t prepare_uniform(const Dispatch &dispatch, void *out,
+                                   size_t capacity) const;
+
     // The vectors this algorithm is checked against at startup, written to
     // `out`, with the count returned. None is refused by the self-test: a miner
     // that cannot demonstrate it hashes correctly has no business asking a pool

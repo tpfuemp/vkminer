@@ -73,35 +73,55 @@ static const int w_minus[16][5] = {
     { 0, 1, 1, 1, 0 },
 };
 
-/* AddElement(i): rotl(M[k], k + 1) for k = i, i+3, i+10, plus K, xor H. */
-static uint64_t add_element( const uint64_t m[16], const uint64_t h[16],
-                             int i )
+/* AddElement(i) before its xor: rotl(M[k], k + 1) for k = i, i+3, i+10,
+ * the last subtracted, plus K. */
+static uint64_t add_sum( const uint64_t m[16], int i )
 {
     const int a = i, b = ( i + 3 ) % 16, c = ( i + 10 ) % 16;
     const uint64_t k = (uint64_t)( i + 16 ) * 0x0555555555555555ull;
 
-    return ( rotl( m[a], a + 1 ) + rotl( m[b], b + 1 ) - rotl( m[c], c + 1 )
-             + k ) ^ h[( i + 7 ) % 16];
+    return rotl( m[a], a + 1 ) + rotl( m[b], b + 1 ) - rotl( m[c], c + 1 ) + k;
+}
+
+static uint64_t add_element( const uint64_t m[16], const uint64_t h[16],
+                             int i )
+{
+    return add_sum( m, i ) ^ h[( i + 7 ) % 16];
+}
+
+static const unsigned r[8] = { 0, 5, 11, 27, 32, 37, 43, 53 };
+
+/* W[i] of f0, a signed sum of five words of x = M ^ H. */
+static uint64_t f0_w( const uint64_t x[16], int i )
+{
+    uint64_t w = x[w_index[i][0]];
+    int j;
+
+    for ( j = 1; j < 5; j++ )
+        w = w_minus[i][j] ? w - x[w_index[i][j]] : w + x[w_index[i][j]];
+    return w;
+}
+
+/* f0: Q[0..15]. */
+static void f0( uint64_t q[32], const uint64_t h[16], const uint64_t m[16] )
+{
+    uint64_t x[16];
+    int i;
+
+    for ( i = 0; i < 16; i++ )
+        x[i] = m[i] ^ h[i];
+    for ( i = 0; i < 16; i++ )
+        q[i] = s_( i % 5, f0_w( x, i ) ) + h[( i + 1 ) % 16];
 }
 
 /* h' = f2(f1(f0(h, m)), m). */
 static void compress( uint64_t out[16], const uint64_t h[16],
                       const uint64_t m[16] )
 {
-    static const unsigned r[8] = { 0, 5, 11, 27, 32, 37, 43, 53 };
-    uint64_t x[16], q[32], xl, xh;
+    uint64_t q[32], xl, xh;
     int i, j;
 
-    /* f0 */
-    for ( i = 0; i < 16; i++ )
-        x[i] = m[i] ^ h[i];
-    for ( i = 0; i < 16; i++ )
-    {
-        uint64_t w = x[w_index[i][0]];
-        for ( j = 1; j < 5; j++ )
-            w = w_minus[i][j] ? w - x[w_index[i][j]] : w + x[w_index[i][j]];
-        q[i] = s_( i % 5, w ) + h[( i + 1 ) % 16];
-    }
+    f0( q, h, m );
 
     /* f1: expand1 for the first two, expand2 for the rest. */
     for ( i = 16; i < 18; i++ )
@@ -158,6 +178,83 @@ static uint64_t dec64le( const uint8_t *p )
     for ( k = 7; k >= 0; k-- )
         v = ( v << 8 ) | p[k];
     return v;
+}
+
+/* For an 80-byte message the nonce is the high half of M[9], and the only
+ * word that moves with it. Q[i] of f0 reads it through x[9]; AddElement(i)
+ * reads M[9] for i = 6, 9 and 15; every Q of f1 reads some Q that does. */
+static int q_reads_nonce( int i )
+{
+    int j;
+
+    if ( i >= 16 )
+        return 1;
+    for ( j = 0; j < 5; j++ )
+        if ( w_index[i][j] == 9 )
+            return 1;
+    return 0;
+}
+
+static int add_reads_nonce( int i )
+{
+    return i == 9 || ( i + 3 ) % 16 == 9 || ( i + 10 ) % 16 == 9;
+}
+
+void bmw512_80_precompute( uint64_t out[35], const void *header )
+{
+    uint8_t block[128];
+    uint64_t h[16], m[16], q[32], x[16];
+    int i, j;
+
+    /* The block bmw512_full() pads an 80-byte message to. */
+    memset( block, 0, sizeof block );
+    memcpy( block, header, 80 );
+    block[80] = 0x80;
+    block[120] = ( 80 * 8 ) & 0xff;
+    block[121] = ( 80 * 8 ) >> 8;
+    for ( i = 0; i < 16; i++ )
+    {
+        h[i] = 0x8081828384858687ull + (uint64_t)i * 0x0808080808080808ull;
+        m[i] = dec64le( block + 8 * i );
+    }
+
+    /* Every term that reads the nonce is left out (M[9] taken as zero). W and
+     * AddElement are linear in x[9] and rotl(M[9], 10) with coefficient +-1,
+     * so the kernel adds those terms back. */
+    f0( q, h, m );
+    for ( i = 0; i < 16; i++ )
+        x[i] = m[i] ^ h[i];
+    x[9] = 0;
+    for ( i = 0; i < 16; i++ )
+        out[i] = q_reads_nonce( i ) ? f0_w( x, i ) : q[i];
+
+    m[9] = 0;
+    for ( i = 16; i < 32; i++ )
+    {
+        uint64_t v = add_reads_nonce( i - 16 ) ? 0 : add_element( m, h, i - 16 );
+        if ( i < 18 )
+        {
+            for ( j = 0; j < 16; j++ )
+                if ( !q_reads_nonce( i - 16 + j ) )
+                    v += s_( ( j + 1 ) % 4, q[i - 16 + j] );
+        }
+        else
+        {
+            /* s4(Q[i-2]) and s5(Q[i-1]) both read it */
+            for ( j = 0; j < 14; j += 2 )
+            {
+                if ( !q_reads_nonce( i - 16 + j ) )
+                    v += q[i - 16 + j];
+                if ( !q_reads_nonce( i - 15 + j ) )
+                    v += rotl( q[i - 15 + j], r[j / 2 + 1] );
+            }
+        }
+        out[i] = v;
+    }
+
+    out[32] = add_sum( m, 6 );
+    out[33] = add_sum( m, 9 );
+    out[34] = add_sum( m, 15 );
 }
 
 static void compress_bytes( uint64_t h[16], const uint8_t block[128] )
