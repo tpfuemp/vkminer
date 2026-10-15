@@ -83,6 +83,12 @@ struct DeviceInfo {
     bool int8  = false;
     bool subgroup_ballot = false;
     bool subgroup_shuffle = false;   // lanes can read each other's registers
+
+    // A dot product of four bytes packed in a word, and whether the driver says
+    // the unsigned one is a native instruction rather than a lowering. The
+    // first makes a module a candidate; the tuner decides whether it is fast.
+    bool dot4x8 = false;
+    bool dot4x8_native = false;
 };
 
 // A nonce that met the target, and the hash the device says it produced. The
@@ -131,8 +137,8 @@ constexpr uint32_t kMaxSharedChunks = 16;
 constexpr uint32_t kMaxProgramConstants = 256;
 
 // Bytes of a kernel's uniform block, and the size the backend stages it in.
-// Half the 16 KiB every device allows; heavyhash's matrix takes all of it.
-constexpr uint32_t kMaxUniformBytes = 8192;
+// The 16 KiB every device allows; heavyhash's matrix in two layouts takes 12.
+constexpr uint32_t kMaxUniformBytes = 16384;
 
 class Algorithm;
 

@@ -279,6 +279,18 @@ target_link_libraries(vkminer_algorithms PRIVATE
 # ------------------------------------------------------------------ shaders
 if(VKMINER_BUILD_SHADERS)
     include(CompileShaders)
+
+    # heavyhash's dot-product module is built only where the compiler knows
+    # the extension.
+    vkminer_glsl_extension_supported(GL_EXT_integer_dot_product
+                                     VKMINER_GLSL_DOT_PRODUCT)
+    set(vkminer_optional_kernels "")
+    if(VKMINER_GLSL_DOT_PRODUCT)
+        list(APPEND vkminer_optional_kernels
+             algorithms/heavyhash/heavyhash_dot.comp)
+    endif()
+    message(STATUS "GL_EXT_integer_dot_product: ${VKMINER_GLSL_DOT_PRODUCT}")
+
     # Every module the binary carries. toolchain-check.comp is not one of the
     # miner's kernels: it exists so that a broken or missing GLSL toolchain is
     # a build failure here rather than a surprise later, and it is what the
@@ -315,6 +327,7 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp
                               algorithms/progpow/dag.comp
+                              ${vkminer_optional_kernels}
                       INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
                       EMBED "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded_spirv.cpp")
 
@@ -332,6 +345,10 @@ if(VKMINER_BUILD_SHADERS)
     # algorithm is what asks for its own SPIR-V.
     target_link_libraries(vkminer_algorithms PUBLIC vkminer_shaders)
     target_compile_definitions(vkminer_algorithms PRIVATE VKMINER_HAVE_SHADERS=1)
+    if(VKMINER_GLSL_DOT_PRODUCT)
+        target_compile_definitions(vkminer_algorithms PRIVATE
+                                   VKMINER_HAVE_DOT_PRODUCT_SHADERS=1)
+    endif()
 
     if(VKMINER_BUILD_TESTS)
         add_spirv_shaders(vkminer_shader_vk_smoke

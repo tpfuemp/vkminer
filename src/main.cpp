@@ -225,6 +225,9 @@ void print_device_list(const std::vector<vkminer::DeviceInfo> &devices)
                         : d.int64 && d.int16 && d.int8    ? "64, 32, 16, 8-bit"
                         : d.int64                         ? "64 and 32-bit"
                                                           : "32-bit and narrower");
+        if (d.dot4x8)
+            std::printf("      dot        4x8-bit packed, %s\n",
+                        d.dot4x8_native ? "native" : "lowered by the driver");
 
         any_cpu = any_cpu || d.kind == vkminer::DeviceKind::Cpu;
     }

@@ -114,6 +114,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(VkInstance instance,
     if (need_float16_int8_ext)
         extensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
 
+    // The extension rather than 1.3's core feature: the instance is 1.1, and
+    // enumeration only set dot4x8 where the extension is advertised.
+    if (info.dot4x8)
+        extensions.push_back(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+
     // Only what enumeration found. Asking for a feature a device does not have
     // makes vkCreateDevice fail outright, so the enumeration result is the
     // request: this is the reason DeviceInfo carries these at all.
@@ -139,6 +144,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(VkInstance instance,
     if (dev->pipeline_stats_) {
         executable.pNext = features.pNext;
         features.pNext = &executable;
+    }
+
+    VkPhysicalDeviceShaderIntegerDotProductFeaturesKHR dot{};
+    dot.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES_KHR;
+    dot.shaderIntegerDotProduct = VK_TRUE;
+    if (info.dot4x8) {
+        dot.pNext = features.pNext;
+        features.pNext = &dot;
     }
 
     // One queue. A second queue on the same family would not add throughput --

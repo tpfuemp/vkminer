@@ -24,7 +24,9 @@ extern "C" {
 }
 
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace vkminer {
 namespace {
@@ -45,13 +47,16 @@ static_assert(offsetof(HeavyhashPush, target) == 76, "push block layout");
 static_assert(offsetof(HeavyhashPush, nonce_start) == 108, "push block layout");
 
 // The uniform block: column j at words 32j .. 32j + 31, word k holding row 2k
-// in its low half and row 2k + 1 in its high half.
+// in its low half and row 2k + 1 in its high half. Then the same matrix by
+// rows for the dot-product module, row i at words 16i .. 16i + 15 and byte b
+// of word w holding column 4w + b. Every module gets both; each reads its own.
 struct HeavyhashUniform {
     uint32_t words[64 * 32];
+    uint32_t rows[64 * 16];
 };
 
-static_assert(sizeof(HeavyhashUniform) == 8192,
-              "heavyhash_kernel.glsl's uniform block is 8192 bytes");
+static_assert(sizeof(HeavyhashUniform) == 12288,
+              "heavyhash_kernel.glsl's uniform block is 12288 bytes");
 static_assert(sizeof(HeavyhashUniform) <= kMaxUniformBytes,
               "the backend stages a uniform block of at most kMaxUniformBytes");
 
@@ -177,23 +182,23 @@ public:
         return sizeof kAnswers / sizeof kAnswers[0];
     }
 
-    // Two modules over one text, as for sha3t. The opening guess is the 2x32
-    // one even where both build: it was the faster one wherever measured.
-    // The tuner races both.
+    // Three modules over one text: sha3t's two lane widths, and 2x32 with the
+    // matrix step as byte dot products. The opening guess is plain 2x32; the
+    // tuner races them all.
     KernelSpec kernel(const DeviceInfo &device) const override
     {
         (void)device;
-        return spec_for(false);
+        return spec_for(kPair);
     }
 
-    // Both where both build, 64-bit first; the tuner picks.
+    // Every module the device builds, 64-bit first; the tuner picks.
     size_t kernels(const DeviceInfo &device, KernelSpec *out,
                    size_t max) const override
     {
         size_t count = 0;
 #ifdef VKMINER_HAVE_SHADERS
         if (device.int64 && count < max) {
-            const KernelSpec spec = spec_for(true);
+            const KernelSpec spec = spec_for(kWide);
             if (spec.spirv)
                 out[count++] = spec;
         }
@@ -201,10 +206,17 @@ public:
         (void)device;
 #endif
         if (count < max) {
-            const KernelSpec spec = spec_for(false);
+            const KernelSpec spec = spec_for(kPair);
             if (spec.spirv)
                 out[count++] = spec;
         }
+#ifdef VKMINER_HAVE_SHADERS
+        if (device.dot4x8 && dot_module_available() && count < max) {
+            const KernelSpec spec = spec_for(kDot);
+            if (spec.spirv)
+                out[count++] = spec;
+        }
+#endif
         return count;
     }
 
@@ -250,6 +262,13 @@ public:
                 block.words[32 * j + k] =
                     static_cast<uint32_t>(m[2 * k][j])
                     | static_cast<uint32_t>(m[2 * k + 1][j]) << 16;
+        for (size_t i = 0; i < 64; i++)
+            for (size_t w = 0; w < 16; w++)
+                block.rows[16 * i + w] =
+                    static_cast<uint32_t>(m[i][4 * w])
+                    | static_cast<uint32_t>(m[i][4 * w + 1]) << 8
+                    | static_cast<uint32_t>(m[i][4 * w + 2]) << 16
+                    | static_cast<uint32_t>(m[i][4 * w + 3]) << 24;
 
         std::memcpy(out, &block, sizeof block);
         return sizeof block;
@@ -271,19 +290,41 @@ public:
     }
 
 private:
-    KernelSpec spec_for(bool wide) const
+    enum Module { kWide, kPair, kDot };
+
+    // A compiler without the extension builds no dot-product module; --algo-dir
+    // can still supply one.
+    static bool dot_module_available()
     {
+#ifdef VKMINER_HAVE_DOT_PRODUCT_SHADERS
+        return true;
+#else
+        if (!opt_algo_dir || !*opt_algo_dir)
+            return false;
+        const std::string path = std::string(opt_algo_dir) + "/heavyhash_dot.spv";
+        FILE *f = std::fopen(path.c_str(), "rb");
+        if (f)
+            std::fclose(f);
+        return f != nullptr;
+#endif
+    }
+
+    KernelSpec spec_for(Module which) const
+    {
+        static const char *const variants[] = { "int64", "2x32", "2x32-dot" };
+        static const char *const files[] = { "heavyhash", "heavyhash32",
+                                             "heavyhash_dot" };
+
         KernelSpec spec;
         spec.name = name();
         spec.algorithm = this;
-        spec.variant = wide ? "int64" : "2x32";
+        spec.variant = variants[which];
 
 #ifdef VKMINER_HAVE_SHADERS
         // Loaded on first use and kept, since the spec points into it. One
         // Algorithm per worker, so no lock.
-        ShaderModule &module = wide ? module64_ : module32_;
-        if (module.words.empty()
-            && !load_shader(wide ? "heavyhash" : "heavyhash32", &module))
+        ShaderModule &module = modules_[which];
+        if (module.words.empty() && !load_shader(files[which], &module))
             return spec;
 
         spec.spirv = module.words.data();
@@ -302,8 +343,7 @@ private:
     }
 
 #ifdef VKMINER_HAVE_SHADERS
-    mutable ShaderModule module64_;
-    mutable ShaderModule module32_;
+    mutable ShaderModule modules_[3];  // indexed by Module
 #endif
 };
 

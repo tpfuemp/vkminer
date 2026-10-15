@@ -35,6 +35,31 @@ else()
         "(Debian/Ubuntu: glslang-tools, or the LunarG Vulkan SDK).")
 endif()
 
+# Whether the compiler found above accepts a GLSL extension, so an optional
+# module can be left out on an older compiler instead of failing the build.
+#
+#     vkminer_glsl_extension_supported(<extension> <result-var>)
+function(vkminer_glsl_extension_supported extension result)
+    set(dir "${CMAKE_CURRENT_BINARY_DIR}/glsl-probe")
+    file(MAKE_DIRECTORY "${dir}")
+    file(WRITE "${dir}/${extension}.comp"
+         "#version 450\n#extension ${extension} : require\n"
+         "layout(local_size_x = 1) in;\nvoid main() {}\n")
+    if(VKMINER_SHADER_COMPILER_KIND STREQUAL glslc)
+        set(cmd "${VKMINER_SHADER_COMPILER}" --target-env=vulkan1.1)
+    else()
+        set(cmd "${VKMINER_SHADER_COMPILER}" -V --target-env vulkan1.1)
+    endif()
+    execute_process(COMMAND ${cmd} -o "${dir}/${extension}.spv"
+                            "${dir}/${extension}.comp"
+                    RESULT_VARIABLE rc OUTPUT_QUIET ERROR_QUIET)
+    if(rc EQUAL 0)
+        set(${result} TRUE PARENT_SCOPE)
+    else()
+        set(${result} FALSE PARENT_SCOPE)
+    endif()
+endfunction()
+
 function(add_spirv_shaders target)
     cmake_parse_arguments(ARG "" "TARGET_ENV;OUTPUT_DIR;EMBED"
                           "SOURCES;INCLUDE_DIRS" ${ARGN})

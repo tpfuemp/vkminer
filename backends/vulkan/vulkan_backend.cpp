@@ -444,6 +444,18 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
             maintenance3.pNext = &pci;
     }
 
+    // Whether a packed 4x8-bit dot product is native; chained at the head so
+    // the ordering above is untouched.
+    const bool have_dot =
+        has_extension(exts, VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME);
+    VkPhysicalDeviceShaderIntegerDotProductPropertiesKHR dot_props{};
+    dot_props.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES_KHR;
+    if (have_dot) {
+        dot_props.pNext = props.pNext;
+        props.pNext = &dot_props;
+    }
+
     vkGetPhysicalDeviceProperties2(handle, &props);
 
     VkPhysicalDeviceShaderFloat16Int8Features f16i8{};
@@ -454,6 +466,14 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
     if (base.apiVersion >= VK_API_VERSION_1_2
         || has_extension(exts, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME))
         features.pNext = &f16i8;
+
+    VkPhysicalDeviceShaderIntegerDotProductFeaturesKHR dot{};
+    dot.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES_KHR;
+    if (have_dot) {
+        dot.pNext = features.pNext;
+        features.pNext = &dot;
+    }
 
     vkGetPhysicalDeviceFeatures2(handle, &features);
 
@@ -548,6 +568,10 @@ void VulkanBackend::describe(VkPhysicalDevice handle, DeviceInfo *out,
     out->int64 = !opt_no_int64 && features.features.shaderInt64 == VK_TRUE;
     out->int16 = features.features.shaderInt16 == VK_TRUE;
     out->int8 = f16i8.shaderInt8 == VK_TRUE;
+    out->dot4x8 = have_dot && dot.shaderIntegerDotProduct == VK_TRUE;
+    out->dot4x8_native =
+        out->dot4x8
+        && dot_props.integerDotProduct4x8BitPackedUnsignedAccelerated == VK_TRUE;
 }
 
 void VulkanBackend::enumerate()
