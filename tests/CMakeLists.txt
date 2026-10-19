@@ -151,6 +151,13 @@ target_link_libraries(heavyhash_kat PRIVATE
     vkminer_algorithms vkminer_hashes vkminer_warnings Threads::Threads)
 add_test(NAME heavyhash_kat COMMAND heavyhash_kat)
 
+# qubit: each of the five primitives against sph, the chain's five states, then
+# the Algorithm.
+add_executable(qubit_kat qubit_kat.cpp)
+target_link_libraries(qubit_kat PRIVATE
+    vkminer_algorithms vkminer_hashes vkminer_warnings Threads::Threads)
+add_test(NAME qubit_kat COMMAND qubit_kat)
+
 # The ProgPoW host reference, which is not an algorithm here yet and is checked
 # anyway: it is the reference a future kernel would be judged against, the
 # vendored code is only worth what this test says it is, and none of it needs a
@@ -646,6 +653,16 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_heavyhash_int64
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # qubit, one module: five chained hashes, two of them on AES rounds.
+    add_test(NAME diff_test_qubit COMMAND diff_test qubit 100000)
+    set_tests_properties(diff_test_qubit
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME diff_test_qubit_nonces
+        COMMAND diff_test qubit 100000 --nonces-per-invocation 3)
+    set_tests_properties(diff_test_qubit_nonces
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a
@@ -788,6 +805,10 @@ if(TARGET vkminer_shaders)
     set_tests_properties(race_test_bmw512
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 
+    add_test(NAME race_test_qubit COMMAND race_test qubit 8)
+    set_tests_properties(race_test_qubit
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
+
     add_test(NAME race_test_heavyhash COMMAND race_test heavyhash 8)
     set_tests_properties(race_test_heavyhash
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
@@ -909,6 +930,10 @@ if(TARGET vkminer_shaders)
     add_test(NAME negative_kat_heavyhash_int64
         COMMAND negative_kat heavyhash --kernel int64)
     set_tests_properties(negative_kat_heavyhash_int64
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    add_test(NAME negative_kat_qubit COMMAND negative_kat qubit)
+    set_tests_properties(negative_kat_qubit
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of

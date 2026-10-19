@@ -10,6 +10,7 @@
 #include "algorithms/lbry/lbry.h"
 #include "algorithms/myrgr/myrgr.h"
 #include "algorithms/progpow/progpow.h"
+#include "algorithms/qubit/qubit.h"
 #include "algorithms/scrypt/scrypt.h"
 #include "algorithms/sha256d/sha256d.h"
 #include "algorithms/sha512256d/sha512256d.h"
@@ -90,6 +91,10 @@ const Entry kAlgorithms[] = {
     // Optical Bitcoin's: SHA3-256, a 64x64 matrix product drawn from the
     // previous block hash, SHA3-256.
     { "heavyhash", "",     make_heavyhash      },
+    // One of DigiByte's five algorithms, among other chains': Luffa,
+    // CubeHash, SHAvite, SIMD and ECHO, each 512 bits, the first 32 bytes of
+    // the last.
+    { "qubit",   "",       make_qubit          },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.

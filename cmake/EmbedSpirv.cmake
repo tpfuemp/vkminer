@@ -62,26 +62,27 @@ foreach(i RANGE ${last_index})
     string(MAKE_C_IDENTIFIER "${name}" ident)
     string(APPEND body "const uint32_t k_${ident}[] = {\n")
 
-    math(EXPR last_word "${word_count} - 1")
-    set(line "   ")
-    foreach(w RANGE ${last_word})
-        math(EXPR offset "${w} * 8")
-        string(SUBSTRING "${hex}" ${offset} 8 word_hex)
-        string(SUBSTRING "${word_hex}" 0 2 b0)
-        string(SUBSTRING "${word_hex}" 2 2 b1)
-        string(SUBSTRING "${word_hex}" 4 2 b2)
-        string(SUBSTRING "${word_hex}" 6 2 b3)
-        string(APPEND line " 0x${b3}${b2}${b1}${b0}u,")
+    # Whole-string replacements, not a loop over words: every string(SUBSTRING)
+    # on a module's hex copies all of it, which made a loop quadratic and a
+    # build with a few large modules spend half an hour here.
+    #
+    # Each word's four bytes reversed into a constant, 13 characters a word...
+    string(REGEX REPLACE "(..)(..)(..)(..)" " 0x\\4\\3\\2\\1u," words "${hex}")
 
-        math(EXPR column "(${w} + 1) % 6")
-        if(column EQUAL 0)
-            string(APPEND body "${line}\n")
-            set(line "   ")
-        endif()
-    endforeach()
-    if(NOT line STREQUAL "   ")
-        string(APPEND body "${line}\n")
+    # ...then six to a line. The last line, if short, is not matched.
+    set(w " 0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]u,")
+    string(REGEX REPLACE "(${w}${w}${w}${w}${w}${w})" "   \\1\n" words "${words}")
+
+    math(EXPR tail_words "${word_count} % 6")
+    if(tail_words GREATER 0)
+        math(EXPR tail_chars "${tail_words} * 13")
+        string(LENGTH "${words}" words_len)
+        math(EXPR head_chars "${words_len} - ${tail_chars}")
+        string(SUBSTRING "${words}" 0 ${head_chars} head)
+        string(SUBSTRING "${words}" ${head_chars} -1 tail)
+        set(words "${head}   ${tail}\n")
     endif()
+    string(APPEND body "${words}")
 
     string(APPEND body "};\n\n")
     string(APPEND table "    { \"${name}\", k_${ident}, ${word_count} },\n")
