@@ -252,7 +252,7 @@ one printed at exit, which divides by the whole wall clock:
 | `bmw512` | ~1575 MH/s |
 | `heavyhash` | ~325 MH/s |
 | `qubit` | ~38 MH/s |
-| `x11` | ~21 MH/s |
+| `x11` | ~22 MH/s |
 | `scrypt` | ~1820 kH/s |
 | `kawpow` | ~17.9 MH/s |
 | `firopow` | ~17.4 MH/s |

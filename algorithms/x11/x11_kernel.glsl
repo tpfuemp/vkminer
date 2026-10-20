@@ -100,13 +100,13 @@ uint x11_groestl_byte(uint s[16], uint i, uint c)
 
 // Groestl-512 of 64 bytes, of a and b together as bit planes. Word k of row i
 // holds bytes (row i, column 4n + k / 2) of hash k & 1, as in
-// groestl_load80().
+// groestl_load80(). Unrolled so every index into a and b is a constant.
 void x11_groestl(inout uint a[16], inout uint b[16])
 {
     uint s[64];
-    for (uint i = 0u; i < 8u; i++) {
+    [[unroll]] for (uint i = 0u; i < 8u; i++) {
         uint d[8];
-        for (uint k = 0u; k < 8u; k++) {
+        [[unroll]] for (uint k = 0u; k < 8u; k++) {
             uint c = k >> 1;
             if ((k & 1u) == 0u)
                 d[k] = x11_groestl_byte(a, i, c)
@@ -219,12 +219,13 @@ void x11_keccak(inout uint s[16])
 }
 
 // Luffa-512 of 64 bytes: two message blocks, the padding block, then two
-// blank blocks, each giving half the digest.
+// blank blocks, each giving half the digest. The block loop is unrolled: a
+// rolled one reads s[8b + k] through a chain of selects.
 void x11_luffa(inout uint s[16])
 {
     uint v[40] = kLuffa512Iv;
     uint m[8];
-    for (uint b = 0u; b < 2u; b++) {
+    [[unroll]] for (uint b = 0u; b < 2u; b++) {
         for (uint k = 0u; k < 8u; k++)
             m[k] = bswap32(s[8u * b + k]);
         luffa512_block(v, m);
@@ -244,11 +245,12 @@ void x11_luffa(inout uint s[16])
 }
 
 // CubeHash-512 of 64 bytes: two blocks, the padding block, the final rounds.
+// The block loop is unrolled for the same reason as Luffa's.
 void x11_cubehash(inout uint s[16])
 {
     uint x[32] = kCubehash512Iv;
 
-    for (uint b = 0u; b < 2u; b++) {
+    [[unroll]] for (uint b = 0u; b < 2u; b++) {
         for (uint k = 0u; k < 8u; k++)
             x[k] ^= s[8u * b + k];
         cubehash512_rounds(x, 16u);
