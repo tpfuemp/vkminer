@@ -1,0 +1,376 @@
+// vkminer -- a Vulkan compute cryptocurrency miner.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// x11: BLAKE-512, BMW-512, Groestl-512, Skein-512, JH-512, Keccak-512,
+// Luffa-512, CubeHash-512, SHAvite-512, SIMD-512 and ECHO-512 in turn, the
+// first over the 80-byte header and each later one over the 64 bytes before
+// it, cut to 32 bytes. Bitcoin's header, nonce at word 19. Five stages are
+// 64-bit, so there are two modules, as for bmw512 and skein.
+
+#include "algorithms/x11/x11.h"
+
+#ifdef VKMINER_HAVE_SHADERS
+#include "shaders/shader_source.h"
+#endif
+
+extern "C" {
+#include "core/miner.h"
+#include "core/blake512.h"
+#include "core/bmw512.h"
+#include "core/cubehash512.h"
+#include "core/echo512.h"
+#include "core/groestl512.h"
+#include "core/jh512.h"
+#include "core/keccak512.h"
+#include "core/luffa512.h"
+#include "core/shavite512.h"
+#include "core/simd512.h"
+#include "core/skein512.h"
+}
+
+#include <cstddef>
+#include <cstring>
+
+namespace vkminer {
+namespace {
+
+// groestl_kernel.glsl's push block, which x11_kernel.glsl takes over; keep the
+// two in step. Only the top 64 bits of the target go; the host re-checks all
+// 256.
+struct X11Push {
+    uint32_t header[19];  // header words 0..18, little-endian reads of the wire
+    uint32_t target[2];   // the top 64 bits, most significant last
+    uint32_t nonce_start;
+    uint32_t count;
+    uint32_t capacity;
+};
+
+static_assert(sizeof(X11Push) == 96,
+              "groestl_kernel.glsl's push block is 96 bytes");
+static_assert(offsetof(X11Push, target) == 76, "push block layout");
+static_assert(offsetof(X11Push, nonce_start) == 84, "push block layout");
+
+// ------------------------------------------------------------- the vectors
+
+// Dash's block id is x11 of its header, so each published id is this
+// algorithm's digest, byte-reversed.
+
+// Dash's genesis block, mined January 2014. Id
+// 00000ffd590b1485b3caadc19b22e6379c733355108f107a430458cdf3407ab6.
+const unsigned char kDash0Header[80] = {
+    0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xc7, 0x62, 0xa6, 0x56, 0x7f, 0x3c, 0xc0, 0x92,
+    0xf0, 0x68, 0x4b, 0xb6, 0x2b, 0x7e, 0x00, 0xa8,
+    0x48, 0x90, 0xb9, 0x90, 0xf0, 0x7c, 0xc7, 0x1a,
+    0x6b, 0xb5, 0x8d, 0x64, 0xb9, 0x8e, 0x02, 0xe0,
+    0x02, 0x2d, 0xdb, 0x52,
+    0xf0, 0xff, 0x0f, 0x1e,
+    0xc2, 0x3f, 0xb9, 0x01,
+};
+
+const unsigned char kDash0Digest[32] = {
+    0xb6, 0x7a, 0x40, 0xf3, 0xcd, 0x58, 0x04, 0x43,
+    0x7a, 0x10, 0x8f, 0x10, 0x55, 0x33, 0x73, 0x9c,
+    0x37, 0xe6, 0x22, 0x9b, 0xc1, 0xad, 0xca, 0xb3,
+    0x85, 0x14, 0x0b, 0x59, 0xfd, 0x0f, 0x00, 0x00,
+};
+
+// Dash block 500000. Id
+// 000000000002be1cff717f4aa6efc504fa06dc9c453c83773de0b712b8690b7d.
+const unsigned char kDash500000Header[80] = {
+    0x03, 0x00, 0x00, 0x00,
+    0xc2, 0xd4, 0x5b, 0xcb, 0x83, 0xb4, 0x1a, 0x3d,
+    0x75, 0xe5, 0x30, 0x66, 0xd4, 0xab, 0x22, 0x93,
+    0x09, 0x07, 0x69, 0x6b, 0xab, 0x8b, 0xc4, 0x04,
+    0x30, 0x5d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xe4, 0x9d, 0x91, 0x4c, 0x06, 0x0e, 0x87, 0x3d,
+    0x05, 0x6c, 0x25, 0x2c, 0xc7, 0x20, 0x1a, 0xb8,
+    0x76, 0xf3, 0xaf, 0x2f, 0x48, 0x64, 0xf8, 0xd2,
+    0x12, 0xf2, 0x2a, 0x29, 0xce, 0xe1, 0x0e, 0x9d,
+    0xdf, 0x8e, 0x80, 0x57,
+    0xcf, 0xa6, 0x06, 0x1b,
+    0x30, 0x46, 0x0f, 0xdd,
+};
+
+const unsigned char kDash500000Digest[32] = {
+    0x7d, 0x0b, 0x69, 0xb8, 0x12, 0xb7, 0xe0, 0x3d,
+    0x77, 0x83, 0x3c, 0x45, 0x9c, 0xdc, 0x06, 0xfa,
+    0x04, 0xc5, 0xef, 0xa6, 0x4a, 0x7f, 0x71, 0xff,
+    0x1c, 0xbe, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+// Dash block 1000000. Id
+// 000000000000000c9167ee9675411440e10e9adbc21fb57b88879fc293e9d494.
+const unsigned char kDash1000000Header[80] = {
+    0x00, 0x00, 0x00, 0x20,
+    0x14, 0xec, 0xf2, 0x2e, 0x11, 0x0c, 0x62, 0x68,
+    0xfd, 0xc7, 0xe6, 0x54, 0xc8, 0x1f, 0x84, 0x8d,
+    0x7e, 0xa2, 0x16, 0xd6, 0x52, 0x8e, 0xf5, 0x38,
+    0x49, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x59, 0x5c, 0x1a, 0x25, 0xa6, 0x10, 0x9b, 0xa6,
+    0x9d, 0x5e, 0x9b, 0xd0, 0x95, 0xa6, 0x9b, 0x19,
+    0x19, 0x87, 0x5b, 0x3e, 0x36, 0x0e, 0xa3, 0x5d,
+    0x5b, 0x76, 0x96, 0x8b, 0x17, 0x87, 0xf8, 0x9e,
+    0xb8, 0x73, 0x32, 0x5c,
+    0x1c, 0x44, 0x4a, 0x19,
+    0x8c, 0xa2, 0x6a, 0x1d,
+};
+
+const unsigned char kDash1000000Digest[32] = {
+    0x94, 0xd4, 0xe9, 0x93, 0xc2, 0x9f, 0x87, 0x88,
+    0x7b, 0xb5, 0x1f, 0xc2, 0xdb, 0x9a, 0x0e, 0xe1,
+    0x40, 0x14, 0x41, 0x75, 0x96, 0xee, 0x67, 0x91,
+    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+// Dash block 2000000. Id
+// 0000000000000009bd68b5e00976c3f7482d4cc12b6596614fbba5678ef13a59.
+const unsigned char kDash2000000Header[80] = {
+    0x00, 0x00, 0x00, 0x20,
+    0x32, 0x06, 0x0b, 0x28, 0x16, 0xb2, 0x5d, 0xb4,
+    0xcb, 0xc2, 0x0d, 0xad, 0x9c, 0x6b, 0xdb, 0xa4,
+    0x06, 0x85, 0x11, 0x91, 0xba, 0x3b, 0xe8, 0xc4,
+    0x1d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x29, 0xb5, 0x9c, 0x35, 0x6e, 0x22, 0x19, 0x4a,
+    0x12, 0x22, 0x7b, 0x79, 0xe8, 0x67, 0xa5, 0x6b,
+    0xc7, 0x30, 0xb3, 0xb4, 0x45, 0xb2, 0x85, 0x63,
+    0x4a, 0x1c, 0x76, 0x36, 0x96, 0xcb, 0x38, 0x65,
+    0xe8, 0xb1, 0x98, 0x65,
+    0xf3, 0x14, 0x4c, 0x19,
+    0xc6, 0x77, 0x80, 0xe8,
+};
+
+const unsigned char kDash2000000Digest[32] = {
+    0x59, 0x3a, 0xf1, 0x8e, 0x67, 0xa5, 0xbb, 0x4f,
+    0x61, 0x96, 0x65, 0x2b, 0xc1, 0x4c, 0x2d, 0x48,
+    0xf7, 0xc3, 0x76, 0x09, 0xe0, 0xb5, 0x68, 0xbd,
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+// Dash block 2350000. Id
+// 00000000000000258216a62e8c7170be1207335474ddfa667092a71e3d4162d2.
+const unsigned char kDash2350000Header[80] = {
+    0x00, 0x00, 0x00, 0x20,
+    0x08, 0x97, 0x32, 0x1a, 0x33, 0x73, 0xc8, 0x22,
+    0xaf, 0x54, 0xce, 0x61, 0x79, 0x70, 0xd5, 0x4c,
+    0x6e, 0x02, 0x02, 0x34, 0x9f, 0x7f, 0xe0, 0x02,
+    0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x25, 0x67, 0x2a, 0x84, 0x63, 0x90, 0x1c, 0xc8,
+    0x14, 0xe1, 0x8e, 0xc3, 0xce, 0x2f, 0x50, 0xa9,
+    0x3e, 0xfe, 0xc4, 0xcd, 0x00, 0xd7, 0x96, 0x90,
+    0xb7, 0xaa, 0x24, 0x0c, 0xed, 0xd2, 0x77, 0x3e,
+    0xa0, 0x1a, 0xe2, 0x68,
+    0xfb, 0x2b, 0x2f, 0x19,
+    0xa8, 0x4a, 0xad, 0xd8,
+};
+
+const unsigned char kDash2350000Digest[32] = {
+    0xd2, 0x62, 0x41, 0x3d, 0x1e, 0xa7, 0x92, 0x70,
+    0x66, 0xfa, 0xdd, 0x74, 0x54, 0x33, 0x07, 0x12,
+    0xbe, 0x70, 0x71, 0x8c, 0x2e, 0xa6, 0x16, 0x82,
+    0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+// Not a chain's block: the bytes 0x00..0x4f, digest from sph's independent C.
+// tests/x11_kat.cpp has its eleven intermediate states.
+const unsigned char kCountingHeader[80] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+    0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+    0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
+    0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
+};
+
+const unsigned char kCountingDigest[32] = {
+    0x41, 0x2e, 0x76, 0x7a, 0xa9, 0xa3, 0x9e, 0xe2,
+    0x10, 0xea, 0x9c, 0xe4, 0x24, 0xde, 0x4f, 0xf5,
+    0xee, 0x35, 0xe6, 0x1a, 0x8c, 0x27, 0x50, 0x6b,
+    0xc2, 0x36, 0x5f, 0xf7, 0xd4, 0xe3, 0xec, 0xce,
+};
+
+// Nonces are byte-swapped from what an explorer prints, as for SHA-256d.
+const KnownAnswer kAnswers[] = {
+    { "Dash genesis block", kDash0Header, 0xc23fb901, kDash0Digest },
+    { "Dash block 500000", kDash500000Header, 0x30460fdd, kDash500000Digest },
+    { "Dash block 1000000", kDash1000000Header, 0x8ca26a1d,
+      kDash1000000Digest },
+    { "Dash block 2000000", kDash2000000Header, 0xc67780e8,
+      kDash2000000Digest },
+    { "Dash block 2350000", kDash2350000Header, 0xa84aadd8,
+      kDash2350000Digest },
+    { "bytes 0..79, sph's x11", kCountingHeader, 0x4c4d4e4f,
+      kCountingDigest },
+};
+
+class X11 final : public Algorithm {
+public:
+    const char *name() const override { return "x11"; }
+
+    // As in yiimp's stratum table.
+    double target_factor() const override { return 1.; }
+
+    // The kernel screens on the top 64 bits; see X11Push.
+    int screen_bits() const override { return 64; }
+
+    size_t known_answers(const KnownAnswer **out) const override
+    {
+        *out = kAnswers;
+        return sizeof kAnswers / sizeof kAnswers[0];
+    }
+
+    // Two modules over one text, because Int64 is a module-wide capability:
+    // 64-bit lanes and 2x32. The 64-bit one opens where it builds; the tuner
+    // races both.
+    KernelSpec kernel(const DeviceInfo &device) const override
+    {
+#ifdef VKMINER_HAVE_SHADERS
+        if (!device.int64 && !announced_) {
+            announced_ = true;
+            applog(LOG_INFO, "x11 on %s: 32-bit lane pairs, because "
+                             "shaderInt64 is not available here",
+                   device.name.c_str());
+        }
+
+        return spec_for(device.int64 ? kWide : kPairs);
+#else
+        (void)device;
+        return spec_for(kPairs);
+#endif
+    }
+
+    // Every module the device can build, 64-bit first; the tuner picks.
+    size_t kernels(const DeviceInfo &device, KernelSpec *out,
+                   size_t max) const override
+    {
+        size_t count = 0;
+#ifdef VKMINER_HAVE_SHADERS
+        if (device.int64 && count < max) {
+            const KernelSpec spec = spec_for(kWide);
+            if (spec.spirv)
+                out[count++] = spec;
+        }
+#else
+        (void)device;
+#endif
+        if (count < max) {
+            const KernelSpec spec = spec_for(kPairs);
+            if (spec.spirv)
+                out[count++] = spec;
+        }
+        return count;
+    }
+
+    size_t prepare(const Dispatch &dispatch, void *out,
+                   size_t capacity) const override
+    {
+        if (!dispatch.header || !dispatch.target
+            || capacity < sizeof(X11Push))
+            return 0;
+
+        X11Push push;
+
+        // Back to wire order, read little-endian.
+        for (size_t i = 0; i < 19; i++) {
+            unsigned char bytes[4];
+            be32enc(bytes, dispatch.header[i]);
+            push.header[i] = le32dec(bytes);
+        }
+
+        push.target[0] = dispatch.target[6];
+        push.target[1] = dispatch.target[7];
+
+        // The nonce is one header word; hash() truncates it the same way.
+        push.nonce_start = static_cast<uint32_t>(dispatch.nonce_start);
+        push.count = dispatch.count;
+        push.capacity = dispatch.capacity;
+
+        std::memcpy(out, &push, sizeof push);
+        return sizeof push;
+    }
+
+    // The scalar reference, kept simple: eleven independent calls.
+    void hash(const uint32_t *header, uint64_t nonce,
+              uint32_t out[8]) const override
+    {
+        unsigned char data[80];
+        for (size_t i = 0; i < 19; i++)
+            be32enc(data + i * 4, header[i]);
+        be32enc(data + 19 * 4, static_cast<uint32_t>(nonce));
+
+        unsigned char a[64], b[64];
+        blake512_full(a, data, sizeof data);
+        bmw512_full(b, a, sizeof a);
+        groestl512_full(a, b, sizeof b);
+        skein512_full(b, a, sizeof a);
+        jh512_full(a, b, sizeof b);
+        keccak512_full(b, a, sizeof a);
+        luffa512_full(a, b, sizeof b);
+        cubehash512_full(b, a, sizeof a);
+        shavite512_full(a, b, sizeof b);
+        simd512_full(b, a, sizeof a);
+        echo512_full(a, b, sizeof b);
+        std::memcpy(out, a, 32);
+    }
+
+private:
+    enum Module { kWide, kPairs, kModules };
+
+    // One of the modules. A spec with no SPIR-V is not an error: the CPU
+    // backend still has the reference.
+    KernelSpec spec_for(Module m) const
+    {
+        static const char *const kVariant[kModules] = { "int64", "2x32" };
+        static const char *const kShader[kModules] = { "x11", "x11_32" };
+
+        KernelSpec spec;
+        spec.name = name();
+        spec.algorithm = this;
+        spec.variant = kVariant[m];
+
+#ifdef VKMINER_HAVE_SHADERS
+        ShaderModule &module = modules_[m];
+        if (module.words.empty() && !load_shader(kShader[m], &module))
+            return spec;
+
+        spec.spirv = module.words.data();
+        spec.spirv_words = module.words.size();
+
+        // A shader from --algo-dir may declare its own layout; believe it.
+        spec.storage_buffers = module.storage_buffers
+                             ? module.storage_buffers : 1;
+        spec.push_constant_bytes = module.push_constant_bytes
+                                 ? module.push_constant_bytes
+                                 : sizeof(X11Push);
+        spec.local_size_x = module.local_size_x;  // 0: the backend chooses
+
+        // Groestl hashes two nonces at once as bit planes.
+        spec.nonces_per_invocation = 2;
+#endif
+        return spec;
+    }
+
+#ifdef VKMINER_HAVE_SHADERS
+    mutable ShaderModule modules_[kModules];
+
+    // A device that cannot run the 64-bit module is worth one line.
+    mutable bool announced_ = false;
+#endif
+};
+
+}  // namespace
+
+std::unique_ptr<Algorithm> make_x11()
+{
+    return std::unique_ptr<Algorithm>(new X11());
+}
+
+}  // namespace vkminer

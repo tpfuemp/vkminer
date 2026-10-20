@@ -208,8 +208,13 @@ void simd512_expand(uint m[32], bool final_block, out int y[256])
 // b[j1] = 41^(i1 j1) sum over j2 of byte[j] 41^(16 i1 j2). Each i1 is then a
 // 16-point transform held in registers, and two adjacent i1 fill whole words
 // of both packings, so only W is an array.
+// VKMINER_SIMD512_UNROLL_EXPAND also unrolls the loop over e, so every write
+// to W has a constant index.
 void simd512_expand64_packed(uint m[16], out uint W[256])
 {
+#ifdef VKMINER_SIMD512_UNROLL_EXPAND
+    [[unroll]]
+#endif
     for (uint e = 0u; e < 16u; e += 2u) {
         int y[32];
         [[unroll]] for (uint h = 0u; h < 2u; h++) {

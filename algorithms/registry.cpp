@@ -17,6 +17,7 @@
 #include "algorithms/sha3t/sha3t.h"
 #include "algorithms/skein/skein.h"
 #include "algorithms/skein2/skein2.h"
+#include "algorithms/x11/x11.h"
 
 #include <cstring>
 #include <string>
@@ -95,6 +96,10 @@ const Entry kAlgorithms[] = {
     // CubeHash, SHAvite, SIMD and ECHO, each 512 bits, the first 32 bytes of
     // the last.
     { "qubit",   "",       make_qubit          },
+    // Dash's, among other chains': BLAKE, BMW, Groestl, Skein, JH, Keccak,
+    // Luffa, CubeHash, SHAvite, SIMD and ECHO, each 512 bits, the first 32
+    // bytes of the last.
+    { "x11",     "",       make_x11            },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.
