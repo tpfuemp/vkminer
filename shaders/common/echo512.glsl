@@ -9,6 +9,8 @@
 #ifndef VKMINER_SHADERS_COMMON_ECHO512_GLSL_INCLUDED
 #define VKMINER_SHADERS_COMMON_ECHO512_GLSL_INCLUDED
 
+#extension GL_EXT_control_flow_attributes : require
+
 #include "shaders/common/aes.glsl"
 
 // The 128-bit counter plus a small offset, as a round key.
@@ -23,6 +25,67 @@ void echo512_key(uint cnt[4], uint add, out uint key[4])
     key[3] = cnt[3] + c;
 }
 
+// BigSubWords on words a and b of round r: two AES rounds each, the first
+// keyed with the counter plus the word's place in the whole run.
+void echo512_subwords_pair(inout uint w[64], uint cnt[4], uint r, uint a,
+                           uint b)
+{
+    uint x[8];
+    for (uint i = 0u; i < 4u; i++) {
+        x[i] = w[4u * a + i];
+        x[4u + i] = w[4u * b + i];
+    }
+    aes_round2(x);
+    uint k0[4], k1[4];
+    echo512_key(cnt, 16u * r + a, k0);
+    echo512_key(cnt, 16u * r + b, k1);
+    for (uint i = 0u; i < 4u; i++) {
+        x[i] ^= k0[i];
+        x[4u + i] ^= k1[i];
+    }
+    aes_round2(x);
+    for (uint i = 0u; i < 4u; i++) {
+        w[4u * a + i] = x[i];
+        w[4u * b + i] = x[4u + i];
+    }
+}
+
+// BigShiftRows and BigMixColumns, the second half of a round.
+void echo512_shift_mix(inout uint w[64])
+{
+    // BigShiftRows: word (column c, row) from column c + row.
+    uint t[64] = w;
+    for (uint c = 0u; c < 4u; c++)
+        for (uint row = 1u; row < 4u; row++)
+            for (uint i = 0u; i < 4u; i++)
+                w[4u * (4u * c + row) + i] =
+                    t[4u * (4u * ((c + row) & 3u) + row) + i];
+
+    // BigMixColumns: AES MixColumns down each column, four bytes at once.
+    for (uint c = 0u; c < 4u; c++) {
+        for (uint i = 0u; i < 4u; i++) {
+            uint a = w[16u * c + i];
+            uint b = w[16u * c + 4u + i];
+            uint d2 = w[16u * c + 8u + i];
+            uint d3 = w[16u * c + 12u + i];
+            uint ab = a ^ b, bc = b ^ d2, cd = d2 ^ d3, da = d3 ^ a;
+            w[16u * c + i]       = aes_xtime4(ab) ^ b ^ cd;
+            w[16u * c + 4u + i]  = aes_xtime4(bc) ^ d2 ^ da;
+            w[16u * c + 8u + i]  = aes_xtime4(cd) ^ d3 ^ ab;
+            w[16u * c + 12u + i] = aes_xtime4(da) ^ a ^ bc;
+        }
+    }
+}
+
+// Round r on the sixteen words w.
+void echo512_round(inout uint w[64], uint cnt[4], uint r)
+{
+    // Unrolled so that every index into w is a constant.
+    [[unroll]] for (uint n = 0u; n < 16u; n += 2u)
+        echo512_subwords_pair(w, cnt, r, n, n + 1u);
+    echo512_shift_mix(w);
+}
+
 // One compression of the block m into the chaining value v, under the 128-bit
 // bit counter cnt, least significant word first.
 void echo512_compress(inout uint v[32], uint m[32], uint cnt[4])
@@ -33,49 +96,8 @@ void echo512_compress(inout uint v[32], uint m[32], uint cnt[4])
         w[32u + i] = m[i];
     }
 
-    for (uint r = 0u; r < 10u; r++) {
-        // BigSubWords: two AES rounds per word, the first keyed with the
-        // counter plus the word's place in the whole run, two words at a time.
-        for (uint n = 0u; n < 16u; n += 2u) {
-            uint x[8];
-            for (uint i = 0u; i < 8u; i++)
-                x[i] = w[4u * n + i];
-            aes_round2(x);
-            uint k0[4], k1[4];
-            echo512_key(cnt, 16u * r + n, k0);
-            echo512_key(cnt, 16u * r + n + 1u, k1);
-            for (uint i = 0u; i < 4u; i++) {
-                x[i] ^= k0[i];
-                x[4u + i] ^= k1[i];
-            }
-            aes_round2(x);
-            for (uint i = 0u; i < 8u; i++)
-                w[4u * n + i] = x[i];
-        }
-
-        // BigShiftRows: word (column c, row) from column c + row.
-        uint t[64] = w;
-        for (uint c = 0u; c < 4u; c++)
-            for (uint row = 1u; row < 4u; row++)
-                for (uint i = 0u; i < 4u; i++)
-                    w[4u * (4u * c + row) + i] =
-                        t[4u * (4u * ((c + row) & 3u) + row) + i];
-
-        // BigMixColumns: AES MixColumns down each column, four bytes at once.
-        for (uint c = 0u; c < 4u; c++) {
-            for (uint i = 0u; i < 4u; i++) {
-                uint a = w[16u * c + i];
-                uint b = w[16u * c + 4u + i];
-                uint d2 = w[16u * c + 8u + i];
-                uint d3 = w[16u * c + 12u + i];
-                uint ab = a ^ b, bc = b ^ d2, cd = d2 ^ d3, da = d3 ^ a;
-                w[16u * c + i]       = aes_xtime4(ab) ^ b ^ cd;
-                w[16u * c + 4u + i]  = aes_xtime4(bc) ^ d2 ^ da;
-                w[16u * c + 8u + i]  = aes_xtime4(cd) ^ d3 ^ ab;
-                w[16u * c + 12u + i] = aes_xtime4(da) ^ a ^ bc;
-            }
-        }
-    }
+    for (uint r = 0u; r < 10u; r++)
+        echo512_round(w, cnt, r);
 
     for (uint i = 0u; i < 32u; i++)
         v[i] ^= m[i] ^ w[i] ^ w[32u + i];

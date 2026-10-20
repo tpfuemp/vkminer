@@ -302,7 +302,7 @@ void simd512_round_step(inout uint s[32], uint w[8], uint i, uint j)
 // The feed-forward, the old chaining value as message words, and the result.
 void simd512_feed_forward(inout uint h[32], uint s[32])
 {
-    for (uint j = 0u; j < 4u; j++) {
+    [[unroll]] for (uint j = 0u; j < 4u; j++) {
         uint w[8];
         for (uint k = 0u; k < 8u; k++)
             w[k] = h[8u * j + k];
@@ -365,8 +365,9 @@ void simd512_compress64(inout uint h[32], uint m[16])
         s[16u + i] = h[16u + i];
     }
 
-    for (uint i = 0u; i < 4u; i++) {
-        for (uint j = 0u; j < 8u; j++) {
+    // Unrolled, so the step's rotations and permutation are constants.
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        [[unroll]] for (uint j = 0u; j < 8u; j++) {
             // The word pairs simd512_compress_expanded() forms, by index.
             uint sb = kSimd512Wsel[8u * i + j];
             uint base = i < 2u ? 8u * sb
@@ -390,8 +391,8 @@ void simd512_compress_final64(inout uint h[32])
     uint s[32] = h;
     s[0] ^= 512u;
 
-    for (uint i = 0u; i < 4u; i++) {
-        for (uint j = 0u; j < 8u; j++) {
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        [[unroll]] for (uint j = 0u; j < 8u; j++) {
             uint w[8];
             for (uint k = 0u; k < 8u; k++)
                 w[k] = kSimd512Final64W[64u * i + 8u * j + k];

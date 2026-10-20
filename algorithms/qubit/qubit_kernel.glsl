@@ -130,12 +130,8 @@ void qubit_simd(inout uint s[16])
 // the digest size 512 at bytes 110..111 and the 128-bit bit count 512 at
 // bytes 112..127, compressed under the counter 512. Every chaining word starts
 // as the digest size.
-void qubit_echo(inout uint s[16])
+void qubit_echo_block(uint s[16], out uint m[32])
 {
-    uint v[32];
-    for (uint k = 0u; k < 32u; k++)
-        v[k] = (k & 3u) == 0u ? 512u : 0u;
-    uint m[32];
     for (uint k = 0u; k < 16u; k++)
         m[k] = s[k];
     m[16] = 0x80u;
@@ -143,11 +139,81 @@ void qubit_echo(inout uint s[16])
         m[k] = 0u;
     m[27] = 0x02000000u;
     m[28] = 512u;
+}
+
+void qubit_echo(inout uint s[16])
+{
+    uint v[32];
+    for (uint k = 0u; k < 32u; k++)
+        v[k] = (k & 3u) == 0u ? 512u : 0u;
+    uint m[32];
+    qubit_echo_block(s, m);
     uint cnt[4] = uint[4](512u, 0u, 0u, 0u);
 
     echo512_compress(v, m, cnt);
     for (uint k = 0u; k < 16u; k++)
         s[k] = v[k];
+}
+
+// ECHO's first BigSubWords on the words that do not depend on the message:
+// the chaining value (words 0..7) and the padding block half (words 12..15),
+// under the counter 512.
+const uint kQubitEcho0[48] = uint[48](
+    0xe7e9f5f5u, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0x14b8a457u, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0xdbfde1ddu, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0x9ac2dea3u, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0x65978b09u, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0xa4213d7eu, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0x265f4382u, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0x34514d9eu, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu,
+    0xb134347eu, 0xea6f7e7eu, 0xbd7731bdu, 0x8a8a1968u,
+    0x579f9f33u, 0xfbfbfbfbu, 0xfbfbfbfbu, 0xefefd3c7u,
+    0x2cb6b661u, 0x6b23b3b3u, 0xcf93a7cfu, 0x9d9d3751u,
+    0x01425eb8u, 0xf5e7e9f5u, 0xb3b36b23u, 0xb3dbe7afu);
+
+// Digest words 6 and 7 of qubit_echo(s), the two the screen reads. They are
+// lanes 2 and 3 of state word 1 (column 0) and word 9 (column 2), so the last
+// round needs only the eight words BigShiftRows moves into those columns, and
+// one MixColumns row of each.
+uvec2 qubit_echo_screen(uint s[16])
+{
+    uint m[32];
+    qubit_echo_block(s, m);
+    uint cnt[4] = uint[4](512u, 0u, 0u, 0u);
+    uint w[64];
+    for (uint k = 0u; k < 32u; k++)
+        w[k] = kQubitEcho0[k];
+    for (uint k = 0u; k < 16u; k++) {
+        w[32u + k] = m[k];
+        w[48u + k] = kQubitEcho0[32u + k];
+    }
+
+    // Round 0: only the message words 8..11 go through AES.
+    echo512_subwords_pair(w, cnt, 0u, 8u, 9u);
+    echo512_subwords_pair(w, cnt, 0u, 10u, 11u);
+    echo512_shift_mix(w);
+    for (uint r = 1u; r < 9u; r++)
+        echo512_round(w, cnt, r);
+
+    // Column c takes word (c + row, row) from row 0..3: words 0, 5, 10, 15
+    // for column 0 and 8, 13, 2, 7 for column 2.
+    echo512_subwords_pair(w, cnt, 9u, 0u, 2u);
+    echo512_subwords_pair(w, cnt, 9u, 5u, 7u);
+    echo512_subwords_pair(w, cnt, 9u, 8u, 10u);
+    echo512_subwords_pair(w, cnt, 9u, 13u, 15u);
+
+    uvec2 d;
+    for (uint i = 2u; i < 4u; i++) {
+        // MixColumns row 1: 2b + 3c + d + a, as xtime(b ^ c) ^ c ^ d ^ a.
+        uint c0 = aes_xtime4(w[20u + i] ^ w[40u + i]) ^ w[40u + i] ^
+                  w[60u + i] ^ w[i];
+        uint c2 = aes_xtime4(w[52u + i] ^ w[8u + i]) ^ w[8u + i] ^
+                  w[28u + i] ^ w[32u + i];
+        // The feed-forward; the chaining value's lanes 2 and 3 start at 0.
+        d[i - 2u] = m[4u + i] ^ c0 ^ c2;
+    }
+    return d;
 }
 
 void qubit_search(uint nonce)
@@ -157,17 +223,18 @@ void qubit_search(uint nonce)
     qubit_cubehash(s);
     qubit_shavite(s);
     qubit_simd(s);
-    qubit_echo(s);
+    uvec2 top = qubit_echo_screen(s);
 
     // Compiled away unless the pipeline was built with the probe on.
-    probe_best(s[7]);
+    probe_best(top.y);
 
     // A prefix of the share test; the host compares all 256 bits.
-    if (s[7] > push.target[1])
+    if (top.y > push.target[1])
         return;
-    if (s[7] == push.target[1] && s[6] > push.target[0])
+    if (top.y == push.target[1] && top.x > push.target[0])
         return;
 
+    qubit_echo(s);
     uint hash[8];
     for (uint k = 0u; k < 8u; k++)
         hash[k] = s[k];
