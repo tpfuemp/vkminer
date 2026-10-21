@@ -1,7 +1,8 @@
 // x11: eleven chained 512-bit hashes, two nonces per pass, cut to 32 bytes.
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// Included by x11.comp and x11_32.comp; never `+` a lane. Groestl is bitsliced
+// Included by x11.comp and x11_32.comp, and by x13_kernel.glsl for the
+// eleven stages it shares; never `+` a lane. Groestl is bitsliced
 // two hashes at a time, so both nonces share it and part for the last eight
 // stages. This file owns every stage's padding.
 //
@@ -386,6 +387,11 @@ uvec2 x11_echo_screen(uint s[16])
     return d;
 }
 
+#ifdef VKMINER_X11_TAIL
+// A chain that continues past ECHO (x13) names its own tail, defined after
+// this file, and brings its own main().
+void VKMINER_X11_TAIL(inout uint s[16], uint nonce);
+#else
 // Stages 4 to 11 for one nonce, then the screen.
 void x11_tail(inout uint s[16], uint nonce)
 {
@@ -413,6 +419,7 @@ void x11_tail(inout uint s[16], uint nonce)
         hash[k] = s[k];
     emit_candidate(push.capacity, nonce, hash);
 }
+#endif  // VKMINER_X11_TAIL
 
 // Nonces n and n + 1; `two` false hashes the second lane and drops it. Each
 // loop runs its stages once in the binary for both nonces.
@@ -439,10 +446,15 @@ void x11_search(uint n, bool two)
             s = a;
         else
             s = b;
+#ifdef VKMINER_X11_TAIL
+        VKMINER_X11_TAIL(s, n + h);
+#else
         x11_tail(s, n + h);
+#endif
     }
 }
 
+#ifndef VKMINER_X11_TAIL
 void main()
 {
 #ifdef VKMINER_AES_TABLE
@@ -459,5 +471,6 @@ void main()
                    k + 1u < kNoncesPerInvocation && index + 1u < push.count);
     }
 }
+#endif  // VKMINER_X11_TAIL
 
 #endif  // VKMINER_ALGORITHMS_X11_KERNEL_GLSL_INCLUDED

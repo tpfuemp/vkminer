@@ -187,7 +187,9 @@ add_library(vkminer_hashes STATIC
     src/core/echo512.c
     src/core/blake512.c
     src/core/jh512.c
-    src/core/keccak512.c)
+    src/core/keccak512.c
+    src/core/hamsi512.c
+    src/core/fugue512.c)
 target_include_directories(vkminer_hashes PUBLIC src)
 target_link_libraries(vkminer_hashes PRIVATE vkminer_warnings)
 
@@ -273,6 +275,7 @@ add_library(vkminer_algorithms STATIC
     algorithms/heavyhash/heavyhash.cpp
     algorithms/qubit/qubit.cpp
     algorithms/x11/x11.cpp
+    algorithms/x13/x13.cpp
     algorithms/progpow/progpow.cpp
     algorithms/progpow/progpow_dag.cpp
     algorithms/progpow/progpow_hash.cpp
@@ -337,6 +340,8 @@ if(VKMINER_BUILD_SHADERS)
                               algorithms/qubit/qubit.comp
                               algorithms/x11/x11.comp
                               algorithms/x11/x11_32.comp
+                              algorithms/x13/x13.comp
+                              algorithms/x13/x13_32.comp
                               algorithms/progpow/progpow.comp
                               algorithms/progpow/progpow_spec.comp
                               algorithms/progpow/progpow_spec_sub.comp

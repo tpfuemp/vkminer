@@ -18,6 +18,7 @@
 #include "algorithms/skein/skein.h"
 #include "algorithms/skein2/skein2.h"
 #include "algorithms/x11/x11.h"
+#include "algorithms/x13/x13.h"
 
 #include <cstring>
 #include <string>
@@ -100,6 +101,9 @@ const Entry kAlgorithms[] = {
     // Luffa, CubeHash, SHAvite, SIMD and ECHO, each 512 bits, the first 32
     // bytes of the last.
     { "x11",     "",       make_x11            },
+    // DeepOnion's and CloakCoin's: x11's eleven stages un-truncated, then
+    // Hamsi and Fugue, the first 32 bytes of the last.
+    { "x13",     "",       make_x13            },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.
