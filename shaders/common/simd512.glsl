@@ -220,6 +220,32 @@ void simd512_expand64_packed(uint m[16], out uint W[256])
         [[unroll]] for (uint h = 0u; h < 2u; h++) {
             uint i1 = e + h;
             int v[16];
+#ifdef VKMINER_SIMD512_LAZY_REDUCE
+            // The twiddle folds into the byte weights; butterfly sums stay
+            // unreduced (under 2^18) until the reduction below.
+            [[unroll]] for (uint j1 = 0u; j1 < 16u; j1++) {
+                int t = 0;
+                [[unroll]] for (uint j2 = 0u; j2 < 4u; j2++)
+                    t += SIMD_BYTE64(m, j1 + 16u * j2)
+                       * kSimd512Alpha[(i1 * j1 + 16u * i1 * j2) & 255u];
+                v[bitfieldReverse(j1) >> 28] = simd_red(t);
+            }
+            [[unroll]] for (uint st = 0u; st < 4u; st++) {
+                uint half_size = 1u << st;
+                [[unroll]] for (uint start = 0u; start < 16u; start += 2u * half_size) {
+                    [[unroll]] for (uint j = 0u; j < half_size; j++) {
+                        uint lo = start + j, hi = lo + half_size;
+                        int t = v[hi];
+                        if (j != 0u)
+                            t = simd_red(
+                                kSimd512Alpha[(16u * j * (8u >> st)) & 255u] * t);
+                        int u = v[lo];
+                        v[lo] = u + t;
+                        v[hi] = u - t;
+                    }
+                }
+            }
+#else
             [[unroll]] for (uint j1 = 0u; j1 < 16u; j1++) {
                 int t = SIMD_BYTE64(m, j1);
                 [[unroll]] for (uint j2 = 1u; j2 < 4u; j2++)
@@ -243,6 +269,7 @@ void simd512_expand64_packed(uint m[16], out uint W[256])
                     }
                 }
             }
+#endif
             // Exact residues plus X^255 at 41^i, in -128..128.
             [[unroll]] for (uint i2 = 0u; i2 < 16u; i2++) {
                 int w = simd_red(v[i2]

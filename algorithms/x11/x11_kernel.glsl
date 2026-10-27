@@ -18,8 +18,9 @@
 // The push block, the bit planes and groestl_hash() are groestl's.
 #define VKMINER_GROESTL_NO_MAIN 1
 
-// Keeps SIMD's message array in registers.
+// SIMD's message array in registers, its transform reduced lazily.
 #define VKMINER_SIMD512_UNROLL_EXPAND 1
+#define VKMINER_SIMD512_LAZY_REDUCE 1
 
 #include "algorithms/groestl/groestl_kernel.glsl"
 #include "shaders/common/blake512.glsl"
