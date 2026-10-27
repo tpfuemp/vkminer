@@ -15,6 +15,33 @@
 #include "shaders/common/fugue512.glsl"
 #include "shaders/common/hamsi512.glsl"
 
+// x11_echo(s) with round 0 folded: the chaining value and the padding half of
+// the block are constants, so only message words 8..11 go through AES there,
+// as in x11_echo_screen. All sixteen output words are kept for Hamsi.
+void x13_echo(inout uint s[16])
+{
+    uint m[32];
+    x11_echo_block(s, m);
+    uint cnt[4] = uint[4](512u, 0u, 0u, 0u);
+    uint w[64];
+    for (uint k = 0u; k < 32u; k++)
+        w[k] = kX11Echo0[k];
+    for (uint k = 0u; k < 16u; k++) {
+        w[32u + k] = m[k];
+        w[48u + k] = kX11Echo0[32u + k];
+    }
+
+    echo512_subwords_pair(w, cnt, 0u, 8u, 9u);
+    echo512_subwords_pair(w, cnt, 0u, 10u, 11u);
+    echo512_shift_mix(w);
+    for (uint r = 1u; r < 10u; r++)
+        echo512_round(w, cnt, r);
+
+    // The feed-forward; the chaining value is 512 in lane 0 of each word.
+    for (uint k = 0u; k < 16u; k++)
+        s[k] = ((k & 3u) == 0u ? 512u : 0u) ^ m[k] ^ w[k] ^ w[32u + k];
+}
+
 // Hamsi-512 of 64 bytes: eight message blocks, the 0x80 block, then the bit
 // count 512 under the final rounds. The loop shifts the message down so every
 // index is a constant.
@@ -81,7 +108,7 @@ void x13_tail(inout uint s[16], uint nonce)
     x11_cubehash(s);
     x11_shavite(s);
     x11_simd(s);
-    x11_echo(s);
+    x13_echo(s);
     x13_hamsi(s);
     x13_fugue(s);
 
