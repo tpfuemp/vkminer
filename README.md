@@ -252,7 +252,7 @@ one printed at exit, which divides by the whole wall clock:
 | `myr-gr` | ~119 MH/s |
 | `bmw512` | ~1575 MH/s |
 | `heavyhash` | ~325 MH/s |
-| `qubit` | ~38 MH/s |
+| `qubit` | ~47 MH/s |
 | `x11` | ~25 MH/s |
 | `x13` | ~18.5 MH/s |
 | `scrypt` | ~1820 kH/s |

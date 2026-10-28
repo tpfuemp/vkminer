@@ -17,6 +17,10 @@
 // SHAvite and ECHO take AES from one T-table in workgroup memory.
 #define VKMINER_AES_TABLE 1
 
+// SIMD's transform reduced lazily. Its expansion stays rolled: unrolled, the
+// kernel needs 255 registers and loses occupancy.
+#define VKMINER_SIMD512_LAZY_REDUCE 1
+
 #include "shaders/common/bits.glsl"
 #include "shaders/common/candidates.glsl"
 #include "shaders/common/cubehash512.glsl"
