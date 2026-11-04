@@ -19,6 +19,7 @@
 #include "algorithms/skein2/skein2.h"
 #include "algorithms/x11/x11.h"
 #include "algorithms/x13/x13.h"
+#include "algorithms/x16rv2/x16rv2.h"
 
 #include <cstring>
 #include <string>
@@ -104,6 +105,10 @@ const Entry kAlgorithms[] = {
     // DeepOnion's and CloakCoin's: x11's eleven stages un-truncated, then
     // Hamsi and Fugue, the first 32 bytes of the last.
     { "x13",     "",       make_x13            },
+    // Ravencoin's from October 2019 until KawPoW: x13's stages, Shabal,
+    // Whirlpool and SHA-512 in an order each block's predecessor chooses, with
+    // a Tiger-192 in front of Keccak, Luffa and SHA-512.
+    { "x16rv2",  "",       make_x16rv2         },
     // Ravencoin's name for ProgPoW 0.9.4. "kawpow" is what every pool and
     // every other miner calls it; "progpow" is the family and is not a
     // synonym, so it is not an alias here.

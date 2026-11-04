@@ -172,6 +172,19 @@ target_link_libraries(x13_kat PRIVATE
     vkminer_algorithms vkminer_hashes vkminer_warnings Threads::Threads)
 add_test(NAME x13_kat COMMAND x13_kat)
 
+# x16rv2: the three primitives it adds against published digests and sph,
+# then one real block's chain a stage at a time.
+add_executable(x16rv2_kat x16rv2_kat.cpp)
+target_link_libraries(x16rv2_kat PRIVATE vkminer_hashes vkminer_warnings)
+add_test(NAME x16rv2_kat COMMAND x16rv2_kat)
+
+# x16rv2's stage order on its own, which no digest can test: against ccminer's
+# function, the printed-hash rule, and bit by bit.
+add_executable(x16rv2_order_test x16rv2_order_test.cpp)
+target_link_libraries(x16rv2_order_test PRIVATE
+    vkminer_algorithms vkminer_warnings Threads::Threads)
+add_test(NAME x16rv2_order_test COMMAND x16rv2_order_test)
+
 # The ProgPoW host reference, which is not an algorithm here yet and is checked
 # anyway: it is the reference a future kernel would be judged against, the
 # vendored code is only worth what this test says it is, and none of it needs a
@@ -413,6 +426,27 @@ if(VKMINER_VK_SMOKE_SPV)
 
     add_test(NAME vk_smoke COMMAND vk_smoke)
     set_tests_properties(vk_smoke PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# The same three primitives on every device, against the scalar references.
+# Same conditions as vk_smoke: a device, or a SKIP.
+if(VKMINER_PRIMITIVES_TEST_SPV)
+    add_executable(primitives_test primitives_test.cpp)
+    target_link_libraries(primitives_test PRIVATE
+        vkminer_backends vkminer_hashes vkminer_warnings Threads::Threads)
+    target_compile_definitions(primitives_test PRIVATE
+        PRIMITIVES_TEST_SPV="${VKMINER_PRIMITIVES_TEST_SPV}"
+        PRIMITIVES_TEST64_SPV="${VKMINER_PRIMITIVES_TEST64_SPV}")
+    add_dependencies(primitives_test vkminer_shader_primitives_test)
+
+    add_custom_command(TARGET primitives_test POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${VKMINER_PRIMITIVES_TEST_SPV}"
+                "${VKMINER_PRIMITIVES_TEST64_SPV}"
+                "$<TARGET_FILE_DIR:primitives_test>")
+
+    add_test(NAME primitives_test COMMAND primitives_test)
+    set_tests_properties(primitives_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # Shared device state, through the backend's real kernel path with an algorithm
@@ -705,6 +739,22 @@ if(TARGET vkminer_shaders)
     set_tests_properties(diff_test_x13_nonces
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+    # x16rv2, both modules: seventeen passes a dispatch, in the order the
+    # test header's previous-block hash names.
+    add_test(NAME diff_test_x16rv2 COMMAND diff_test x16rv2 100000)
+    set_tests_properties(diff_test_x16rv2
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+
+    add_test(NAME diff_test_x16rv2_32
+        COMMAND diff_test x16rv2 100000 --no-int64)
+    set_tests_properties(diff_test_x16rv2_32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+
+    add_test(NAME diff_test_x16rv2_nonces
+        COMMAND diff_test x16rv2 100000 --nonces-per-invocation 3)
+    set_tests_properties(diff_test_x16rv2_nonces
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+
     # The fifth algorithm, which does not go through diff_test: KawPoW hashes
     # against a gigabyte of DAG, and a differential run that generated one would
     # be measuring the setup pass as much as the kernel. This test uploads a
@@ -859,6 +909,10 @@ if(TARGET vkminer_shaders)
     set_tests_properties(race_test_x13
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
 
+    add_test(NAME race_test_x16rv2 COMMAND race_test x16rv2 8)
+    set_tests_properties(race_test_x16rv2
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 LABELS slow)
+
     add_test(NAME race_test_heavyhash COMMAND race_test heavyhash 8)
     set_tests_properties(race_test_heavyhash
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900 LABELS slow)
@@ -1003,6 +1057,15 @@ if(TARGET vkminer_shaders)
     add_test(NAME negative_kat_x13_32 COMMAND negative_kat x13 --no-int64)
     set_tests_properties(negative_kat_x13_32
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+
+    # Both of x16rv2's, over sixteen headers with sixteen first stages.
+    add_test(NAME negative_kat_x16rv2 COMMAND negative_kat x16rv2)
+    set_tests_properties(negative_kat_x16rv2
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+    add_test(NAME negative_kat_x16rv2_32 COMMAND negative_kat x16rv2 --no-int64)
+    set_tests_properties(negative_kat_x16rv2_32
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
     # And for the fifth, where the question is sharper than elsewhere. Eight of
     # its nine header words are a hash the pool already computed, so nothing on

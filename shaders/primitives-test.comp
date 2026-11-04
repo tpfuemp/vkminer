@@ -1,0 +1,8 @@
+// primitives_test's shader, with Tiger carrying by hand. Not used by the miner.
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+
+#include "shaders/primitives-test.glsl"

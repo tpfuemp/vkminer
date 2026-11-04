@@ -187,6 +187,13 @@ public:
     // one wasted compile.
     virtual uint64_t next_program_key(uint64_t key) const;
 
+    // For a kernel run in stages (KernelSpec::stages): the stages program
+    // `key` runs, as indices into the spec's, in order; the count is returned
+    // and more than `max` is refused. Asked on the dispatching thread whenever
+    // the key changes; nothing is compiled for it.
+    virtual size_t stage_sequence(uint64_t key, uint32_t *out,
+                                  size_t max) const;
+
     // Write the push constants for one dispatch, and return how many bytes that
     // was -- which must be the push_constant_bytes the spec declared, or the
     // backend refuses to dispatch. This is where the work that is the same for

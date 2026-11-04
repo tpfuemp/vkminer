@@ -528,7 +528,8 @@ int share_result( int result, uint32_t id, struct work *work,
    if ( likely( result ) )
    {
       accept_sum++;
-      norm_diff_sum += my_stats.target_diff;
+      // target_diff is in the stratum's scale; the session rate wants hashes.
+      norm_diff_sum += my_stats.target_diff / opt_target_factor;
       if ( solved ) solved_sum++;
    }
    else

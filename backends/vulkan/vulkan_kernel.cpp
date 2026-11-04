@@ -104,6 +104,7 @@ public:
         // possibly still queued that is not a formality.
         ring_.reset();
         pipeline_.reset();
+        stage_pipelines_.clear();
         retiring_.reset();
         ahead_pipeline_.reset();
         if (device_)
@@ -242,6 +243,20 @@ public:
                    kMaxProgramConstants);
             return false;
         }
+        // A kernel in stages keeps its state in scratch and has no program.
+        if (spec.stage_count) {
+            if (!spec.stages || !spec.scratch_bytes || program_constants_
+                || !algorithm_) {
+                applog(LOG_ERR, "Vulkan: '%s' declares %u stages and %s", name_,
+                       spec.stage_count,
+                       !spec.stages ? "supplies none"
+                       : !spec.scratch_bytes ? "no scratch to keep their state in"
+                       : program_constants_ ? "a program as well"
+                                            : "no algorithm to order them");
+                return false;
+            }
+            stages_.assign(spec.stages, spec.stages + spec.stage_count);
+        }
         desc_ = desc;
         cache_ = cache;
 
@@ -260,11 +275,14 @@ public:
 
         if (scratch_bytes_)
             applog(LOG_INFO, "Vulkan: '%s' takes %llu MiB of scratch on %s -- "
-                             "%u hashes in flight, %llu KiB each%s", name_,
+                             "%u hashes in flight, %llu %s each%s", name_,
                    static_cast<unsigned long long>(
                        (static_cast<uint64_t>(max_batch_) * fit.per_nonce) >> 20),
                    info.name.c_str(), max_batch_,
-                   static_cast<unsigned long long>(scratch_bytes_ >> 10),
+                   static_cast<unsigned long long>(
+                       scratch_bytes_ >= 1024 ? scratch_bytes_ >> 10
+                                              : scratch_bytes_),
+                   scratch_bytes_ >= 1024 ? "KiB" : "bytes",
                    concurrent_ > 1 ? ", sharing the device" : "");
 
         const VkDeviceSize bytes = kResultWords * sizeof(uint32_t);
@@ -349,7 +367,16 @@ public:
         // built per program has none until it is told which, and dispatch
         // refuses until then for the same reason it refuses without its shared
         // state: the alternative is hashing fluently against the wrong thing.
-        if (!program_constants_) {
+        // A kernel in stages builds all of them now, so no job change compiles.
+        if (!stages_.empty()) {
+            for (size_t s = 0; s < stages_.size(); s++) {
+                std::unique_ptr<ComputePipeline> built =
+                    build_pipeline(nullptr, &stages_[s], s);
+                if (!built)
+                    return false;
+                stage_pipelines_.push_back(std::move(built));
+            }
+        } else if (!program_constants_) {
             pipeline_ = build_pipeline(nullptr);
             if (!pipeline_)
                 return false;
@@ -552,6 +579,17 @@ public:
             }
         }
 
+        // Which stages this header runs: a comparison unless the key moved.
+        // Here rather than in prepare_program, so callers that never prepare
+        // a program (diff_test) still run the header's own chain.
+        if (!stages_.empty()) {
+            const uint64_t key = algorithm_->program_key(header);
+            if (!sequence_ready_ || key != sequence_key_) {
+                if (!load_sequence(key))
+                    return false;
+            }
+        }
+
         CommandRing::Slot *slot = ring_->begin();
         if (!slot)
             return false;
@@ -598,7 +636,25 @@ public:
                                 &cleared, 0, nullptr, 0, nullptr);
 
         const uint32_t groups = (count + per_group_ - 1) / per_group_;
-        pipeline_->record(slot->cmd, index, groups, push_, push_bytes_);
+        if (stages_.empty()) {
+            pipeline_->record(slot->cmd, index, groups, push_, push_bytes_);
+        } else {
+            // Each stage reads what the one before it wrote, nonce for nonce.
+            VkMemoryBarrier handed{};
+            handed.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            handed.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            handed.dstAccessMask = VK_ACCESS_SHADER_READ_BIT
+                                 | VK_ACCESS_SHADER_WRITE_BIT;
+            for (size_t i = 0; i < sequence_.size(); i++) {
+                if (i)
+                    fn.vkCmdPipelineBarrier(
+                        slot->cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &handed, 0,
+                        nullptr, 0, nullptr);
+                stage_pipelines_[sequence_[i]]->record(slot->cmd, index, groups,
+                                                       push_, push_bytes_);
+            }
+        }
 
         VkMemoryBarrier written{};
         written.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -771,11 +827,20 @@ private:
     // buffers allocated above, built from `program` where the module has one.
     // Everything about it is fixed except that: two pipelines from here differ
     // in nothing but which instructions they contain.
-    std::unique_ptr<ComputePipeline> build_pipeline(const uint32_t *program)
+    // For a kernel in stages, `stage` replaces the module.
+    std::unique_ptr<ComputePipeline> build_pipeline(
+        const uint32_t *program, const KernelStage *stage = nullptr,
+        size_t index = 0)
     {
         ComputePipelineDesc desc = desc_;
         desc.program = program;
         desc.program_count = program ? program_constants_ : 0;
+        std::string label = stats_label_;
+        if (stage) {
+            desc.spirv = stage->spirv;
+            desc.spirv_words = stage->spirv_words;
+            label += ", stage " + std::to_string(index);
+        }
 
         std::unique_ptr<ComputePipeline> built =
             ComputePipeline::create(*device_, desc, cache_);
@@ -795,7 +860,7 @@ private:
         // startup: whether the driver folds a program's constants into straight
         // line code, or leaves a switch per operation, is the whole question a
         // kernel built per program is betting on.
-        built->report_statistics(stats_label_.c_str());
+        built->report_statistics(label.c_str());
         return built;
     }
 
@@ -815,6 +880,28 @@ private:
             return nullptr;
         }
         return build_pipeline(values);
+    }
+
+    // The stages `key` runs, checked against the pipelines built.
+    bool load_sequence(uint64_t key)
+    {
+        uint32_t order[kMaxProgramConstants];
+        const size_t n = algorithm_->stage_sequence(key, order, kMaxProgramConstants);
+        if (!n || n > kMaxProgramConstants) {
+            applog(LOG_ERR, "Vulkan: '%s' named %zu stages for program %016llx",
+                   name_, n, static_cast<unsigned long long>(key));
+            return false;
+        }
+        for (size_t i = 0; i < n; i++)
+            if (order[i] >= stage_pipelines_.size()) {
+                applog(LOG_ERR, "Vulkan: '%s' named stage %u of %zu", name_,
+                       order[i], stage_pipelines_.size());
+                return false;
+            }
+        sequence_.assign(order, order + n);
+        sequence_key_ = key;
+        sequence_ready_ = true;
+        return true;
     }
 
     // Build `key`'s pipeline while the current one mines. One at a time and
@@ -951,6 +1038,15 @@ private:
     uint32_t program_constants_ = 0;
     uint64_t program_key_ = 0;
     bool program_ready_ = false;
+
+    // A kernel in stages: its modules, their pipelines, and the sequence the
+    // last key named. `sequence_` is only read while recording, so a new key
+    // never touches anything in flight.
+    std::vector<KernelStage> stages_;
+    std::vector<std::unique_ptr<ComputePipeline>> stage_pipelines_;
+    std::vector<uint32_t> sequence_;
+    uint64_t sequence_key_ = 0;
+    bool sequence_ready_ = false;
 
     // The pipeline the last program change replaced, held until the dispatches
     // that were recorded against it have retired.
@@ -1254,6 +1350,8 @@ bool vulkan_kernel_fit(const DeviceInfo &info, const KernelSpec &spec,
     uint64_t fits = left / (fit.per_nonce ? fit.per_nonce : 1);
     if (fits > kMaxBatch)
         fits = kMaxBatch;
+    if (spec.max_batch && fits > spec.max_batch)
+        fits = spec.max_batch;
 
     // Below a workgroup there is nothing to dispatch: the device saying it
     // cannot run this algorithm, which is a real answer.

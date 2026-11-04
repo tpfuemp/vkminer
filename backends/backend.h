@@ -142,6 +142,12 @@ constexpr uint32_t kMaxUniformBytes = 16384;
 
 class Algorithm;
 
+// One module of a kernel run in stages; see KernelSpec::stages.
+struct KernelStage {
+    const uint32_t *spirv = nullptr;
+    size_t spirv_words = 0;
+};
+
 // The one thing that crosses between the two axes: what to run, in the terms
 // each side already speaks. The backend reads the resource contract and the
 // SPIR-V and never asks what any of it computes; the algorithm fills it in and
@@ -194,6 +200,11 @@ struct KernelSpec {
     // is spoken for by dispatches in flight, is the backend's to know, and it
     // caps the batch there.
     uint64_t scratch_bytes = 0;
+
+    // The most nonces one dispatch may hold, for scratch so small per nonce
+    // that sizing it against the device's budget would allocate gigabytes no
+    // dispatch uses. Zero sizes it from memory alone.
+    uint32_t max_batch = 0;
 
     // Device-local bytes this kernel reads and never writes, the same for every
     // invocation and every dispatch: a table too large to recompute per hash
@@ -295,6 +306,16 @@ struct KernelSpec {
     // outlive the kernel.
     const uint32_t *constants = nullptr;
     size_t constant_count = 0;
+
+    // A kernel run as a sequence of modules chosen per job: each stage is a
+    // pass over the dispatch's nonces, keeping their state in the scratch
+    // buffer; the first pass reads the header, the last emits candidates.
+    // Algorithm::stage_sequence picks which run, in what order. All stages
+    // share this spec's layout and are built with the kernel, so a new job
+    // compiles nothing. `spirv` names the first stage. Not combined with
+    // program_constants. Borrowed, like the SPIR-V.
+    const KernelStage *stages = nullptr;
+    uint32_t stage_count = 0;
 
     // Dispatches this kernel may hold at once; 0 lets the backend choose. Not
     // an algorithm's business -- it is here so a caller sweeping both axes can

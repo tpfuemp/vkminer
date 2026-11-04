@@ -109,6 +109,17 @@ uint64_t Algorithm::next_program_key(uint64_t key) const
     return 0;
 }
 
+size_t Algorithm::stage_sequence(uint64_t key, uint32_t *out, size_t max) const
+{
+    (void)key;
+    (void)out;
+    (void)max;
+    // Only a kernel offered with stages asks; running none would emit nothing.
+    applog(LOG_ERR, "'%s' has a kernel run in stages and no sequence to run "
+                    "them in", name());
+    return 0;
+}
+
 bool Algorithm::submit_mix(const uint32_t *header, uint64_t nonce,
                            unsigned char out[32]) const
 {
