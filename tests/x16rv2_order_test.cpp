@@ -10,6 +10,7 @@
 // 3. Each of the 64 order bits moves exactly its position; no other header
 //    bit moves anything.
 // 4. The pass count: sixteen stages plus a Tiger per Keccak, Luffa, SHA-512.
+// 5. parse_order and set_order invert order_string and order_of.
 
 #include "algorithms/x16rv2/x16rv2_order.h"
 
@@ -196,6 +197,45 @@ int main()
         }
     }
 
+    // 5. parse_order and set_order invert order_string and order_of, and
+    //    set_order moves nothing but the eight order bytes.
+    unsigned round_trips = 0;
+    for (unsigned s = 0; s < 18; s++) {
+        uint64_t order = 0;
+        for (unsigned i = 0; i < kStages; i++)
+            order |= static_cast<uint64_t>(s < 16 ? s : (s == 16 ? i : 15 - i))
+                     << (4 * i);
+        char text[17];
+        order_string(order, text);
+        uint64_t parsed = 0;
+        uint32_t header[20];
+        std::memcpy(header, base, sizeof header);
+        if (parse_order(text, &parsed) && parsed == order) {
+            set_order(header, parsed);
+            bool kept = true;
+            for (unsigned w = 0; w < 20; w++)
+                if (w != 1 && w != 2 && header[w] != base[w])
+                    kept = false;
+            if (order_of(header) == order && kept)
+                round_trips++;
+        }
+    }
+    if (round_trips != 18) {
+        std::printf("FAIL: %u of 18 orders survived parse_order/set_order\n",
+                    round_trips);
+        failures++;
+    }
+    uint64_t lower = 0;
+    uint64_t ignored = 0;
+    if (!parse_order("0123456789abcdef", &lower)
+        || lower != 0xfedcba9876543210ull
+        || parse_order("0123456789ABCDE", &ignored)
+        || parse_order("0123456789ABCDEF0", &ignored)
+        || parse_order("0123456789ABCDEG", &ignored)) {
+        std::printf("FAIL: parse_order accepts or refuses the wrong text\n");
+        failures++;
+    }
+
     if (std::strcmp(stage_name(kKeccak), "keccak") != 0
         || std::strcmp(stage_name(kSha512), "sha512") != 0) {
         std::printf("FAIL: stage names are out of step with the numbering\n");
@@ -204,7 +244,7 @@ int main()
 
     if (!failures)
         std::printf("ok   %u ccminer orders, %u printed hashes, 64 order bits "
-                    "and 576 others, %u pass counts\n",
+                    "and 576 others, %u pass counts, 18 set orders\n",
                     static_cast<unsigned>(sizeof kCcminer / sizeof kCcminer[0]),
                     static_cast<unsigned>(sizeof kPrinted / sizeof kPrinted[0]),
                     static_cast<unsigned>(sizeof kPasses / sizeof kPasses[0]));

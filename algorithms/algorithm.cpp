@@ -109,6 +109,14 @@ uint64_t Algorithm::next_program_key(uint64_t key) const
     return 0;
 }
 
+bool Algorithm::set_benchmark_order(const char *order, uint32_t *header) const
+{
+    (void)order;
+    (void)header;
+    applog(LOG_ERR, "'%s' has no order for --benchmark-order to set", name());
+    return false;
+}
+
 size_t Algorithm::stage_sequence(uint64_t key, uint32_t *out, size_t max) const
 {
     (void)key;

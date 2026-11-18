@@ -57,5 +57,39 @@ void order_string(uint64_t order, char *out)
     out[kStages] = '\0';
 }
 
+bool parse_order(const char *text, uint64_t *order)
+{
+    uint64_t v = 0;
+    for (unsigned i = 0; i < kStages; i++) {
+        const char c = text[i];
+        unsigned d;
+        if (c >= '0' && c <= '9')
+            d = static_cast<unsigned>(c - '0');
+        else if (c >= 'A' && c <= 'F')
+            d = static_cast<unsigned>(c - 'A' + 10);
+        else if (c >= 'a' && c <= 'f')
+            d = static_cast<unsigned>(c - 'a' + 10);
+        else
+            return false;
+        v |= static_cast<uint64_t>(d) << (4 * i);
+    }
+    if (text[kStages] != '\0')
+        return false;
+    *order = v;
+    return true;
+}
+
+void set_order(uint32_t *header, uint64_t order)
+{
+    for (unsigned b = 0; b < 8; b++) {
+        // Byte b holds positions 14 - 2b (high nibble) and 15 - 2b (low).
+        const unsigned hi = stage_at(order, 14 - 2 * b);
+        const unsigned lo = stage_at(order, 15 - 2 * b);
+        const unsigned shift = 24 - 8 * (b % 4);
+        uint32_t &w = header[1 + b / 4];
+        w = (w & ~(0xffu << shift)) | (((hi << 4) | lo) << shift);
+    }
+}
+
 }  // namespace x16rv2
 }  // namespace vkminer

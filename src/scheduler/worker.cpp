@@ -173,6 +173,10 @@ bool benchmark_work(const vkminer::Algorithm &algo, struct work *work)
         work->data[benchmark_seed_word(algo)] ^=
             static_cast<uint32_t>(opt_benchmark_seed);
 
+    if (opt_benchmark_order &&
+        !algo.set_benchmark_order(opt_benchmark_order, work->data))
+        return false;
+
     // 0x000000000000ffff0000...0000, most significant word last, which is the
     // order fulltest() compares in: an ordinary pool share target, met about
     // once in 2^48 nonces. Not a target the benchmark is expected to meet --

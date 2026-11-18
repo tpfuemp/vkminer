@@ -177,6 +177,69 @@ void whirlpool512_compress(inout uvec2 h[8], uvec2 m[8])
         h[i] ^= s[i] ^ m[i];
 }
 
+// The ten round keys the schedule derives from a zero chaining value, key r
+// row i at [16 r + 2 i] as a low, high pair: the first block's key schedule is
+// the same for every message.
+const uint kWhirlpool512ZeroKeys[160] = uint[160](
+    0xc0ee0b30u, 0x672990afu, 0x28282828u, 0x28282828u,
+    0x28282828u, 0x28282828u, 0x28282828u, 0x28282828u,
+    0x28282828u, 0x28282828u, 0x28282828u, 0x28282828u,
+    0x28282828u, 0x28282828u, 0x28282828u, 0x28282828u,
+    0xf889ab3bu, 0x24aed1eau, 0x66454544u, 0xafcbe945u,
+    0xa4a4fe70u, 0x89b2a4c5u, 0xe1a9fac5u, 0xa0e1cce1u,
+    0x5cc0ac48u, 0xfcb8fcfcu, 0x260ef78fu, 0x698f8f90u,
+    0x07147996u, 0x797985d7u, 0x68f8a8f8u, 0xf878c8b8u,
+    0xdbbf19d3u, 0x58704630u, 0xd1235b29u, 0xdb37cfafu,
+    0xc28a2c01u, 0x98ac958bu, 0xb19e6381u, 0xa706b2c0u,
+    0x7a605e44u, 0xdb09b2b0u, 0xcf2c5b73u, 0x71bc8cbcu,
+    0x240967dcu, 0xd3ddedefu, 0xf03b8d7bu, 0x197d3bd7u,
+    0xc1aabe38u, 0x866511deu, 0xd0f37c68u, 0x7f33874au,
+    0xdbfa37f3u, 0x57f0ad98u, 0x5842e2c5u, 0xbc8d35eeu,
+    0xe8f00911u, 0x7e246e99u, 0xedd6c501u, 0x0134b010u,
+    0xf152c9fbu, 0xd3ec287bu, 0x0cdc5632u, 0x4027f1c7u,
+    0x20a525afu, 0x14cf9b94u, 0xa92636c1u, 0x4d53c4e3u,
+    0x867d0fe6u, 0xe1f94077u, 0xbbe65d91u, 0x29066ae2u,
+    0xcc545a96u, 0x8d5efe4cu, 0xcb31e9beu, 0xa63a3262u,
+    0x18597bb1u, 0x476a8496u, 0x36c9f0d4u, 0x31af5927u,
+    0xc0b5f9e2u, 0xb00b3725u, 0xa2cb2b39u, 0xa5948416u,
+    0xcef88a60u, 0x148c34fau, 0x6437a57au, 0x19928c41u,
+    0xa146f3b3u, 0x893f83fau, 0x483f4997u, 0x7ccf0278u,
+    0xbae8addcu, 0x238f001eu, 0x494f7792u, 0x3d32b0edu,
+    0x82634175u, 0x2fff4d77u, 0xd038faffu, 0x00460355u,
+    0x49027dbfu, 0x61f3983eu, 0xc260a8f4u, 0x0bcee59au,
+    0x445adfc8u, 0x279d5deeu, 0x555af423u, 0xa4007504u,
+    0x121016b0u, 0x8ce2f902u, 0x29cd30acu, 0x1d333368u,
+    0x82f16b03u, 0x89ad8468u, 0x62c64099u, 0x637146d8u,
+    0x173e434cu, 0x10c2194bu, 0xd3cf9ce2u, 0xc586ff4cu,
+    0xa011ff21u, 0x5326df42u, 0xcb008e1bu, 0x134be46cu,
+    0xf73b12a6u, 0xceb747a3u, 0x0e9018d9u, 0xca33283bu,
+    0x7a671cd0u, 0xf92c9a0au, 0x532f942au, 0xb2b6634au,
+    0x46224288u, 0xb4a8acfeu, 0xc75c4a47u, 0x5935583du,
+    0x5d92a674u, 0xa16f5ca5u, 0x8ce61777u, 0x395c73c4u,
+    0x0b3b2a08u, 0xc61aec53u, 0xeb58f62au, 0x62e74d81u,
+    0xb6489548u, 0x3abcee01u, 0xc66b0da5u, 0x818eed6bu,
+    0xcf3dcee0u, 0x755a2688u, 0xdb4a8cc2u, 0xe99cf6c0u,
+    0xd59cb754u, 0x1385717fu, 0x8a4b4143u, 0x7b0b7d97u,
+    0xbb351963u, 0x7a15f6dbu, 0xf64e7a6au, 0x27820137u);
+
+// whirlpool512_compress() from h = 0, with the key schedule as constants.
+void whirlpool512_compress_first(out uvec2 h[8], uvec2 m[8])
+{
+    uvec2 s[8], t[8];
+    for (uint i = 0u; i < 8u; i++)
+        s[i] = m[i];
+
+    for (uint r = 0u; r < 10u; r++) {
+        whirlpool512_rho(s, t);
+        for (uint i = 0u; i < 8u; i++)
+            s[i] = t[i] ^ uvec2(kWhirlpool512ZeroKeys[16u * r + 2u * i],
+                                kWhirlpool512ZeroKeys[16u * r + 2u * i + 1u]);
+    }
+
+    for (uint i = 0u; i < 8u; i++)
+        h[i] = s[i] ^ m[i];
+}
+
 // Whirlpool of the first `words` words of `msg`, 16 or 20; a constant at
 // every call site. Either way two compressions: the first 64 bytes, then the
 // rest with 0x80 after it and the 256-bit big-endian bit count, whose only
@@ -184,11 +247,9 @@ void whirlpool512_compress(inout uvec2 h[8], uvec2 m[8])
 void whirlpool512_hash(uint msg[20], uint words, out uint h[16])
 {
     uvec2 st[8], m[8];
-    for (uint i = 0u; i < 8u; i++) {
-        st[i] = uvec2(0u);
+    for (uint i = 0u; i < 8u; i++)
         m[i] = uvec2(msg[2u * i], msg[2u * i + 1u]);
-    }
-    whirlpool512_compress(st, m);
+    whirlpool512_compress_first(st, m);
 
     uint w[16];
     for (uint k = 0u; k < 16u; k++)

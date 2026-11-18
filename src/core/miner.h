@@ -447,6 +447,7 @@ extern bool opt_debug_diff;
 extern bool opt_benchmark;
 extern int64_t opt_benchmark_target;
 extern int64_t opt_benchmark_seed;
+extern char *opt_benchmark_order;
 extern bool opt_protocol;
 extern bool opt_extranonce;
 extern bool opt_quiet;

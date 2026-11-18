@@ -83,6 +83,9 @@ int64_t opt_benchmark_target = -1;
  * nonces, or -1 for the fixed header. */
 int64_t opt_benchmark_seed = -1;
 
+/* The stage order --benchmark runs, for an algorithm whose header picks one. */
+char *opt_benchmark_order = NULL;
+
 double opt_diff_factor = 1.0;
 
 /* Every difficulty this miner prints is in the scale the pool quotes; every
@@ -394,7 +397,11 @@ Options:\n\
                         fold N into --benchmark's header so that runs with\n\
                         different seeds hash different nonces. Without it\n\
                         every run hashes the same ones, which is what an A/B\n\
-                        wants and what a count against an expectation does not\n"
+                        wants and what a count against an expectation does not\n\
+      --benchmark-order=HEX\n\
+                        for an algorithm whose header picks the order of its\n\
+                        stages (x16rv2), benchmark that order: sixteen hex\n\
+                        digits, position 0 first, as ccminer prints it\n"
 #ifdef HAVE_SYSLOG_H
 "\
   -S, --syslog          use system log for output messages\n"
@@ -428,6 +435,7 @@ static struct option const options[] = {
    { "background",        0, NULL, 'B' },
    { "bell",              0, NULL, 1031 },
    { "benchmark",         0, NULL, 1005 },
+   { "benchmark-order",   1, NULL, 1066 },
    { "benchmark-seed",    1, NULL, 1065 },
    { "benchmark-target",  1, NULL, 1052 },
    { "cert",              1, NULL, 1001 },
@@ -863,6 +871,11 @@ void parse_arg( int key, char *arg )
          opt_benchmark_seed = (int64_t) s;
          break;
       }
+
+      case 1066: // benchmark-order
+         free( opt_benchmark_order );
+         opt_benchmark_order = strdup( arg );
+         break;
 
       case 1008: // time-limit
          v = atoi( arg );

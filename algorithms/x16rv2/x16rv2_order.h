@@ -65,6 +65,14 @@ const char *stage_name(unsigned stage);
 // `out` holds at least 17 characters.
 void order_string(uint64_t order, char *out);
 
+// The inverse: sixteen hex digits, either case, into an order. False for
+// anything else.
+bool parse_order(const char *text, uint64_t *order);
+
+// Rewrite the previous-block-hash bytes that decide the order so that
+// order_of(header) == order. Nothing else in the header moves.
+void set_order(uint32_t *header, uint64_t order);
+
 }  // namespace x16rv2
 }  // namespace vkminer
 

@@ -146,6 +146,10 @@ class Algorithm;
 struct KernelStage {
     const uint32_t *spirv = nullptr;
     size_t spirv_words = 0;
+
+    // Nonces each invocation of this stage takes; 0 means the kernel's. The
+    // stage is dispatched over the same nonces in fewer or more workgroups.
+    uint32_t nonces_per_invocation = 0;
 };
 
 // The one thing that crosses between the two axes: what to run, in the terms

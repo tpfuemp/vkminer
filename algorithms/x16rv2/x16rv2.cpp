@@ -71,9 +71,9 @@ constexpr unsigned kScreen = 2 * x16rv2::kStages;
 constexpr unsigned kKernelStages = kScreen + 1;
 
 // Bytes of state each nonce keeps between passes, and the most nonces a
-// dispatch holds (256 MiB of state).
+// dispatch holds (64 MiB of state).
 constexpr uint64_t kStateBytes = 64;
-constexpr uint32_t kMaxBatchNonces = 1u << 22;
+constexpr uint32_t kMaxBatchNonces = 1u << 20;
 
 // ------------------------------------------------------------- the vectors
 
@@ -533,6 +533,20 @@ public:
         return x16rv2::order_of(header);
     }
 
+    // Sixteen hex digits as ccminer prints an order, position 0 first.
+    bool set_benchmark_order(const char *order,
+                             uint32_t *header) const override
+    {
+        uint64_t key;
+        if (!x16rv2::parse_order(order, &key)) {
+            applog(LOG_ERR, "--benchmark-order wants sixteen hex digits, "
+                            "not '%s'", order);
+            return false;
+        }
+        x16rv2::set_order(header, key);
+        return true;
+    }
+
     // Position 0 over the header, positions 1..15 over the state, the screen.
     size_t stage_sequence(uint64_t key, uint32_t *out,
                           size_t max) const override
@@ -630,6 +644,8 @@ private:
                 stages[i].spirv = module->words.data();
                 stages[i].spirv_words = module->words.size();
             }
+            // Whirlpool over 64 bytes hashes four nonces at once, bitsliced.
+            stages[kLaterStage + x16rv2::kWhirlpool].nonces_per_invocation = 4;
         }
 
         spec.stages = stages;

@@ -119,6 +119,10 @@ public:
     // not depend on which job it is.
     virtual bool retarget(const uint32_t *header);
 
+    // --benchmark-order: make the benchmark header run `order`, for an
+    // algorithm whose header chooses the work. The default refuses, logged.
+    virtual bool set_benchmark_order(const char *order, uint32_t *header) const;
+
     // What to run on this device. Passing the device lets an algorithm choose a
     // variant off what the hardware reports -- a 64-bit kernel where
     // shaderInt64 is present, a 2x32-bit one where it is not.

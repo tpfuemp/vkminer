@@ -105,6 +105,7 @@ public:
         ring_.reset();
         pipeline_.reset();
         stage_pipelines_.clear();
+        stage_per_group_.clear();
         retiring_.reset();
         ahead_pipeline_.reset();
         if (device_)
@@ -256,6 +257,16 @@ public:
                 return false;
             }
             stages_.assign(spec.stages, spec.stages + spec.stage_count);
+            for (const KernelStage &stage : stages_) {
+                const uint32_t n = stage.nonces_per_invocation
+                                 ? stage.nonces_per_invocation : fit.nonces;
+                if (n > kMaxNoncesPerInvocation || (n > 1 && fit.lanes > 1)) {
+                    applog(LOG_ERR, "Vulkan: '%s' has a stage asking for %u "
+                                    "nonces per invocation", name_, n);
+                    return false;
+                }
+                stage_per_group_.push_back(fit.local_size_x / fit.lanes * n);
+            }
         }
         desc_ = desc;
         cache_ = cache;
@@ -651,8 +662,10 @@ public:
                         slot->cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &handed, 0,
                         nullptr, 0, nullptr);
-                stage_pipelines_[sequence_[i]]->record(slot->cmd, index, groups,
-                                                       push_, push_bytes_);
+                const uint32_t per = stage_per_group_[sequence_[i]];
+                stage_pipelines_[sequence_[i]]->record(
+                    slot->cmd, index, (count + per - 1) / per, push_,
+                    push_bytes_);
             }
         }
 
@@ -839,6 +852,8 @@ private:
         if (stage) {
             desc.spirv = stage->spirv;
             desc.spirv_words = stage->spirv_words;
+            if (stage->nonces_per_invocation)
+                desc.nonces_per_invocation = stage->nonces_per_invocation;
             label += ", stage " + std::to_string(index);
         }
 
@@ -1043,6 +1058,7 @@ private:
     // last key named. `sequence_` is only read while recording, so a new key
     // never touches anything in flight.
     std::vector<KernelStage> stages_;
+    std::vector<uint32_t> stage_per_group_;  // nonces per workgroup, per stage
     std::vector<std::unique_ptr<ComputePipeline>> stage_pipelines_;
     std::vector<uint32_t> sequence_;
     uint64_t sequence_key_ = 0;

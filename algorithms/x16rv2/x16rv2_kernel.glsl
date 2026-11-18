@@ -13,7 +13,8 @@
 // A nonce's state is sixteen little-endian words, word w of nonce i at
 // states[w * count + i]. Tiger runs inside the Keccak, Luffa and SHA-512
 // stages, so those three only ever hash 64 bytes. Two nonces an invocation:
-// Groestl hashes them together as bit planes.
+// Groestl hashes them together as bit planes. Whirlpool over 64 bytes takes
+// four, bitsliced.
 
 #ifndef VKMINER_ALGORITHMS_X16RV2_KERNEL_GLSL_INCLUDED
 #define VKMINER_ALGORITHMS_X16RV2_KERNEL_GLSL_INCLUDED
@@ -27,6 +28,7 @@
 #include "shaders/common/shabal512.glsl"
 #include "shaders/common/tiger192.glsl"
 #include "shaders/common/whirlpool512.glsl"
+#include "shaders/common/whirlpool512_x4.glsl"
 
 void x16rv2_unused_tail(inout uint s[16], uint nonce) {}
 
@@ -293,20 +295,179 @@ void x16rv2_shavite(uint w[20], out uint s[16])
     s = h;
 }
 
+// SIMD-512 over 80 bytes in simd512_compress64()'s shape: a fifth j2 term
+// (bytes 64..79), fully reduced, since five terms outgrow the lazy bounds.
+// The final block holds only the bit count, 640.
+#define X16RV2_SIMD_BYTE(m, j) int(((m)[(j) >> 2] >> (8u * ((j) & 3u))) & 0xffu)
+
+void x16rv2_simd_expand80(uint m[20], out uint W[256])
+{
+    [[unroll]] for (uint e = 0u; e < 16u; e += 2u) {
+        int y[32];
+        [[unroll]] for (uint h = 0u; h < 2u; h++) {
+            uint i1 = e + h;
+            int v[16];
+            [[unroll]] for (uint j1 = 0u; j1 < 16u; j1++) {
+                int t = X16RV2_SIMD_BYTE(m, j1);
+                [[unroll]] for (uint j2 = 1u; j2 < 5u; j2++)
+                    t += X16RV2_SIMD_BYTE(m, j1 + 16u * j2)
+                       * kSimd512Alpha[(16u * i1 * j2) & 255u];
+                t = simd_red(simd_red(t));
+                v[bitfieldReverse(j1) >> 28] =
+                    simd_red(simd_red(t * kSimd512Alpha[(i1 * j1) & 255u]));
+            }
+            [[unroll]] for (uint st = 0u; st < 4u; st++) {
+                uint half_size = 1u << st;
+                [[unroll]] for (uint start = 0u; start < 16u; start += 2u * half_size) {
+                    [[unroll]] for (uint j = 0u; j < half_size; j++) {
+                        uint lo = start + j, hi = lo + half_size;
+                        int t = simd_red(simd_red(
+                            kSimd512Alpha[(16u * j * (8u >> st)) & 255u] * v[hi]));
+                        int u = v[lo];
+                        v[lo] = simd_red(u + t);
+                        v[hi] = simd_red(u - t);
+                    }
+                }
+            }
+            [[unroll]] for (uint i2 = 0u; i2 < 16u; i2++) {
+                int r = simd_red(v[i2]
+                                 + kSimd512Alpha[(255u * (i1 + 16u * i2)) & 255u]);
+                if (r < 0)
+                    r += 257;
+                if (r >= 257)
+                    r -= 257;
+                y[16u * h + i2] = r <= 128 ? r : r - 257;
+            }
+        }
+        [[unroll]] for (uint i2 = 0u; i2 < 16u; i2++)
+            W[(e >> 1) + 8u * i2] = ((uint(y[i2]) * 185u) & 0xffffu)
+                                  + ((uint(y[16u + i2]) * 185u) << 16);
+        [[unroll]] for (uint h = 0u; h < 2u; h++)
+            [[unroll]] for (uint i2 = 0u; i2 < 8u; i2++)
+                W[128u + e + h + 16u * i2] =
+                    ((uint(y[16u * h + i2]) * 233u) & 0xffffu)
+                  + ((uint(y[16u * h + i2 + 8u]) * 233u) << 16);
+    }
+}
+
+#undef X16RV2_SIMD_BYTE
+
+// The final block's message words for a 640-bit message, laid out as
+// kSimd512Final64W.
+const uint kX16rv2SimdFinal80W[256] = uint[256](
+    0xF5E2B9E7u, 0x08AC3A89u, 0xAE57D04Eu, 0xC6300E74u,
+    0xCBF80681u, 0xA5AB0D02u, 0x25942594u, 0x1E5A3E26u,
+    0x4E0CCE23u, 0xAB73D332u, 0xCA862594u, 0x2B5CF754u,
+    0x22B0213Eu, 0x4E0CE5FCu, 0x4D53E543u, 0x1ABD0000u,
+    0xB703A5ABu, 0x05C822B0u, 0x01723A89u, 0x039DC34Cu,
+    0x00B91A04u, 0xB36629EAu, 0x4B284BE1u, 0x022BBFAFu,
+    0xAE573124u, 0xE034A664u, 0xC85BF01Au, 0x17203CB4u,
+    0xFE8EC121u, 0x0E744F7Eu, 0xB5913A89u, 0xF754E48Au,
+    0xDF7B548Du, 0xD9B34844u, 0x02E4E6B5u, 0xE5FCBD84u,
+    0x2422AF10u, 0x478B0FE6u, 0x51A9E25Fu, 0xEC7D3A89u,
+    0xF5E2CCB1u, 0xA5ABA5ABu, 0x37A52085u, 0xF69B41C3u,
+    0xAD9EB9E7u, 0x3E26BCCBu, 0x14F5D788u, 0xE1A6E6B5u,
+    0xC405F3B7u, 0xDBDEE1A6u, 0x05C8FDD5u, 0x4B28D1C0u,
+    0xB7BCFA38u, 0x5771F80Du, 0xE0343633u, 0x07F315AEu,
+    0xFAF1EBC4u, 0x4B28BB59u, 0xF2450681u, 0x0B90050Fu,
+    0xB41FB9E7u, 0xD788C7A2u, 0x2E4007F3u, 0xC1214D53u,
+    0x1FCCAABAu, 0x2594B703u, 0xFC631892u, 0x194B41C3u,
+    0xDB255037u, 0xB7BCEF61u, 0xAD9E1CE8u, 0x12CAC4BEu,
+    0x3B420B90u, 0x23691DA1u, 0xF97F0172u, 0xB41F2D87u,
+    0x478B050Fu, 0xA7D6073Au, 0x1F13C914u, 0xF754E999u,
+    0x09654560u, 0xF69BC4BEu, 0x50F02EF9u, 0x3917F0D3u,
+    0x334FF8C6u, 0x599CF245u, 0xD9B3D9B3u, 0xE0EDC121u,
+    0x4844599Cu, 0xF97FDC97u, 0xFDD5C4BEu, 0xFBAA3BFBu,
+    0xFE8EE543u, 0x4BE1D55Du, 0xB41FB366u, 0xFD1C3F98u,
+    0x04561383u, 0xB41F43EEu, 0x0D02F8C6u, 0xF3B7FA38u,
+    0x4B284560u, 0x27BF37A5u, 0xD107F754u, 0x3E26B1F4u,
+    0x09653296u, 0x599C599Cu, 0xC7A2DEC2u, 0x08ACBD84u,
+    0x51A94560u, 0xC121427Cu, 0xEA5227BFu, 0x1DA11892u,
+    0x50F0CE23u, 0x1F1358E3u, 0x36EC0F2Du, 0xE827C293u,
+    0x00B93E26u, 0xF0D3AFC9u, 0x49B6C4BEu, 0x07F31ABDu,
+    0xB13B3124u, 0x53D42C15u, 0x34C1D9B3u, 0xD3EB07F3u,
+    0xDC97DE09u, 0xB13B194Bu, 0xB1F41A04u, 0xE48AFF47u,
+    0x1893E684u, 0x558EA989u, 0xF6E60831u, 0xF8B8065Fu,
+    0x5760A7B7u, 0x4615B902u, 0xF5140A03u, 0x9DB46163u,
+    0xC1333DE4u, 0x6FF38F24u, 0x131DEBFAu, 0xB2A34C74u,
+    0x4E46B0D1u, 0x9AF9641Eu, 0xB55E49B9u, 0x21ADDD6Au,
+    0x949A6A7Du, 0xA4135B04u, 0x1EF2E025u, 0x52D3AC44u,
+    0x65079A10u, 0xEB111406u, 0x2468DAAFu, 0xB55E49B9u,
+    0x5760A7B7u, 0xB55E49B9u, 0x3B29C3EEu, 0xECE31234u,
+    0xF6E60831u, 0xEEB51062u, 0xCFC32F54u, 0xB0D14E46u,
+    0x3DE4C133u, 0x3785C792u, 0xCFC32F54u, 0x0A03F514u,
+    0xD53929DEu, 0x1FDBDF3Cu, 0x20C4DE53u, 0xFF170000u,
+    0x3FB6BF61u, 0x70DC8E3Bu, 0xD62228F5u, 0xAC4452D3u,
+    0x5760A7B7u, 0x53BCAB5Bu, 0x320FCD08u, 0x1EF2E025u,
+    0x70DC8E3Bu, 0xD3672BB0u, 0xB55E49B9u, 0x4B8BB38Cu,
+    0xDE5320C4u, 0xCA4D34CAu, 0x9F865F91u, 0x5018AEFFu,
+    0x0E90F087u, 0x2551D9C6u, 0x01D2FD45u, 0x3957C5C0u,
+    0x065FF8B8u, 0x091AF5FDu, 0xBAD44443u, 0xE3C91B4Eu,
+    0x9CCB624Cu, 0x69949583u, 0x4271BCA6u, 0xC87B369Cu,
+    0xD3672BB0u, 0x9CCB624Cu, 0x9DB46163u, 0xDD6A21ADu,
+    0x5B04A413u, 0xF7CF0748u, 0xFD4501D2u, 0xFA8A048Du,
+    0xFE2E00E9u, 0x5F919F86u, 0xA06F5EA8u, 0xFC5C02BBu,
+    0x0576F9A1u, 0xA06F5EA8u, 0x1062EEB5u, 0xF0870E90u,
+    0x5EA8A06Fu, 0x320FCD08u, 0xC4D73A40u, 0x4E46B0D1u,
+    0x280CD70Bu, 0x2F54CFC3u, 0xFB7303A4u, 0x1FDBDF3Cu,
+    0xD1952D82u, 0xA4FC5A1Bu, 0x983E66D9u, 0x17AAE76Du,
+    0x4AA2B475u, 0x2C99D27Eu, 0xF7CF0748u, 0xA06F5EA8u,
+    0x5A1BA4FCu, 0x90F66E21u, 0x2723D7F4u, 0xF5140A03u,
+    0x0BD5F342u, 0x70DC8E3Bu, 0xB9024615u, 0x0AECF42Bu,
+    0x66D9983Eu, 0xB0D14E46u, 0xE4B21A65u, 0x2551D9C6u,
+    0x0BD5F342u, 0xF42B0AECu, 0x65F09927u, 0x47E7B730u,
+    0x409FBE78u, 0x70DC8E3Bu, 0xCFC32F54u, 0xD8DD263Au,
+    0x65F09927u, 0x2723D7F4u, 0x452CB9EBu, 0xE1F71D20u,
+    0x00E9FE2Eu, 0xECE31234u, 0x5CD6A241u, 0x0A03F514u);
+
+void x16rv2_simd_compress80(inout uint h[32], uint m[20])
+{
+    uint W[256];
+    x16rv2_simd_expand80(m, W);
+
+    uint s[32];
+    for (uint i = 0u; i < 32u; i++)
+        s[i] = i < 20u ? h[i] ^ m[i] : h[i];
+
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        [[unroll]] for (uint j = 0u; j < 8u; j++) {
+            uint sb = kSimd512Wsel[8u * i + j];
+            uint base = i < 2u ? 8u * sb
+                      : i == 2u ? 128u + 16u * (sb - 16u)
+                      : 129u + 16u * (sb - 24u);
+            uint stride = i < 2u ? 1u : 2u;
+            uint w[8];
+            for (uint k = 0u; k < 8u; k++)
+                w[k] = W[base + stride * k];
+            simd512_round_step(s, w, i, j);
+        }
+    }
+    simd512_feed_forward(h, s);
+}
+
+void x16rv2_simd_final80(inout uint h[32])
+{
+    uint s[32] = h;
+    s[0] ^= 640u;
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        [[unroll]] for (uint j = 0u; j < 8u; j++) {
+            uint w[8];
+            for (uint k = 0u; k < 8u; k++)
+                w[k] = kX16rv2SimdFinal80W[64u * i + 8u * j + k];
+            simd512_round_step(s, w, i, j);
+        }
+    }
+    simd512_feed_forward(h, s);
+}
+
 // SIMD-512: the message zero-filled to a block, then a block holding only the
 // bit count, under the final transform.
 void x16rv2_simd(uint w[20], out uint s[16])
 {
     uint h[32] = kSimd512Iv;
     if (kWords == 20u) {
-        uint m[32];
-        for (uint k = 0u; k < 32u; k++)
-            m[k] = k < 20u ? w[k] : 0u;
-        simd512_compress(h, m, false);
-        for (uint k = 0u; k < 32u; k++)
-            m[k] = 0u;
-        m[0] = kBits;
-        simd512_compress(h, m, true);
+        x16rv2_simd_compress80(h, w);
+        x16rv2_simd_final80(h);
     } else {
         uint m[16];
         for (uint k = 0u; k < 16u; k++)
@@ -554,6 +715,31 @@ void x16rv2_pair(uint index, bool two)
 #endif
 }
 
+// Whirlpool over 64 bytes takes four nonces bitsliced, from index on; those
+// past the batch hash a copy of the last and are not stored.
+void x16rv2_quad(uint index)
+{
+    uint m[64];
+    [[unroll]] for (uint h = 0u; h < 4u; h++) {
+        uint i = min(index + h, push.count - 1u);
+        [[unroll]] for (uint k = 0u; k < 16u; k++)
+            m[16u * h + k] = states[k * push.count + i];
+    }
+    uint d[64];
+    whirlpool512_x4_hash64(m, d);
+    uint n = min(push.count - index, 4u);
+    [[unroll]] for (uint k = 0u; k < 16u; k++) {
+        uint base = k * push.count + index;
+        states[base] = d[k];
+        if (n > 1u)
+            states[base + 1u] = d[16u + k];
+        if (n > 2u)
+            states[base + 2u] = d[32u + k];
+        if (n > 3u)
+            states[base + 3u] = d[48u + k];
+    }
+}
+
 void main()
 {
     // Only the tables this stage reads; every condition is a literal.
@@ -561,12 +747,20 @@ void main()
         aes_table_load(gl_LocalInvocationIndex, gl_WorkGroupSize.x);
     if (kStage == 12u)
         fugue512_table_load(gl_LocalInvocationIndex, gl_WorkGroupSize.x);
-    if (kStage == 14u)
+    if (kStage == 14u && kWords == 20u)
         whirlpool512_table_load(gl_LocalInvocationIndex, gl_WorkGroupSize.x);
     if (kStage == 4u || kStage == 6u || kStage == 15u)
         tiger192_table_load(gl_LocalInvocationIndex, gl_WorkGroupSize.x);
 
     uint first = gl_GlobalInvocationID.x * kNoncesPerInvocation;
+    if (kStage == 14u && kWords == 16u) {
+        for (uint k = 0u; k < kNoncesPerInvocation; k += 4u) {
+            if (first + k >= push.count)
+                return;
+            x16rv2_quad(first + k);
+        }
+        return;
+    }
     for (uint k = 0u; k < kNoncesPerInvocation; k += 2u) {
         uint index = first + k;
         if (index >= push.count)
